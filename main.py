@@ -11,6 +11,7 @@ from auth import is_authorized, init_operators_from_db
 from db import init_db, save_group, delete_group_from_db, DB_PATH
 from handlers.start import start
 from handlers import operator, usdt, accounting, broadcast, transfer
+from handlers.git_update import get_git_handlers
 
 # 按钮路由处理器
 async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -145,6 +146,10 @@ def main():
 
     # 1. 启动命令
     app.add_handler(CommandHandler("start", start))
+
+    # 2. 添加 Git 更新命令（管理员专用）
+    for handler in get_git_handlers():
+        app.add_handler(handler)
 
     # 2. Transfer 对话处理器
     transfer_conv_handler = ConversationHandler(
