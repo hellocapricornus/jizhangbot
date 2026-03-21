@@ -102,18 +102,33 @@ async def input_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
 
 # 自动保存群组信息（作为备份）
+# 修改 auto_save_group 函数
 async def auto_save_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat and update.effective_chat.type in ['group', 'supergroup']:
         chat_id = str(update.effective_chat.id)
         title = update.effective_chat.title
+
+        # 检查机器人是否还在群组中
+        try:
+            # 尝试获取机器人自己的成员信息
+            bot_member = await context.bot.get_chat_member(chat_id, context.bot.id)
+            if bot_member.status not in ['member', 'administrator']:
+                # 机器人不在群组中，不保存
+                print(f"[DEBUG] 机器人不在群组 {title} ({chat_id}) 中，跳过保存")
+                return
+        except Exception as e:
+            # 如果获取失败，说明可能已离开
+            print(f"[DEBUG] 无法获取群组 {chat_id} 的成员状态: {e}")
+            return
+
         print(f"[DEBUG] auto_save_group: 保存群组 {title} ({chat_id})")
         save_group(chat_id, title)
 
 # 监听机器人加入/离开群组的事件
+# 修改 on_bot_join_or_leave 函数
 async def on_bot_join_or_leave(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     专门处理机器人自己的成员状态变化。
-    不受隐私模式影响，不需要群里有人说话，拉入即触发。
     """
     my_chat_member = update.my_chat_member
     chat = my_chat_member.chat
@@ -131,6 +146,9 @@ async def on_bot_join_or_leave(update: Update, context: ContextTypes.DEFAULT_TYP
         print(f"👋 [系统事件] 机器人离开/被踢出群组：{chat_id}")
         delete_group_from_db(chat_id)
         print(f"✅ [系统事件] 群组已从数据库删除。")
+
+        # 等待一下，让 auto_save_group 不会重新保存
+        await asyncio.sleep(1)
 
 def main():
     # 初始化数据库和操作员
