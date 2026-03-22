@@ -900,7 +900,7 @@ async def handle_end_bill(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if result:
         await update.message.reply_text(
             f"✅ **账单已结束并保存！**\n\n{final_bill}\n\n"
-            f"💡 提示：费率已重置为0%，汇率已重置为1 CNY = 1 USDT\n"
+            f"💡 提示：费率已重置为0%，汇率已重置为1 = 1 USDT\n"
             f"可使用「设置手续费」和「设置汇率」重新配置",
             parse_mode='Markdown'
         )
@@ -995,12 +995,12 @@ async def handle_add_income(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         # 显示提示信息
         if is_correction:
             await update.message.reply_text(
-                f"✅ 已记录修正入款：-{abs(amount):.2f} CNY\n\n{message}",
+                f"✅ 已记录修正入款：-{abs(amount):.2f} \n\n{message}",
                 parse_mode='Markdown'
             )
         else:
             await update.message.reply_text(
-                f"✅ 已记录入款：{amount:.2f} CNY\n\n{message}",
+                f"✅ 已记录入款：{amount:.2f} \n\n{message}",
                 parse_mode='Markdown'
             )
     else:
