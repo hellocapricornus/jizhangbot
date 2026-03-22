@@ -1732,7 +1732,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     if not is_authorized(query.from_user.id):
-        await query.message.reply_text("❌ 此功能仅限管理员或操作员使用，如需使用请联系 @ChinaEdward")
+        await query.message.reply_text("❌ 此功能仅限管理员或操作员使用")
         return
 
     message = (
