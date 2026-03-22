@@ -2,13 +2,15 @@
 
 import subprocess
 import os
+import sys
+import time
 from telegram import Update
 from telegram.ext import ContextTypes, CommandHandler
 from config import OWNER_ID
 
 # 默认的远程仓库和分支
 DEFAULT_REMOTE = "origin"
-DEFAULT_BRANCH = "main"  # 如果你的默认分支是 master，改成 "master"
+DEFAULT_BRANCH = "master"  # 根据你的实际分支修改
 
 def get_git_root():
     """获取 git 仓库根目录"""
@@ -26,8 +28,39 @@ def get_git_root():
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def restart_bot():
+    """重启机器人"""
+    try:
+        # 获取当前进程ID
+        pid = os.getpid()
+        print(f"[重启] 正在重启机器人 (PID: {pid})...")
+        
+        # 使用 screen 重启
+        # 方法1：通过 screen 命令重启
+        script_path = os.path.join(get_git_root(), "restart.sh")
+        
+        # 创建重启脚本
+        with open(script_path, 'w') as f:
+            f.write(f"""#!/bin/bash
+# 等待当前进程结束
+sleep 2
+cd {get_git_root()}
+source venv/bin/activate
+python3 main.py
+""")
+        os.chmod(script_path, 0o755)
+        
+        # 启动新进程并退出当前进程
+        subprocess.Popen([script_path], start_new_session=True)
+        sys.exit(0)
+        
+    except Exception as e:
+        print(f"[重启] 重启失败: {e}")
+        return False
+
+
 async def git_pull(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """执行 git pull 更新代码"""
+    """执行 git pull 更新代码并自动重启"""
     user_id = update.effective_user.id
 
     # 只允许超级管理员执行
@@ -63,7 +96,6 @@ async def git_pull(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # 如果没有上游跟踪分支，需要先设置
         if tracking_result.returncode != 0:
-            # 尝试设置上游跟踪分支
             set_upstream = subprocess.run(
                 ['git', 'branch', '--set-upstream-to', f'{DEFAULT_REMOTE}/{current_branch}', current_branch],
                 cwd=git_root,
@@ -72,7 +104,6 @@ async def git_pull(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
             if set_upstream.returncode != 0:
-                # 如果设置失败，可能分支不存在于远程，尝试从 main/master 拉取
                 await status_msg.edit_text(
                     f"⚠️ 当前分支 `{current_branch}` 没有设置上游跟踪\n\n"
                     f"请手动执行以下命令：\n"
@@ -95,12 +126,19 @@ async def git_pull(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if "Already up to date" in output:
                 await status_msg.edit_text("✅ 代码已是最新，无需更新")
             else:
+                # 更新成功，准备重启
                 await status_msg.edit_text(
                     f"✅ 代码更新成功！\n\n"
                     f"```\n{output[:500]}\n```\n"
-                    f"⚠️ 请手动重启机器人以使更新生效",
+                    f"🔄 正在重启机器人...",
                     parse_mode='Markdown'
                 )
+                
+                # 延迟2秒，让消息发送出去
+                await asyncio.sleep(2)
+                
+                # 重启机器人
+                restart_bot()
         else:
             error = result.stderr.strip()
             await status_msg.edit_text(
@@ -126,7 +164,6 @@ async def git_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     git_root = get_git_root()
 
     try:
-        # 查看当前分支
         branch_result = subprocess.run(
             ['git', 'branch', '--show-current'],
             cwd=git_root,
@@ -135,7 +172,6 @@ async def git_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         current_branch = branch_result.stdout.strip()
 
-        # 查看远程仓库
         remote_result = subprocess.run(
             ['git', 'remote', '-v'],
             cwd=git_root,
@@ -144,7 +180,6 @@ async def git_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         remote_info = remote_result.stdout.strip().split('\n')[0] if remote_result.stdout else "未配置"
 
-        # 查看状态
         status_result = subprocess.run(
             ['git', 'status', '--short'],
             cwd=git_root,
@@ -153,7 +188,6 @@ async def git_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         status_output = status_result.stdout.strip()
 
-        # 查看是否有上游跟踪
         tracking_result = subprocess.run(
             ['git', 'rev-parse', '--abbrev-ref', f'{current_branch}@{{upstream}}'],
             cwd=git_root,
@@ -163,16 +197,7 @@ async def git_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         has_upstream = tracking_result.returncode == 0
         upstream_branch = tracking_result.stdout.strip() if has_upstream else "未设置"
 
-        # 检查远程更新
         subprocess.run(['git', 'fetch'], cwd=git_root, capture_output=True, text=True)
-
-        # 检查本地和远程的差异
-        ahead_behind = subprocess.run(
-            ['git', 'rev-list', '--count', f'{current_branch}..{upstream_branch}'] if has_upstream else ['git', 'rev-list', '--count'],
-            cwd=git_root,
-            capture_output=True,
-            text=True
-        )
 
         message = f"📊 **Git 状态**\n\n"
         message += f"🌿 当前分支：`{current_branch}`\n"
@@ -186,9 +211,7 @@ async def git_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             message += f"✅ 工作区干净，无本地修改\n\n"
 
-        # 检查是否有远程更新
         if has_upstream:
-            # 获取远程更新数量
             behind = subprocess.run(
                 ['git', 'rev-list', '--count', f'{upstream_branch}..{current_branch}'],
                 cwd=git_root,
@@ -234,7 +257,6 @@ async def git_branch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     git_root = get_git_root()
 
     try:
-        # 获取所有分支
         branch_result = subprocess.run(
             ['git', 'branch', '-a'],
             cwd=git_root,
@@ -243,18 +265,15 @@ async def git_branch(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         branches = branch_result.stdout.strip().split('\n')
-        current_branch = None
 
-        # 找出当前分支
         for i, b in enumerate(branches):
             if b.startswith('*'):
-                current_branch = b[1:].strip()
                 branches[i] = f"✅ `{b[1:].strip()}` (当前)"
             else:
                 branches[i] = f"   `{b.strip()}`"
 
         message = f"📊 **Git 分支列表**\n\n"
-        message += "\n".join(branches[:30])  # 最多显示30个
+        message += "\n".join(branches[:30])
 
         if len(branches) > 30:
             message += f"\n\n... 还有 {len(branches) - 30} 个分支未显示"
