@@ -59,6 +59,7 @@ class AccountingManager:
                 session_id TEXT NOT NULL,
                 user_id INTEGER NOT NULL,
                 username TEXT,
+                first_name TEXT,
                 record_type TEXT NOT NULL,
                 amount REAL NOT NULL,
                 amount_usdt REAL NOT NULL,
@@ -292,7 +293,7 @@ class AccountingManager:
             c = conn.cursor()
 
             c.execute("""
-                SELECT record_type, amount, amount_usdt, description, created_at, username
+                SELECT record_type, amount, amount_usdt, description, created_at, username, user_id
                 FROM accounting_records
                 WHERE group_id = ? AND session_id = ?
                 ORDER BY created_at ASC
@@ -308,14 +309,15 @@ class AccountingManager:
                     'amount_usdt': row[2],
                     'description': row[3],
                     'created_at': row[4],
-                    'username': row[5]
+                    'first_name': row[6],
+                    'user_id': row[7]
                 })
             return records
         except Exception as e:
             print(f"获取当前记录失败: {e}")
             return []
 
-    def add_record(self, group_id: str, user_id: int, username: str, 
+    def add_record(self, group_id: str, user_id: int, username: str, first_name: str, 
                    record_type: str, amount: float, description: str = "") -> bool:
         """添加记账记录"""
         try:
@@ -336,10 +338,10 @@ class AccountingManager:
             c = conn.cursor()
             c.execute("""
                 INSERT INTO accounting_records 
-                (group_id, session_id, user_id, username, record_type, amount, amount_usdt, 
+                (group_id, session_id, user_id, username, first_name, record_type, amount, amount_usdt, 
                  description, created_at, date)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (group_id, session['session_id'], user_id, username, record_type, amount, 
+            """, (group_id, session['session_id'], user_id, username or "", first_name or "",  record_type, amount, 
                   amount_usdt, description, now, date_str))
             conn.commit()
             conn.close()
@@ -496,7 +498,7 @@ class AccountingManager:
             conn = self._get_conn()
             c = conn.cursor()
             c.execute("""
-                SELECT record_type, amount, amount_usdt, description, created_at, username
+                SELECT record_type, amount, amount_usdt, description, created_at, username, user_id
                 FROM accounting_records
                 WHERE group_id = ? AND date = ?
                 ORDER BY created_at ASC
@@ -513,6 +515,8 @@ class AccountingManager:
                     'description': row[3],
                     'created_at': row[4],
                     'username': row[5]
+                    'first_name': row[6],
+                    'user_id': row[7]
                 })
             return records
         except Exception as e:
@@ -525,7 +529,7 @@ class AccountingManager:
             conn = self._get_conn()
             c = conn.cursor()
             c.execute("""
-                SELECT record_type, amount, amount_usdt, description, created_at, username, date
+                SELECT record_type, amount, amount_usdt, description, created_at, username, date, user_id
                 FROM accounting_records
                 WHERE group_id = ?
                 ORDER BY created_at ASC
@@ -542,7 +546,8 @@ class AccountingManager:
                     'description': row[3],
                     'created_at': row[4],
                     'username': row[5],
-                    'date': row[6]
+                    'first_name': row[6],
+                    'user_id': row[7]
                 })
             return records
         except Exception as e:
@@ -578,7 +583,7 @@ class AccountingManager:
             conn = self._get_conn()
             c = conn.cursor()
             c.execute("""
-                SELECT record_type, amount, amount_usdt, description, created_at, username
+                SELECT record_type, amount, amount_usdt, description, created_at, username, user_id
                 FROM accounting_records
                 WHERE group_id = ? AND date = ?
                 ORDER BY created_at ASC
@@ -595,6 +600,8 @@ class AccountingManager:
                     'description': row[3],
                     'created_at': row[4],
                     'username': row[5]
+                    'first_name': row[6],
+                    'user_id': row[7]
                 })
             return records
         except Exception as e:
@@ -803,13 +810,11 @@ def format_bill_message(stats: Dict, records: List[Dict], title: str = "当前�
             time_str = dt.strftime('%H:%M')
             amount = r['amount']
             amount_usdt = r['amount_usdt']
-            operator = r['username'] or "未知用户"
+            first_name = r['first_name'] or "用户"
+            user_id = r['user_id']
 
-            # 构建 @ 提及
-            if operator and operator != "未知用户":
-                mention = f"@{operator}"
-            else:
-                mention = operator
+            # 构建可点击的昵称链接
+            mention = f"[{first_name}](tg://user?id={user_id})"
 
             # 显示金额，如果是负数则显示减号，并添加操作者
             if amount < 0:
@@ -840,13 +845,10 @@ def format_bill_message(stats: Dict, records: List[Dict], title: str = "当前�
             dt = beijing_time(r['created_at'])
             time_str = dt.strftime('%H:%M')
             amount = r['amount']
-            operator = r['username'] or "未知用户"
+            first_name = r['first_name'] or "用户"
+            user_id = r['user_id']
 
-            # 构建 @ 提及
-            if operator and operator != "未知用户":
-                mention = f"@{operator}"
-            else:
-                mention = operator
+            mention = f"[{first_name}](tg://user?id={user_id})"
 
             # 显示金额，如果是负数则显示减号，并添加操作者
             if amount < 0:
@@ -1001,7 +1003,7 @@ async def handle_add_income(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         desc = "入款"
 
     # 添加记录时，amount 使用 record_amount（可以是负数）
-    if accounting_manager.add_record(group_id, user.id, username, 'income', record_amount, desc):
+    if accounting_manager.add_record(group_id, user.id, username, first_name, 'income', record_amount, desc):
         stats = accounting_manager.get_current_stats(group_id)
         records = accounting_manager.get_current_records(group_id)
         message = format_bill_message(stats, records, "当前账单")
@@ -1046,7 +1048,7 @@ async def handle_add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE,
         desc = "出款"
 
     # 添加记录时，amount 使用 record_amount（可以是负数）
-    if accounting_manager.add_record(group_id, user.id, username, 'expense', record_amount, desc):
+    if accounting_manager.add_record(group_id, user.id, username, first_name, 'income', record_amount, desc):
         stats = accounting_manager.get_current_stats(group_id)
         records = accounting_manager.get_current_records(group_id)
         message = format_bill_message(stats, records, "当前账单")
@@ -1353,6 +1355,11 @@ async def handle_date_selection(update: Update, context: ContextTypes.DEFAULT_TY
             time_str = dt.strftime('%H:%M')
             amount = r['amount']
             amount_usdt = r['amount_usdt']
+            user_id = r['user_id']
+            username = r['username']
+
+            display_name = username if username else f"用户{user_id}"
+            mention = f"[{display_name}](tg://user?id={user_id})"
 
             if amount < 0:
                 message += f"`{time_str} {amount:.2f} = {amount_usdt:.2f} USDT`\n"
@@ -1380,6 +1387,11 @@ async def handle_date_selection(update: Update, context: ContextTypes.DEFAULT_TY
             dt = beijing_time(r['created_at'])
             time_str = dt.strftime('%H:%M')
             amount = r['amount']
+            user_id = r['user_id']
+            username = r['username']
+
+            display_name = username if username else f"用户{user_id}"
+            mention = f"[{display_name}](tg://user?id={user_id})"
 
             if amount < 0:
                 message += f"`{time_str} {amount:.2f} USDT`\n"
