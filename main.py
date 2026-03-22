@@ -43,7 +43,7 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not is_authorized(user_id):
-        await query.message.reply_text("❌ 管理人/操作员才能使用，如需使用请联系 @HelloCapricornus")
+        await query.message.reply_text("❌ 管理人/操作员才能使用，如需使用请联系 @ChinaEdward")
         return ConversationHandler.END
 
     data = query.data
