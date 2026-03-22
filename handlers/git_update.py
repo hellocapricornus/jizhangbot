@@ -4,6 +4,7 @@ import subprocess
 import os
 import sys
 import time
+import asyncio
 from telegram import Update
 from telegram.ext import ContextTypes, CommandHandler
 from config import OWNER_ID
