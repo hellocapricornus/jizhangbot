@@ -322,7 +322,8 @@ class AccountingManager:
             session = self.get_or_create_session(group_id)
 
             if record_type == 'income':
-                amount_usdt = amount / session['exchange_rate']
+                raw_usdt = amount / session['exchange_rate']
+                amount_usdt = raw_usdt * (1 - session['fee_rate'] / 100)
             else:
                 amount_usdt = amount
 
