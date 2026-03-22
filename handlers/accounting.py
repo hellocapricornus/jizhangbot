@@ -309,6 +309,7 @@ class AccountingManager:
                     'amount_usdt': row[2],
                     'description': row[3],
                     'created_at': row[4],
+                    'username': row[5],
                     'first_name': row[6],
                     'user_id': row[7]
                 })
@@ -514,7 +515,7 @@ class AccountingManager:
                     'amount_usdt': row[2],
                     'description': row[3],
                     'created_at': row[4],
-                    'username': row[5]
+                    'username': row[5],
                     'first_name': row[6],
                     'user_id': row[7]
                 })
@@ -547,7 +548,8 @@ class AccountingManager:
                     'created_at': row[4],
                     'username': row[5],
                     'first_name': row[6],
-                    'user_id': row[7]
+                    'date': row[7],
+                    'user_id': row[8]
                 })
             return records
         except Exception as e:
@@ -599,7 +601,7 @@ class AccountingManager:
                     'amount_usdt': row[2],
                     'description': row[3],
                     'created_at': row[4],
-                    'username': row[5]
+                    'username': row[5],
                     'first_name': row[6],
                     'user_id': row[7]
                 })
@@ -992,7 +994,8 @@ async def handle_add_income(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         return
 
     group_id = str(chat.id)
-    username = user.username or user.first_name or str(user.id)
+    username = user.username or ""
+    first_name = user.first_name or ""  # 添加这行
 
     # 如果是修正入款，金额为负数
     if is_correction:
@@ -1037,7 +1040,8 @@ async def handle_add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE,
         return
 
     group_id = str(chat.id)
-    username = user.username or user.first_name or str(user.id)
+    username = user.username or ""
+    first_name = user.first_name or ""  # 添加这行
 
     # 如果是修正出款，金额为负数
     if is_correction:
