@@ -803,12 +803,19 @@ def format_bill_message(stats: Dict, records: List[Dict], title: str = "当前�
             time_str = dt.strftime('%H:%M')
             amount = r['amount']
             amount_usdt = r['amount_usdt']
+            operator = r['username'] or "未知用户"
 
-            # 显示金额，如果是负数则显示减号
-            if amount < 0:
-                message += f"`{time_str} {amount:.2f} = {amount_usdt:.2f} USDT`\n"
+            # 构建 @ 提及
+            if operator and operator != "未知用户":
+                mention = f"@{operator}"
             else:
-                message += f"`{time_str} +{amount:.2f} = {amount_usdt:.2f} USDT`\n"
+                mention = operator
+
+            # 显示金额，如果是负数则显示减号，并添加操作者
+            if amount < 0:
+                message += f"`{time_str} {amount:.2f} = {amount_usdt:.2f} USDT` {mention}\n"
+            else:
+                message += f"`{time_str} +{amount:.2f} = {amount_usdt:.2f} USDT` {mention}\n"
 
         if total_income_count > 8:
             message += f"`... 还有 {total_income_count - 8} 条记录`\n"
@@ -833,12 +840,19 @@ def format_bill_message(stats: Dict, records: List[Dict], title: str = "当前�
             dt = beijing_time(r['created_at'])
             time_str = dt.strftime('%H:%M')
             amount = r['amount']
+            operator = r['username'] or "未知用户"
 
-            # 显示金额，如果是负数则显示减号
-            if amount < 0:
-                message += f"`{time_str} {amount:.2f} USDT`\n"
+            # 构建 @ 提及
+            if operator and operator != "未知用户":
+                mention = f"@{operator}"
             else:
-                message += f"`{time_str} +{amount:.2f} USDT`\n"
+                mention = operator
+
+            # 显示金额，如果是负数则显示减号，并添加操作者
+            if amount < 0:
+                message += f"`{time_str} {amount:.2f} USDT` {mention}\n"
+            else:
+                message += f"`{time_str} +{amount:.2f} USDT` {mention}\n"
 
         if total_expense_count > 8:
             message += f"`... 还有 {total_expense_count - 8} 条记录`\n"
