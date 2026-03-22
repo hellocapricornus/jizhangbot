@@ -1,5 +1,4 @@
 # main.py - 添加调试信息的完整版本
-import asyncio  # 添加这行
 from telegram import Update
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
