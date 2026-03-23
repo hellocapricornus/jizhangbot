@@ -1,4 +1,6 @@
-# main.py - 添加调试信息的完整版本
+# main.py - 修复重复导入和添加缺失的导入
+
+import asyncio
 from telegram import Update
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
@@ -11,6 +13,15 @@ from db import init_db, save_group, delete_group_from_db, DB_PATH
 from handlers.start import start
 from handlers import operator, usdt, accounting, broadcast, transfer
 from handlers.git_update import get_git_handlers
+# 合并重复的导入
+from handlers.group_manager import (
+    group_manager_menu, show_stats, list_categories, 
+    add_category_start, delete_category_start, 
+    delete_category_confirm, set_group_category_start,
+    select_group_for_category, set_group_category,
+    handle_text_input
+)
+from handlers.menu import get_main_menu
 
 # 按钮路由处理器
 async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -18,75 +29,199 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     await query.answer()
 
-    # 先处理记账模块的日期选择
+    print(f"[DEBUG] button_router 收到: {query.data}")
+
+    # ========== 处理群组管理菜单 ==========
+    if query.data == "group_manager":
+        await group_manager_menu(update, context)
+        return
+
+    # ========== 处理群组管理的子菜单 ==========
+    if query.data == "gm_stats":
+        await show_stats(update, context)
+        return
+
+    if query.data == "gm_list_cats":
+        await list_categories(update, context)
+        return
+
+    if query.data == "gm_add_cat":
+        await add_category_start(update, context)
+        return
+
+    if query.data == "gm_del_cat":
+        await delete_category_start(update, context)
+        return
+
+    if query.data.startswith("del_cat_"):
+        await delete_category_confirm(update, context)
+        return
+
+    if query.data == "gm_set_cat":
+        await set_group_category_start(update, context)
+        return
+
+    if query.data.startswith("sel_group_"):
+        await select_group_for_category(update, context)
+        return
+
+    if query.data.startswith("set_cat_"):
+        await set_group_category(update, context)
+        return
+
+    # ========== 处理返回主菜单 ==========
+    if query.data == "main_menu":
+        await query.message.edit_text(
+            "请选择功能：",
+            reply_markup=get_main_menu()
+        )
+        return
+
+    # 在 button_router 函数中，添加记账模块的按钮处理
+    # ========== 处理记账模块按钮 ==========
+    if query.data == "acct_current":
+        from handlers.accounting import handle_current_bill
+        class FakeMessage:
+            def __init__(self, chat_id, user_id):
+                self.chat = type('obj', (object,), {'id': chat_id, 'type': 'group'})()
+                self.from_user = type('obj', (object,), {'id': user_id})()
+                self.text = "当前账单"
+        fake_msg = FakeMessage(query.message.chat.id, query.from_user.id)
+        update.message = fake_msg
+        await handle_current_bill(update, context)
+        return
+
+    if query.data == "acct_today":
+        from handlers.accounting import handle_today_stats
+        class FakeMessage:
+            def __init__(self, chat_id, user_id):
+                self.chat = type('obj', (object,), {'id': chat_id, 'type': 'group'})()
+                self.from_user = type('obj', (object,), {'id': user_id})()
+                self.text = "今日总"
+        fake_msg = FakeMessage(query.message.chat.id, query.from_user.id)
+        update.message = fake_msg
+        await handle_today_stats(update, context)
+        return
+
+    if query.data == "acct_total":
+        from handlers.accounting import handle_total_stats
+        class FakeMessage:
+            def __init__(self, chat_id, user_id):
+                self.chat = type('obj', (object,), {'id': chat_id, 'type': 'group'})()
+                self.from_user = type('obj', (object,), {'id': user_id})()
+                self.text = "总"
+        fake_msg = FakeMessage(query.message.chat.id, query.from_user.id)
+        update.message = fake_msg
+        await handle_total_stats(update, context)
+        return
+
+    if query.data == "acct_query":
+        from handlers.accounting import handle_query_bill
+        class FakeMessage:
+            def __init__(self, chat_id, user_id):
+                self.chat = type('obj', (object,), {'id': chat_id, 'type': 'group'})()
+                self.from_user = type('obj', (object,), {'id': user_id})()
+                self.text = "查询账单"
+        fake_msg = FakeMessage(query.message.chat.id, query.from_user.id)
+        update.message = fake_msg
+        await handle_query_bill(update, context)
+        return
+
+    if query.data == "acct_clear":
+        from handlers.accounting import handle_clear_bill
+        class FakeMessage:
+            def __init__(self, chat_id, user_id):
+                self.chat = type('obj', (object,), {'id': chat_id, 'type': 'group'})()
+                self.from_user = type('obj', (object,), {'id': user_id})()
+                self.text = "清理账单"
+        fake_msg = FakeMessage(query.message.chat.id, query.from_user.id)
+        update.message = fake_msg
+        await handle_clear_bill(update, context)
+        return
+
+    if query.data == "acct_clear_all":
+        from handlers.accounting import handle_clear_all_bill
+        class FakeMessage:
+            def __init__(self, chat_id, user_id):
+                self.chat = type('obj', (object,), {'id': chat_id, 'type': 'group'})()
+                self.from_user = type('obj', (object,), {'id': user_id})()
+                self.text = "清理总账单"
+        fake_msg = FakeMessage(query.message.chat.id, query.from_user.id)
+        update.message = fake_msg
+        await handle_clear_all_bill(update, context)
+        return
+
+    if query.data == "acct_help":
+        from handlers.accounting import handle
+        await handle(update, context)
+        return
+
+    # ========== 处理记账模块的日期选择和确认按钮 ==========
     if query.data.startswith("acct_date_"):
         from handlers.accounting import handle_date_selection
         await handle_date_selection(update, context)
         return
 
-    # 处理清空确认
-    if query.data == "acct_clear_confirm" or query.data == "acct_clear_cancel":
-        from handlers.accounting import handle_clear_confirm, handle_clear_cancel
-        if query.data == "acct_clear_confirm":
-            await handle_clear_confirm(update, context)
-        else:
-            await handle_clear_cancel(update, context)
+    if query.data == "acct_cancel":
+        await query.message.edit_text("✅ 已取消查询")
         return
 
-    # 在 button_router 函数中添加
-    if query.data == "clear_current_confirm" or query.data == "clear_current_cancel":
-        from handlers.accounting import handle_clear_current_confirm, handle_clear_current_cancel
-        if query.data == "clear_current_confirm":
-            await handle_clear_current_confirm(update, context)
-        else:
-            await handle_clear_current_cancel(update, context)
+    # ========== 处理清理账单确认按钮 ==========
+    if query.data == "clear_current_confirm":
+        from handlers.accounting import handle_clear_current_confirm
+        await handle_clear_current_confirm(update, context)
         return
 
-    # 处理清空所有账单确认（新增）
-    if query.data == "clear_all_confirm" or query.data == "clear_all_cancel":
-        from handlers.accounting import handle_clear_all_confirm, handle_clear_all_cancel
-        if query.data == "clear_all_confirm":
-            await handle_clear_all_confirm(update, context)
-        else:
-            await handle_clear_all_cancel(update, context)
+    if query.data == "clear_current_cancel":
+        from handlers.accounting import handle_clear_current_cancel
+        await handle_clear_current_cancel(update, context)
         return
 
+    if query.data == "clear_all_confirm":
+        from handlers.accounting import handle_clear_all_confirm
+        await handle_clear_all_confirm(update, context)
+        return
+
+    if query.data == "clear_all_cancel":
+        from handlers.accounting import handle_clear_all_cancel
+        await handle_clear_all_cancel(update, context)
+        return
+        
+    # ========== 权限检查 ==========
     if not is_authorized(user_id):
         await query.message.reply_text("❌ 管理人/操作员才能使用，如需使用请联系 @ChinaEdward")
-        return ConversationHandler.END
+        return
 
     data = query.data
 
-    if data == "func_broadcast" or data == "broadcast" or data == "bc_start_real":
-        print("⏩ [Router] 跳过广播按钮，交给 Broadcast ConversationHandler 处理...")
+    if data in ["func_broadcast", "broadcast", "bc_start_real"]:
         return None
 
-    if data == "operator": 
+    if data == "operator":
         context.user_data["active_module"] = "operator"
         await operator.handle(update, context)
-        return ConversationHandler.END
+        return
 
     if data.startswith("op_"):
         context.user_data["active_module"] = "operator"
         await operator.handle_buttons(update, context)
-        return ConversationHandler.END
+        return
 
     if data == "usdt":
         context.user_data["active_module"] = "usdt"
         await usdt.handle(update, context)
-        return ConversationHandler.END
+        return
 
     if data == "transfer":
         await transfer.show_transfer_menu(update, context)
-        return ConversationHandler.END
+        return
 
     if data == "accounting":
         context.user_data["active_module"] = "accounting"
         await accounting.handle(update, context)
-        return ConversationHandler.END
+        return
 
     print(f"Unhandled callback data: {data}")
-    return ConversationHandler.END
 
 # 输入路由处理器（仅处理私聊）
 async def input_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -96,6 +231,15 @@ async def input_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 只在私聊中处理输入路由
     if chat.type != 'private':
+        return
+
+    # 先检查是否有群组管理的状态
+    user_id = update.effective_user.id
+    from handlers.group_manager import user_states
+    if user_id in user_states:
+        print(f"[DEBUG] 检测到群组管理状态，交给 handle_text_input")
+        from handlers.group_manager import handle_text_input
+        await handle_text_input(update, context)
         return
 
     module = context.user_data.get("active_module")
@@ -110,7 +254,6 @@ async def input_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
 
 # 自动保存群组信息（作为备份）
-# 修改 auto_save_group 函数
 async def auto_save_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat and update.effective_chat.type in ['group', 'supergroup']:
         chat_id = str(update.effective_chat.id)
@@ -118,22 +261,26 @@ async def auto_save_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # 检查机器人是否还在群组中
         try:
-            # 尝试获取机器人自己的成员信息
             bot_member = await context.bot.get_chat_member(chat_id, context.bot.id)
             if bot_member.status not in ['member', 'administrator']:
-                # 机器人不在群组中，不保存
                 print(f"[DEBUG] 机器人不在群组 {title} ({chat_id}) 中，跳过保存")
                 return
         except Exception as e:
-            # 如果获取失败，说明可能已离开
             print(f"[DEBUG] 无法获取群组 {chat_id} 的成员状态: {e}")
             return
 
         print(f"[DEBUG] auto_save_group: 保存群组 {title} ({chat_id})")
-        save_group(chat_id, title)
+
+        # 获取现有群组的分类（如果有）
+        from db import get_all_groups_from_db
+        existing_groups = get_all_groups_from_db()
+        existing = next((g for g in existing_groups if g['id'] == chat_id), None)
+        category = existing['category'] if existing else '未分类'
+
+        # 保存时保留原有分类
+        save_group(chat_id, title, category)
 
 # 监听机器人加入/离开群组的事件
-# 修改 on_bot_join_or_leave 函数
 async def on_bot_join_or_leave(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     专门处理机器人自己的成员状态变化。
@@ -147,7 +294,7 @@ async def on_bot_join_or_leave(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if new_status in ['member', 'administrator']:
         print(f"🎉 [系统事件] 机器人加入群组：{title} ({chat_id})")
-        save_group(chat_id, title)
+        save_group(chat_id, title, '未分类')  # 新群组默认分类为"未分类"
         print(f"✅ [系统事件] 群组已自动存入数据库。")
 
     elif new_status in ['left', 'kicked', 'banned']:
@@ -177,7 +324,7 @@ def main():
     for handler in get_git_handlers():
         app.add_handler(handler)
 
-    # 2. Transfer 对话处理器
+    # 3. Transfer 对话处理器
     transfer_conv_handler = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(transfer.start_transfer_query, pattern="^trans_direct$"),
@@ -197,51 +344,53 @@ def main():
     )
     app.add_handler(transfer_conv_handler)
 
-    # 3. Broadcast 对话处理器
+    # 4. Broadcast 对话处理器
     for handler in broadcast.get_handlers():
         app.add_handler(handler)
 
-    # 4. USDT 分页按钮
+    # 5. USDT 分页按钮
     app.add_handler(CallbackQueryHandler(usdt.handle_buttons, pattern="^usdt_"))
 
-    # 5. 通用按钮路由
+    # 6. 通用按钮路由（放在最后，处理其他所有未被处理的消息）
     app.add_handler(CallbackQueryHandler(button_router))
 
-    # 6. 【重要】添加一个全局的消息处理器来调试
+    # 7. 【重要】添加一个全局的消息处理器来调试
     async def debug_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """调试用的消息处理器，显示所有收到的消息"""
         if update.message and update.message.text:
             chat = update.effective_chat
             print(f"[DEBUG] 收到消息 - 聊天类型: {chat.type}, 聊天ID: {chat.id}, 文本: {update.message.text[:50]}")
-        return None  # 返回None让其他handler继续处理
+        return None
 
     # 添加调试处理器（最高优先级）
     app.add_handler(MessageHandler(filters.ALL, debug_message_handler), group=0)
 
-    # 7. 【重要】群组消息处理器（处理记账指令和计算器）
-    # 设置 group=1 优先级，确保在input_router之前执行
+    # 8. 【重要】群组消息处理器（处理记账指令和计算器）
     app.add_handler(MessageHandler(
         filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND,
         handle_group_message
     ), group=1)
 
-    # 8. 私聊文本输入路由（用于USDT、操作员管理等模块）
+    # 9. 私聊文本输入路由（用于USDT、操作员管理等模块）
     app.add_handler(MessageHandler(
         filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND,
         input_router
     ), group=1)
 
-    # 9. 全局群组消息捕获（备份用，用于保存群组信息）
+    # 10. 全局群组消息捕获（备份用，用于保存群组信息）
     app.add_handler(MessageHandler(
         filters.ChatType.GROUPS & ~filters.COMMAND, 
         auto_save_group
     ), group=2)
 
-    # 10. 注册机器人成员状态监听器
+    # 11. 注册机器人成员状态监听器
     app.add_handler(ChatMemberHandler(on_bot_join_or_leave, ChatMemberHandler.MY_CHAT_MEMBER))
 
-    # 11. 添加记账对话处理器（处理日期选择和清空确认）
-    #app.add_handler(get_conversation_handler())
+    # 12. 群组管理文本输入处理（用于创建分类时的输入）
+    app.add_handler(MessageHandler(
+        filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND,
+        handle_text_input
+    ), group=1)
 
     print("=" * 50)
     print("🤖 机器人启动成功...")
@@ -252,6 +401,7 @@ def main():
     print("  ✅ Accounting - 群组记账功能")
     print("  ✅ Broadcast - 群发消息")
     print("  ✅ Transfer - 转账查询和分析")
+    print("  ✅ Group Manager - 群组分类管理")
     print("=" * 50)
     print("📌 功能提示：")
     print("  • 机器人加入群组时会自动记录")
@@ -268,12 +418,12 @@ def main():
     print("    - 查询账单：按日期查询")
     print("    - 清理账单：清空所有记录")
     print("  • 计算器功能：群内发送如 100+200 即可计算")
+    print("  • 群组管理：可创建分类，按分类筛选群组进行群发")
     print("=" * 50)
 
     # 启动定时清理任务
     try:
         from apscheduler.schedulers.asyncio import AsyncIOScheduler
-        import asyncio
 
         async def cleanup_wrapper():
             """包装清理函数为异步"""
