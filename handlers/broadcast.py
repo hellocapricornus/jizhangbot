@@ -7,7 +7,7 @@ from telegram.ext import (
     ContextTypes, filters, CommandHandler
 )
 from auth import is_authorized
-from db import get_all_groups_from_db, delete_group_from_db
+from db import get_all_groups_from_db, delete_group_from_db, get_all_categories
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -21,36 +21,25 @@ logger = logging.getLogger(__name__)
 
 # --- 核心逻辑：同步与清理 ---
 async def sync_and_clean_groups(context: ContextTypes.DEFAULT_TYPE):
-    """
-    异步版本：验证群组有效性并清理无效群组
-    """
-    # 注意：这里需要异步获取数据库会话吗？如果你的 db.py 是同步的 sqlite3，
-    # 在 async 函数中直接调用同步 IO 操作（sqlite3）会阻塞事件循环。
-    # 但对于轻量级操作通常可以接受。如果追求完美，需要使用 aiosqlite 或 run_in_executor。
-    # 这里为了简化，保持同步 DB 调用，但将 bot API 调用改为 await。
+    """同步并清理无效群组"""
+    db_groups = get_all_groups_from_db()  # 使用正确的函数名
 
-    from db import get_all_groups_from_db, delete_group_from_db # 确保在函数内或顶部导入
-
-    db_groups = get_all_groups_from_db()
     valid_groups = []
-
     logger.info(f"开始同步群组，数据库记录数：{len(db_groups)}")
 
     for g in db_groups:
         gid = g['id']
         try:
-            # 【修改点 2】必须加上 await
             chat = await context.bot.get_chat(gid)
-
-            # 更新群名（防止群名变更）
             if chat.title != g['title']:
                 g['title'] = chat.title
-                # 如果需要持久化更新名字，这里可以调用 db 更新函数
-
+                # 如果群名变更，保存
+                from db import save_group
+                save_group(gid, chat.title, g.get('category', '未分类'))  # 保留原有分类
             valid_groups.append(g)
         except Exception as e:
-            # 获取失败，说明机器人不在群里了
-            logger.warning(f"检测到已退出群组，正在删除：{gid} ({g['title']}) - Error: {e}")
+            logger.warning(f"检测到已退出群组，正在删除：{gid} ({g['title']}) - {e}")
+            from db import delete_group_from_db
             delete_group_from_db(gid)
 
     logger.info(f"同步完成。有效群组：{len(valid_groups)}")
@@ -70,62 +59,85 @@ async def start_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.answer("正在检测群组状态...")
 
-    # 【修改点 4】调用时必须 await
     groups = await sync_and_clean_groups(context)
 
     if not groups:
-        # ... (保持不变) ...
-        await query.message.reply_text("⚠️ **未找到任何有效群组**...") # 简化显示
+        await query.message.reply_text("⚠️ **未找到任何有效群组**\n\n请确保机器人已添加到群组中。")
         return ConversationHandler.END
 
     context.user_data["bc_all_groups"] = groups
     context.user_data["bc_selected_ids"] = []
+    context.user_data.pop("bc_selected_category", None)  # 清除分类筛选
 
     await show_group_selection(update, context)
     return BC_SELECT_GROUPS
 
 async def show_group_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """渲染简化的群组选择界面"""
+    """渲染群组选择界面（支持分类筛选）"""
     groups = context.user_data.get("bc_all_groups", [])
     selected_ids = context.user_data.get("bc_selected_ids", [])
+    selected_category = context.user_data.get("bc_selected_category", None)
+
+    # 如果选择了分类，筛选群组
+    if selected_category and selected_category != "所有群组":
+        groups = [g for g in groups if g.get('category', '未分类') == selected_category]
 
     total_count = len(groups)
-    selected_count = len(selected_ids)
+    selected_count = len([g for g in groups if g['id'] in selected_ids])
 
     text = f"📢 **群发任务设置**\n\n"
-    text += f"📊 在线群组：**{total_count}** 个\n"
+    text += f"📊 当前显示：**{total_count}** 个群\n"
+    if selected_category and selected_category != "所有群组":
+        text += f"🏷️ 分类筛选：**{selected_category}**\n"
     text += f"✅ 已勾选：**{selected_count}** 个\n\n"
     text += "👇 **点击群名勾选/取消** (支持多选)："
 
     keyboard = []
 
-    # 限制显示数量以防消息过长，如果超过 50 个建议强制分页，这里暂按全量显示（Telegram 限制约 100 个按钮）
-    # 如果群太多，可以加一个简单的分页逻辑，这里为了简化先展示前 40 个，并提示
+    # 添加分类筛选按钮
+    categories = get_all_categories()
+    if categories:
+        cat_row = []
+        # 添加"所有群组"按钮
+        cat_row.append(InlineKeyboardButton("🌍 所有群组", callback_data="bc_filter_cat_all"))
+
+        for cat in categories:
+            cat_name = cat['name']
+            is_active = (selected_category == cat_name)
+            icon = "✅" if is_active else "📁"
+            cat_row.append(InlineKeyboardButton(f"{icon} {cat_name[:10]}", callback_data=f"bc_filter_cat_{cat_name}"))
+
+        # 分两行显示（如果按钮太多）
+        if len(cat_row) > 4:
+            keyboard.append(cat_row[:4])
+            keyboard.append(cat_row[4:])
+        else:
+            keyboard.append(cat_row)
+
+    # 显示群组列表
     display_limit = 40
     display_groups = groups[:display_limit]
 
     if len(groups) > display_limit:
-        text += f"\n_(仅显示前 {display_limit} 个，建议使用'全选'功能)_ "
+        text += f"\n_(仅显示前 {display_limit} 个，建议使用全选或筛选)_"
 
     for g in display_groups:
         gid = g["id"]
         title = g["title"]
+        category = g.get('category', '未分类')
         is_selected = gid in selected_ids
         icon = "✅" if is_selected else "⬜"
-        # 截断长标题
-        safe_title = (title[:25] + "...") if len(title) > 25 else title
+        safe_title = (title[:20] + "...") if len(title) > 20 else title
         keyboard.append([
-            InlineKeyboardButton(f"{icon} {safe_title}", callback_data=f"bc_toggle_{gid}")
+            InlineKeyboardButton(f"{icon} [{category}] {safe_title}", callback_data=f"bc_toggle_{gid}")
         ])
 
-    # --- 核心需求：底部按钮 ---
-    # 1. 全选/清空辅助
+    # 底部按钮
     nav_row = [
-        InlineKeyboardButton("✅ 全选", callback_data="bc_select_all"),
+        InlineKeyboardButton("✅ 全选当前", callback_data="bc_select_all"),
         InlineKeyboardButton("🚫 清空", callback_data="bc_deselect_all")
     ]
 
-    # 2. 发送模式按钮
     send_row = [
         InlineKeyboardButton("🚀 全部发送", callback_data="bc_send_all"),
         InlineKeyboardButton("📤 发送选中", callback_data="bc_send_selected")
@@ -147,33 +159,59 @@ async def show_group_selection(update: Update, context: ContextTypes.DEFAULT_TYP
     except Exception as e:
         logger.warning(f"编辑消息失败：{e}")
 
-async def bc_toggle_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """切换单个群组"""
+async def bc_filter_by_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """按分类筛选"""
     query = update.callback_query
     await query.answer()
-    gid = query.data.replace("bc_toggle_", "")
-    selected = context.user_data.get("bc_selected_ids", [])
 
-    if gid in selected:
-        selected.remove(gid)
+    category = query.data.replace("bc_filter_cat_", "")
+
+    if category == "all":
+        context.user_data.pop("bc_selected_category", None)
     else:
-        selected.append(gid)
+        context.user_data["bc_selected_category"] = category
 
-    context.user_data["bc_selected_ids"] = selected
+    # 清空当前选中
+    context.user_data["bc_selected_ids"] = []
+
+    await show_group_selection(update, context)
+    return BC_SELECT_GROUPS
+
+async def bc_toggle_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """切换单个群组的选择状态"""
+    query = update.callback_query
+    await query.answer()
+
+    gid = query.data.replace("bc_toggle_", "")
+    selected_ids = context.user_data.get("bc_selected_ids", [])
+
+    if gid in selected_ids:
+        selected_ids.remove(gid)
+    else:
+        selected_ids.append(gid)
+
+    context.user_data["bc_selected_ids"] = selected_ids
     await show_group_selection(update, context)
     return BC_SELECT_GROUPS
 
 async def bc_select_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """全选"""
+    """全选当前显示的群组"""
     query = update.callback_query
     await query.answer("已全选")
+
     groups = context.user_data.get("bc_all_groups", [])
+    selected_category = context.user_data.get("bc_selected_category", None)
+
+    # 只全选当前筛选条件下的群组
+    if selected_category and selected_category != "所有群组":
+        groups = [g for g in groups if g.get('category', '未分类') == selected_category]
+
     context.user_data["bc_selected_ids"] = [g["id"] for g in groups]
     await show_group_selection(update, context)
     return BC_SELECT_GROUPS
 
 async def bc_deselect_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """清空"""
+    """清空所有选中"""
     query = update.callback_query
     await query.answer("已清空")
     context.user_data["bc_selected_ids"] = []
@@ -190,6 +228,12 @@ async def bc_prepare_send(update: Update, context: ContextTypes.DEFAULT_TYPE, mo
     await query.answer()
 
     all_groups = context.user_data.get("bc_all_groups", [])
+    selected_category = context.user_data.get("bc_selected_category", None)
+
+    # 如果选择了分类，只考虑该分类下的群组
+    if selected_category and selected_category != "所有群组":
+        all_groups = [g for g in all_groups if g.get('category', '未分类') == selected_category]
+
     current_selected = context.user_data.get("bc_selected_ids", [])
 
     target_ids = []
@@ -219,10 +263,173 @@ async def bc_prepare_send(update: Update, context: ContextTypes.DEFAULT_TYPE, mo
     return BC_INPUT_MESSAGE
 
 async def bc_send_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """发送给所有群组（支持分批提示）"""
+    query = update.callback_query
+    await query.answer()
+
+    all_groups = context.user_data.get("bc_all_groups", [])
+    selected_category = context.user_data.get("bc_selected_category", None)
+
+    # 如果选择了分类，只统计该分类下的群组
+    if selected_category and selected_category != "所有群组":
+        all_groups = [g for g in all_groups if g.get('category', '未分类') == selected_category]
+
+    total = len(all_groups)
+
+    if total > 200:
+        # 超过200个群，建议分批
+        keyboard = [
+            [InlineKeyboardButton("📦 分批发送 (每批200个)", callback_data="bc_batch_200")],
+            [InlineKeyboardButton("🚀 全部发送 (耗时较长)", callback_data="bc_send_all_force")],
+            [InlineKeyboardButton("❌ 取消", callback_data="bc_cancel")]
+        ]
+        await query.message.reply_text(
+            f"⚠️ **提示：即将向 {total} 个群发送消息**\n\n"
+            f"全部发送预计需要 {total * 2 / 60:.0f} 分钟\n"
+            f"建议分批发送，避免超时",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+        return
+
+    return await bc_prepare_send(update, context, "all")
+
+async def bc_send_all_force(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """强制全部发送（不分批）"""
+    query = update.callback_query
+    await query.answer()
     return await bc_prepare_send(update, context, "all")
 
 async def bc_send_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """发送给选中的群组"""
     return await bc_prepare_send(update, context, "selected")
+
+async def bc_batch_send_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """开始分批发送"""
+    query = update.callback_query
+    await query.answer()
+
+    all_groups = context.user_data.get("bc_all_groups", [])
+    selected_category = context.user_data.get("bc_selected_category", None)
+
+    # 如果选择了分类，只发送该分类下的群组
+    if selected_category and selected_category != "所有群组":
+        all_groups = [g for g in all_groups if g.get('category', '未分类') == selected_category]
+
+    batch_size = 200
+    batches = [all_groups[i:i+batch_size] for i in range(0, len(all_groups), batch_size)]
+
+    context.user_data["bc_batches"] = batches
+    context.user_data["bc_current_batch"] = 0
+    context.user_data["bc_batch_results"] = {"success": 0, "failed": 0, "current": 0}
+
+    await query.message.reply_text(
+        f"📦 将分 {len(batches)} 批发送\n"
+        f"每批最多 {batch_size} 个群，批次间隔5秒\n\n"
+        f"总群组数：{len(all_groups)} 个\n\n"
+        f"开始发送第一批？",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("▶️ 开始发送", callback_data="bc_start_batch")
+        ]])
+    )
+    return BC_SELECT_GROUPS
+
+async def bc_execute_batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """执行分批发送"""
+    query = update.callback_query
+    await query.answer("开始发送...")
+
+    batches = context.user_data.get("bc_batches", [])
+    current_batch = context.user_data.get("bc_current_batch", 0)
+    batch_results = context.user_data.get("bc_batch_results", {"success": 0, "failed": 0, "current": 0})
+    message_text = context.user_data.get("bc_message_content", "")
+
+    if not message_text:
+        await query.message.reply_text("❌ 未找到消息内容，请重新开始")
+        return end_conversation(update, context)
+
+    if current_batch >= len(batches):
+        await query.message.reply_text("✅ 所有批次已发送完成！")
+        return end_conversation(update, context)
+
+    batch = batches[current_batch]
+    progress_msg = await query.message.reply_text(
+        f"📦 **批次 {current_batch + 1}/{len(batches)} 发送中...**\n"
+        f"本批次群组数：{len(batch)}\n"
+        f"已发送成功：{batch_results['success']} | 失败：{batch_results['failed']}"
+    )
+
+    success = 0
+    failed = 0
+
+    for i, group in enumerate(batch):
+        gid = group["id"]
+        delay = random.uniform(0.5, 1.5)
+        await asyncio.sleep(delay)
+
+        try:
+            await context.bot.send_message(
+                chat_id=gid, 
+                text=message_text, 
+                parse_mode="Markdown"
+            )
+            success += 1
+            batch_results["success"] += 1
+        except Exception as e:
+            logger.error(f"发送失败 {gid}: {e}")
+            failed += 1
+            batch_results["failed"] += 1
+
+        if (i + 1) % 20 == 0 or i == len(batch) - 1:
+            try:
+                await progress_msg.edit_text(
+                    f"📦 **批次 {current_batch + 1}/{len(batches)} 发送中...**\n"
+                    f"本批次进度：{i+1}/{len(batch)}\n"
+                    f"✅ 成功：{success} | ❌ 失败：{failed}\n\n"
+                    f"📊 **总计**\n"
+                    f"✅ 成功：{batch_results['success']} | ❌ 失败：{batch_results['failed']}"
+                )
+            except:
+                pass
+
+    # 批次间隔
+    if current_batch + 1 < len(batches):
+        await progress_msg.edit_text(
+            f"✅ **批次 {current_batch + 1} 完成！**\n"
+            f"本批次：成功 {success}，失败 {failed}\n\n"
+            f"等待5秒后开始下一批...\n"
+            f"或点击「下一批」立即开始",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⏩ 下一批", callback_data="bc_next_batch")
+            ]])
+        )
+
+        # 等待5秒或用户点击按钮
+        context.user_data["bc_waiting_for_next"] = True
+        await asyncio.sleep(5)
+
+        if context.user_data.get("bc_waiting_for_next", False):
+            context.user_data["bc_current_batch"] = current_batch + 1
+            await bc_execute_batch(update, context)
+    else:
+        await progress_msg.edit_text(
+            f"🎉 **所有批次发送完成！**\n\n"
+            f"📊 **最终统计**\n"
+            f"✅ 成功：{batch_results['success']}\n"
+            f"❌ 失败：{batch_results['failed']}\n"
+            f"📦 总群组数：{batch_results['success'] + batch_results['failed']}"
+        )
+        return end_conversation(update, context)
+
+async def bc_next_batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """手动开始下一批"""
+    query = update.callback_query
+    await query.answer()
+
+    context.user_data["bc_waiting_for_next"] = False
+    current_batch = context.user_data.get("bc_current_batch", 0)
+    context.user_data["bc_current_batch"] = current_batch + 1
+    await bc_execute_batch(update, context)
 
 # --- 状态 2: 输入消息 ---
 
@@ -246,8 +453,9 @@ async def receive_message_input(update: Update, context: ContextTypes.DEFAULT_TY
         f"📋 **发送预览**\n\n"
         f"{preview}\n\n"
         f"目标数：{count}\n"
-        f"⏱️ 策略：随机间隔 1-3 秒",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        f"⏱️ 策略：随机间隔 0.5-1.5 秒",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
     )
     return BC_CONFIRM_SEND
 
@@ -257,7 +465,7 @@ async def bc_reinput(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.message.reply_text("👉 **请重新输入消息内容：**")
     return BC_INPUT_MESSAGE
 
-# --- 状态 3: 执行发送 (带进度和延迟) ---
+# --- 状态 3: 执行发送 ---
 
 async def execute_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -270,7 +478,6 @@ async def execute_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("❌ 数据异常，请重新开始。")
         return end_conversation(update, context)
 
-    # 发送进度条
     progress_msg = await query.message.reply_text(
         f"🚀 **群发进行中...**\n"
         f"进度：0 / {len(target_ids)}\n"
@@ -281,9 +488,16 @@ async def execute_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     failed = 0
     total = len(target_ids)
 
+    # 根据群组数量动态调整
+    if total > 500:
+        delay_range = (0.5, 1.0)
+        batch_size = 50
+    else:
+        delay_range = (0.8, 1.5)
+        batch_size = 20
+
     for i, gid in enumerate(target_ids):
-        # 【核心需求】随机间隔 1-3 秒
-        delay = random.uniform(1.0, 3.0)
+        delay = random.uniform(*delay_range)
         await asyncio.sleep(delay)
 
         try:
@@ -297,13 +511,14 @@ async def execute_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"发送失败 {gid}: {e}")
             failed += 1
 
-        # 每 3 条或最后一条更新进度，避免频繁编辑导致限流
-        if (i + 1) % 3 == 0 or i == total - 1:
+        if (i + 1) % batch_size == 0 or i == total - 1:
             try:
+                remaining_seconds = (total - i - 1) * ((delay_range[0] + delay_range[1]) / 2)
                 await progress_msg.edit_text(
                     f"🚀 **群发进行中...**\n"
                     f"进度：{i+1} / {total}\n"
-                    f"✅ 成功：{success} | ❌ 失败：{failed}"
+                    f"✅ 成功：{success} | ❌ 失败：{failed}\n"
+                    f"⏱️ 预计剩余：{remaining_seconds:.0f}秒"
                 )
             except:
                 pass
@@ -332,7 +547,9 @@ async def cancel_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return end_conversation(update, context)
 
 def end_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keys = ["bc_all_groups", "bc_selected_ids", "bc_message_content", "bc_temp_target_ids"]
+    keys = ["bc_all_groups", "bc_selected_ids", "bc_message_content", "bc_temp_target_ids",
+            "bc_selected_category", "bc_batches", "bc_current_batch", "bc_batch_results",
+            "bc_waiting_for_next"]
     for k in keys:
         context.user_data.pop(k, None)
     return ConversationHandler.END
@@ -348,10 +565,15 @@ def get_handlers():
             states={
                 BC_SELECT_GROUPS: [
                     CallbackQueryHandler(bc_toggle_group, pattern="^bc_toggle_"),
+                    CallbackQueryHandler(bc_filter_by_category, pattern="^bc_filter_cat_"),
                     CallbackQueryHandler(bc_select_all, pattern="^bc_select_all$"),
                     CallbackQueryHandler(bc_deselect_all, pattern="^bc_deselect_all$"),
                     CallbackQueryHandler(bc_send_all, pattern="^bc_send_all$"),
+                    CallbackQueryHandler(bc_send_all_force, pattern="^bc_send_all_force$"),
                     CallbackQueryHandler(bc_send_selected, pattern="^bc_send_selected$"),
+                    CallbackQueryHandler(bc_batch_send_start, pattern="^bc_batch_200$"),
+                    CallbackQueryHandler(bc_execute_batch, pattern="^bc_start_batch$"),
+                    CallbackQueryHandler(bc_next_batch, pattern="^bc_next_batch$"),
                     CallbackQueryHandler(cancel_action, pattern="^bc_cancel$"),
                 ],
                 BC_INPUT_MESSAGE: [
