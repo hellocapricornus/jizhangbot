@@ -33,6 +33,15 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await handle_clear_cancel(update, context)
         return
 
+    # 在 button_router 函数中添加
+    if query.data == "clear_current_confirm" or query.data == "clear_current_cancel":
+        from handlers.accounting import handle_clear_current_confirm, handle_clear_current_cancel
+        if query.data == "clear_current_confirm":
+            await handle_clear_current_confirm(update, context)
+        else:
+            await handle_clear_current_cancel(update, context)
+        return
+
     # 处理清空所有账单确认（新增）
     if query.data == "clear_all_confirm" or query.data == "clear_all_cancel":
         from handlers.accounting import handle_clear_all_confirm, handle_clear_all_cancel
