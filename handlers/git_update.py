@@ -35,11 +35,11 @@ def restart_bot():
         # 获取当前进程ID
         pid = os.getpid()
         print(f"[重启] 正在重启机器人 (PID: {pid})...")
-        
+
         # 使用 screen 重启
         # 方法1：通过 screen 命令重启
         script_path = os.path.join(get_git_root(), "restart.sh")
-        
+
         # 创建重启脚本
         with open(script_path, 'w') as f:
             f.write(f"""#!/bin/bash
@@ -50,11 +50,11 @@ source venv/bin/activate
 python3 main.py
 """)
         os.chmod(script_path, 0o755)
-        
+
         # 启动新进程并退出当前进程
         subprocess.Popen([script_path], start_new_session=True)
         sys.exit(0)
-        
+
     except Exception as e:
         print(f"[重启] 重启失败: {e}")
         return False
@@ -134,10 +134,10 @@ async def git_pull(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"🔄 正在重启机器人...",
                     parse_mode='Markdown'
                 )
-                
+
                 # 延迟2秒，让消息发送出去
                 await asyncio.sleep(2)
-                
+
                 # 重启机器人
                 restart_bot()
         else:
