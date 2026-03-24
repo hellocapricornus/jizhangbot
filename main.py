@@ -69,12 +69,34 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await set_group_category(update, context)
         return
 
+    if query.data == "refresh_group_list":
+        from handlers.group_manager import show_group_list_page
+        await show_group_list_page(update, context)
+        return
+
+    if query.data == "group_page_prev" or query.data == "group_page_next":
+        from handlers.group_manager import handle_group_pagination
+        await handle_group_pagination(update, context)
+        return
+
+    if query.data == "filter_uncategorized" or query.data == "filter_categorized":
+        from handlers.group_manager import handle_group_pagination
+        await handle_group_pagination(update, context)
+        return
+
     # ========== 处理返回主菜单 ==========
     if query.data == "main_menu":
         await query.message.edit_text(
             "请选择功能：",
             reply_markup=get_main_menu()
         )
+        return
+
+    # ========== 添加 broadcast 按钮处理 ==========
+    if query.data == "broadcast":
+        # 导入 broadcast 模块的处理函数
+        from handlers.broadcast import handle_broadcast_button
+        await handle_broadcast_button(update, context)
         return
 
     # 在 button_router 函数中，添加记账模块的按钮处理
@@ -186,7 +208,7 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         from handlers.accounting import handle_clear_all_cancel
         await handle_clear_all_cancel(update, context)
         return
-        
+
     # ========== 权限检查 ==========
     if not is_authorized(user_id):
         await query.message.reply_text("❌ 管理人/操作员才能使用，如需使用请联系 @ChinaEdward")
