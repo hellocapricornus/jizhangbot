@@ -145,7 +145,8 @@ async def show_group_selection(update: Update, context: ContextTypes.DEFAULT_TYP
 
     keyboard.append(nav_row)
     keyboard.append(send_row)
-    keyboard.append([InlineKeyboardButton("❌ 取消", callback_data="bc_cancel")])
+    # 改为返回主菜单按钮
+    keyboard.append([InlineKeyboardButton("◀️ 返回主菜单", callback_data="bc_back_to_main")])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -158,6 +159,26 @@ async def show_group_selection(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text(text, parse_mode="Markdown", reply_markup=reply_markup)
     except Exception as e:
         logger.warning(f"编辑消息失败：{e}")
+
+async def bc_back_to_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """返回主菜单并结束对话"""
+    query = update.callback_query
+    await query.answer()
+
+    # 清理所有广播相关的临时数据
+    keys = ["bc_all_groups", "bc_selected_ids", "bc_message_content", "bc_temp_target_ids",
+            "bc_selected_category", "bc_batches", "bc_current_batch", "bc_batch_results",
+            "bc_waiting_for_next"]
+    for k in keys:
+        context.user_data.pop(k, None)
+
+    # 返回主菜单
+    from handlers.menu import get_main_menu
+    await query.message.edit_text(
+        "请选择功能：",
+        reply_markup=get_main_menu()
+    )
+    return ConversationHandler.END
 
 async def bc_filter_by_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """按分类筛选"""
@@ -436,8 +457,20 @@ async def bc_next_batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def receive_message_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     if text == "/cancel":
-        await update.message.reply_text("❌ 已取消。")
-        return end_conversation(update, context)
+        # 清理数据
+        keys = ["bc_all_groups", "bc_selected_ids", "bc_message_content", "bc_temp_target_ids",
+                "bc_selected_category", "bc_batches", "bc_current_batch", "bc_batch_results",
+                "bc_waiting_for_next"]
+        for k in keys:
+            context.user_data.pop(k, None)
+
+        # 返回主菜单
+        from handlers.menu import get_main_menu
+        await update.message.reply_text(
+            "❌ 已取消，返回主菜单",
+            reply_markup=get_main_menu()
+        )
+        return ConversationHandler.END
 
     context.user_data["bc_message_content"] = text
     count = len(context.user_data.get("bc_temp_target_ids", []))
@@ -540,19 +573,6 @@ async def execute_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- 辅助函数 ---
 
-async def cancel_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer("已取消")
-    await query.message.reply_text("❌ 操作已取消。")
-    return end_conversation(update, context)
-
-def end_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keys = ["bc_all_groups", "bc_selected_ids", "bc_message_content", "bc_temp_target_ids",
-            "bc_selected_category", "bc_batches", "bc_current_batch", "bc_batch_results",
-            "bc_waiting_for_next"]
-    for k in keys:
-        context.user_data.pop(k, None)
-    return ConversationHandler.END
 
 # --- 注册处理器 ---
 
@@ -574,19 +594,19 @@ def get_handlers():
                     CallbackQueryHandler(bc_batch_send_start, pattern="^bc_batch_200$"),
                     CallbackQueryHandler(bc_execute_batch, pattern="^bc_start_batch$"),
                     CallbackQueryHandler(bc_next_batch, pattern="^bc_next_batch$"),
-                    CallbackQueryHandler(cancel_action, pattern="^bc_cancel$"),
+                    CallbackQueryHandler(bc_back_to_main, pattern="^bc_back_to_main$"),  # 新增
                 ],
                 BC_INPUT_MESSAGE: [
                     MessageHandler(filters.TEXT & ~filters.COMMAND, receive_message_input),
-                    CommandHandler("cancel", cancel_action),
+                    CommandHandler("cancel", bc_back_to_main),
                 ],
                 BC_CONFIRM_SEND: [
                     CallbackQueryHandler(execute_broadcast, pattern="^bc_exec_confirm$"),
                     CallbackQueryHandler(bc_reinput, pattern="^bc_reinput$"),
-                    CallbackQueryHandler(cancel_action, pattern="^bc_cancel$"),
+                    CallbackQueryHandler(bc_back_to_main, pattern="^bc_back_to_main$"),  # 新增
                 ],
             },
-            fallbacks=[CommandHandler("cancel", cancel_action)],
+            fallbacks=[CommandHandler("cancel", bc_back_to_main)],
             per_message=False,
         )
     ]
