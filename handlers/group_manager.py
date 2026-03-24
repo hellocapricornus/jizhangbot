@@ -15,22 +15,6 @@ user_states = {}
 # 分页常量
 ITEMS_PER_PAGE = 10
 
-async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理群组消息中的记账指令"""
-    chat = update.effective_chat
-    message = update.message
-
-    if not message or chat.type not in ['group', 'supergroup']:
-        return
-
-    text = message.text.strip() if message.text else ""
-
-    if not text:
-        return
-
-    # 这里可以添加其他处理逻辑
-    pass
-
 async def group_manager_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """群组管理主菜单"""
     query = update.callback_query
@@ -142,63 +126,84 @@ async def add_category_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
         parse_mode="Markdown"
     )
 
-async def add_category_name(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
+async def add_category_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """接收分类名称"""
-    name = update.message.text.strip()
-    print(f"[DEBUG] add_category_name: {name}")
+    user_id = update.effective_user.id
+    message = update.message
+    text = message.text.strip()
 
-    if name == "/cancel":
-        del user_states[user_id]
-        await update.message.reply_text("❌ 已取消")
+    # 🔥 处理 /cancel（双重保险）
+    if text == "/cancel":
+        if user_id in user_states:
+            del user_states[user_id]
+        await message.reply_text("❌ 已取消创建分类")
+        from handlers.menu import get_main_menu
+        await message.reply_text("请选择功能：", reply_markup=get_main_menu())
         return
 
-    if len(name) < 2:
-        await update.message.reply_text("❌ 分类名称至少2个字符，请重新输入：")
+    # 验证分类名称
+    if len(text) < 2:
+        await message.reply_text("❌ 分类名称至少2个字符，请重新输入：\n\n输入 /cancel 取消")
         return
 
     categories = get_all_categories()
-    if any(cat['name'] == name for cat in categories):
-        await update.message.reply_text(f"❌ 分类「{name}」已存在，请使用其他名称：")
+    if any(cat['name'] == text for cat in categories):
+        await message.reply_text(f"❌ 分类「{text}」已存在，请使用其他名称：\n\n输入 /cancel 取消")
         return
 
     # 保存临时数据
-    user_states[user_id] = {"action": "add_category_desc", "name": name}
-    await update.message.reply_text(
-        f"📝 分类名称：{name}\n\n"
-        "请输入分类描述（可选，直接发送 /skip 跳过）："
+    user_states[user_id] = {"action": "add_category_desc", "name": text}
+    await message.reply_text(
+        f"📝 分类名称：{text}\n\n"
+        "请输入分类描述（可选，直接发送 /skip 跳过）：\n\n"
+        "❌ 输入 /cancel 取消"
     )
 
-async def add_category_desc(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
-    """接收分类描述"""
-    text = update.message.text.strip()
-    print(f"[DEBUG] add_category_desc: {text}")
 
+async def add_category_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """接收分类描述"""
+    user_id = update.effective_user.id
+    message = update.message
+    text = message.text.strip()
+
+    # 🔥 处理 /cancel
+    if text == "/cancel":
+        if user_id in user_states:
+            del user_states[user_id]
+        await message.reply_text("❌ 已取消创建分类")
+        from handlers.menu import get_main_menu
+        await message.reply_text("请选择功能：", reply_markup=get_main_menu())
+        return
+
+    # 🔥 处理 /skip
     if text == "/skip":
         description = ""
-    elif text == "/cancel":
-        del user_states[user_id]
-        await update.message.reply_text("❌ 已取消")
-        return
     else:
         description = text
 
-    name = user_states[user_id].get("name", "")
+    # 获取分类名称
+    state = user_states.get(user_id, {})
+    name = state.get("name", "")
 
+    if not name:
+        await message.reply_text("❌ 会话已过期，请重新开始")
+        if user_id in user_states:
+            del user_states[user_id]
+        return
+
+    # 创建分类
     if add_category(name, description):
-        await update.message.reply_text(f"✅ 分类「{name}」创建成功！")
+        await message.reply_text(f"✅ 分类「{name}」创建成功！")
     else:
-        await update.message.reply_text(f"❌ 创建失败")
+        await message.reply_text(f"❌ 创建失败")
 
     # 清除状态
-    del user_states[user_id]
+    if user_id in user_states:
+        del user_states[user_id]
 
     # 返回主菜单
-    await update.message.reply_text(
-        "请点击下方按钮返回：",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("◀️ 返回群组管理", callback_data="group_manager")
-        ]])
-    )
+    from handlers.menu import get_main_menu
+    await message.reply_text("请选择功能：", reply_markup=get_main_menu())
 
 # ==================== 删除分类 ====================
 async def delete_category_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -471,19 +476,178 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理文本输入（用于创建分类）"""
     user_id = update.effective_user.id
     message = update.message
+    text = message.text.strip()
 
     print(f"[DEBUG] handle_text_input 收到: {message.text}, user_id: {user_id}")
 
     if user_id not in user_states:
         return
 
+    # 🔥 全局处理 /cancel
+    if text == "/cancel":
+        if user_id in user_states:
+            del user_states[user_id]
+        await message.reply_text("❌ 已取消操作")
+        from handlers.menu import get_main_menu
+        await message.reply_text("请选择功能：", reply_markup=get_main_menu())
+        return
+
     state = user_states[user_id]
     action = state.get("action")
 
+    # 🔥 处理 /skip 只在特定状态有效
+    if text == "/skip":
+        if action == "add_category_desc":
+            # 跳过描述
+            await add_category_desc(update, context)
+            return
+        else:
+            await message.reply_text("❌ 当前状态不支持 /skip")
+            return
+
+    # 处理其他输入
     if action == "add_category_name":
-        await add_category_name(update, context, user_id)
+        await add_category_name(update, context)
     elif action == "add_category_desc":
-        await add_category_desc(update, context, user_id)
+        await add_category_desc(update, context)
+
+async def add_category_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """接收分类名称"""
+    user_id = update.effective_user.id
+    message = update.message
+    text = message.text.strip()
+
+    # 🔥 处理 /cancel（双重保险）
+    if text == "/cancel":
+        if user_id in user_states:
+            del user_states[user_id]
+        await message.reply_text("❌ 已取消创建分类")
+        from handlers.menu import get_main_menu
+        await message.reply_text("请选择功能：", reply_markup=get_main_menu())
+        return
+
+    # 验证分类名称
+    if len(text) < 2:
+        await message.reply_text("❌ 分类名称至少2个字符，请重新输入：\n\n输入 /cancel 取消")
+        return
+
+    categories = get_all_categories()
+    if any(cat['name'] == text for cat in categories):
+        await message.reply_text(f"❌ 分类「{text}」已存在，请使用其他名称：\n\n输入 /cancel 取消")
+        return
+
+    # 保存临时数据
+    user_states[user_id] = {"action": "add_category_desc", "name": text}
+    await message.reply_text(
+        f"📝 分类名称：{text}\n\n"
+        "请输入分类描述（可选，直接发送 /skip 跳过）：\n\n"
+        "❌ 输入 /cancel 取消"
+    )
+
+async def add_category_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """接收分类描述"""
+    user_id = update.effective_user.id
+    message = update.message
+    text = message.text.strip()
+
+    # 🔥 处理 /cancel
+    if text == "/cancel":
+        if user_id in user_states:
+            del user_states[user_id]
+        await message.reply_text("❌ 已取消创建分类")
+        from handlers.menu import get_main_menu
+        await message.reply_text("请选择功能：", reply_markup=get_main_menu())
+        return
+
+    # 🔥 处理 /skip
+    if text == "/skip":
+        description = ""
+    else:
+        description = text
+
+    # 获取分类名称
+    state = user_states.get(user_id, {})
+    name = state.get("name", "")
+
+    if not name:
+        await message.reply_text("❌ 会话已过期，请重新开始")
+        if user_id in user_states:
+            del user_states[user_id]
+        return
+
+    # 创建分类
+    if add_category(name, description):
+        await message.reply_text(f"✅ 分类「{name}」创建成功！")
+    else:
+        await message.reply_text(f"❌ 创建失败")
+
+    # 清除状态
+    if user_id in user_states:
+        del user_states[user_id]
+
+    # 返回主菜单
+    from handlers.menu import get_main_menu
+    await message.reply_text("请选择功能：", reply_markup=get_main_menu())
+
+# group_manager.py - 在文件末尾添加
+
+# group_manager.py - 修改 handle_cancel_in_group_manager
+
+async def handle_cancel_in_group_manager(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """群组管理专用的取消处理"""
+    user_id = update.effective_user.id
+    print(f"[DEBUG] handle_cancel_in_group_manager 被调用, user_id: {user_id}")
+
+    # 清除状态
+    if user_id in user_states:
+        print(f"[DEBUG] 清除 user_states[{user_id}], 当前状态: {user_states[user_id]}")
+        del user_states[user_id]
+    else:
+        print(f"[DEBUG] user_id {user_id} 不在 user_states 中")
+
+    # 🔥 重要：确保回复消息
+    if update.message:
+        await update.message.reply_text("❌ 已取消创建分类")
+    elif update.callback_query:
+        await update.callback_query.message.reply_text("❌ 已取消创建分类")
+
+    # 返回主菜单
+    from handlers.menu import get_main_menu
+
+    # 发送主菜单
+    if update.message:
+        await update.message.reply_text(
+            "请选择功能：",
+            reply_markup=get_main_menu()
+        )
+    elif update.callback_query:
+        await update.callback_query.message.reply_text(
+            "请选择功能：",
+            reply_markup=get_main_menu()
+        )
+
+# group_manager.py - 添加 skip 命令处理
+
+async def skip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理 /skip 命令"""
+    user_id = update.effective_user.id
+
+    print(f"[DEBUG] skip_command 被调用, user_id: {user_id}")
+
+    # 检查是否在群组管理状态
+    if user_id not in user_states:
+        await update.message.reply_text("❌ 当前没有进行中的操作")
+        return
+
+    state = user_states[user_id]
+    action = state.get("action")
+
+    # 只有在 add_category_desc 状态才能跳过
+    if action == "add_category_desc":
+        # 直接调用 add_category_desc 处理跳过
+        await add_category_desc(update, context)
+    else:
+        await update.message.reply_text("❌ 当前状态不支持 /skip")
 
 # 导出所有函数
 __all__ = [
@@ -497,6 +661,8 @@ __all__ = [
     'select_group_for_category',
     'set_group_category',
     'handle_text_input',
+    'handle_cancel_in_group_manager',  # 新增
+    'skip_command',  # 🔥 新增
     'show_group_list_page',
     'handle_group_pagination',
     'filter_groups',
