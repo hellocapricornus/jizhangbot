@@ -327,6 +327,40 @@ async def on_bot_join_or_leave(update: Update, context: ContextTypes.DEFAULT_TYP
         # 等待一下，让 auto_save_group 不会重新保存
         await asyncio.sleep(1)
 
+# main.py - 改进广播状态检测
+async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """全局取消命令 - 智能判断当前状态"""
+    user_id = update.effective_user.id
+    print(f"[DEBUG] cancel_command 被调用, user_id: {user_id}")
+
+    # 🔥 先检查是否在群组管理状态
+    from handlers.group_manager import user_states, handle_cancel_in_group_manager
+    print(f"[DEBUG] user_states: {user_states}")
+
+    if user_id in user_states:
+        print(f"[DEBUG] 检测到群组管理状态，调用 handle_cancel_in_group_manager")
+        await handle_cancel_in_group_manager(update, context)
+        return
+
+    # 🔥 广播状态 - 不需要在这里处理，因为 ConversationHandler 的 fallback 会处理
+    # 直接返回，让广播自己的 fallback 处理
+    if context.user_data.get("in_broadcast", False):
+        print(f"[DEBUG] 检测到广播状态，跳过处理（让广播的 ConversationHandler 处理）")
+        return
+
+    # 清理其他模块的状态
+    context.user_data.clear()
+    print(f"[DEBUG] 清理其他模块状态")
+
+    await update.message.reply_text("❌ 已取消所有操作")
+
+    # 返回主菜单
+    from handlers.menu import get_main_menu
+    await update.message.reply_text(
+        "请选择功能：",
+        reply_markup=get_main_menu()
+    )
+
 def main():
     # 初始化数据库和操作员
     init_db()
@@ -338,6 +372,13 @@ def main():
 
     # 创建应用
     app = Application.builder().token(BOT_TOKEN).build()
+
+    # 🔥 0. 全局取消命令（最高优先级，放在最前面）
+    app.add_handler(CommandHandler("cancel", cancel_command))
+
+    # 🔥 添加 skip 命令处理器
+    from handlers.group_manager import skip_command
+    app.add_handler(CommandHandler("skip", skip_command))
 
     # 1. 启动命令
     app.add_handler(CommandHandler("start", start))
@@ -376,18 +417,21 @@ def main():
     # 6. 通用按钮路由（放在最后，处理其他所有未被处理的消息）
     app.add_handler(CallbackQueryHandler(button_router))
 
-    # 7. 【重要】添加一个全局的消息处理器来调试
+    # 7. 调试处理器（降低优先级，避免干扰命令）
     async def debug_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """调试用的消息处理器，显示所有收到的消息"""
+        # 🔥 跳过所有命令消息，避免干扰
         if update.message and update.message.text:
+            if update.message.text.startswith('/'):
+                return
             chat = update.effective_chat
             print(f"[DEBUG] 收到消息 - 聊天类型: {chat.type}, 聊天ID: {chat.id}, 文本: {update.message.text[:50]}")
         return None
 
-    # 添加调试处理器（最高优先级）
-    app.add_handler(MessageHandler(filters.ALL, debug_message_handler), group=0)
+    # 调试处理器放在低优先级
+    app.add_handler(MessageHandler(filters.ALL, debug_message_handler), group=10)
 
-    # 8. 【重要】群组消息处理器（处理记账指令和计算器）
+    # 8. 群组消息处理器（处理记账指令和计算器）
     app.add_handler(MessageHandler(
         filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND,
         handle_group_message
@@ -408,11 +452,7 @@ def main():
     # 11. 注册机器人成员状态监听器
     app.add_handler(ChatMemberHandler(on_bot_join_or_leave, ChatMemberHandler.MY_CHAT_MEMBER))
 
-    # 12. 群组管理文本输入处理（用于创建分类时的输入）
-    app.add_handler(MessageHandler(
-        filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND,
-        handle_text_input
-    ), group=1)
+    # ... 其余代码不变 ...
 
     print("=" * 50)
     print("🤖 机器人启动成功...")
