@@ -31,6 +31,13 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     print(f"[DEBUG] button_router 收到: {query.data}")
 
+    # ========== 先处理广播按钮 ==========
+    if query.data == "broadcast":
+        print(f"[DEBUG] 触发广播功能")
+        from handlers.broadcast import start_broadcast
+        await start_broadcast(update, context)
+        return
+
     # ========== 处理群组管理菜单 ==========
     if query.data == "group_manager":
         await group_manager_menu(update, context)
@@ -90,13 +97,6 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "请选择功能：",
             reply_markup=get_main_menu()
         )
-        return
-
-    # ========== 添加 broadcast 按钮处理 ==========
-    if query.data == "broadcast":
-        # 导入 broadcast 模块的处理函数
-        from handlers.broadcast import handle_broadcast_button
-        await handle_broadcast_button(update, context)
         return
 
     # 在 button_router 函数中，添加记账模块的按钮处理
