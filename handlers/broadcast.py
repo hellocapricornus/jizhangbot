@@ -281,7 +281,7 @@ async def bc_prepare_send(update: Update, context: ContextTypes.DEFAULT_TYPE, mo
     else:
         if not current_selected:
             await query.message.reply_text("⚠️ 您未勾选任何群组！\n请先勾选或直接点击'全部发送'。")
-            return BC_SELECT_GROUPS
+            return None  # 改为返回 None，明确表示不改变状态
         target_ids = current_selected
         mode_text = "✅ 模式：仅选中群组"
 
