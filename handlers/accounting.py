@@ -579,6 +579,9 @@ class AccountingManager:
     def set_fee_rate(self, group_id: str, rate: float) -> bool:
         """设置手续费率"""
         try:
+            # 确保会话存在
+            self.get_or_create_session(group_id)
+            
             with self._get_conn() as conn:
                 c = conn.cursor()
                 now = int(time.time())
@@ -596,6 +599,9 @@ class AccountingManager:
     def set_exchange_rate(self, group_id: str, rate: float) -> bool:
         """设置汇率"""
         try:
+            # 确保会话存在
+            self.get_or_create_session(group_id)
+            
             with self._get_conn() as conn:
                 c = conn.cursor()
                 now = int(time.time())
@@ -641,6 +647,9 @@ class AccountingManager:
                     expense_total = row[1] or 0
                     expense_usdt = row[2] or 0
                     expense_count = row[3] or 0
+
+            # 确保会话存在
+            self.get_or_create_session(group_id)
 
             session = self.get_or_create_session(group_id)
 
