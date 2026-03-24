@@ -572,7 +572,39 @@ async def execute_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return end_conversation(update, context)
 
 # --- 辅助函数 ---
+# 在文件末尾添加
+async def end_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """结束对话并清理数据"""
+    # 清理所有广播相关的临时数据
+    keys = ["bc_all_groups", "bc_selected_ids", "bc_message_content", "bc_temp_target_ids",
+            "bc_selected_category", "bc_batches", "bc_current_batch", "bc_batch_results",
+            "bc_waiting_for_next"]
+    for k in keys:
+        context.user_data.pop(k, None)
 
+    # 返回主菜单
+    from handlers.menu import get_main_menu
+    try:
+        if update.callback_query:
+            await update.callback_query.message.edit_text(
+                "请选择功能：",
+                reply_markup=get_main_menu()
+            )
+        else:
+            await update.message.reply_text(
+                "请选择功能：",
+                reply_markup=get_main_menu()
+            )
+    except:
+        pass
+
+    return ConversationHandler.END
+
+async def bc_cancel_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """取消广播"""
+    query = update.callback_query
+    await query.answer("已取消")
+    return await end_conversation(update, context)
 
 # --- 注册处理器 ---
 
@@ -595,6 +627,7 @@ def get_handlers():
                     CallbackQueryHandler(bc_execute_batch, pattern="^bc_start_batch$"),
                     CallbackQueryHandler(bc_next_batch, pattern="^bc_next_batch$"),
                     CallbackQueryHandler(bc_back_to_main, pattern="^bc_back_to_main$"),  # 新增
+                    CallbackQueryHandler(bc_cancel_broadcast, pattern="^bc_cancel$"),  # ← 添加这行
                 ],
                 BC_INPUT_MESSAGE: [
                     MessageHandler(filters.TEXT & ~filters.COMMAND, receive_message_input),
@@ -603,10 +636,12 @@ def get_handlers():
                 BC_CONFIRM_SEND: [
                     CallbackQueryHandler(execute_broadcast, pattern="^bc_exec_confirm$"),
                     CallbackQueryHandler(bc_reinput, pattern="^bc_reinput$"),
-                    CallbackQueryHandler(bc_back_to_main, pattern="^bc_back_to_main$"),  # 新增
+                    CallbackQueryHandler(bc_back_to_main, pattern="^bc_back_to_main$"),  
+                    CallbackQueryHandler(bc_cancel_broadcast, pattern="^bc_cancel$"),  # 添加这行
                 ],
             },
             fallbacks=[CommandHandler("cancel", bc_back_to_main)],
             per_message=False,
+            allow_reentry=True,  # ← 添加这行！允许重新进入对话
         )
     ]
