@@ -12,6 +12,9 @@ from db import (
 # 存储用户输入状态的字典
 user_states = {}
 
+# 分页常量
+ITEMS_PER_PAGE = 10
+
 async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理群组消息中的记账指令"""
     chat = update.effective_chat
@@ -22,146 +25,12 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
     text = message.text.strip() if message.text else ""
 
-    # 追踪用户信息
-    await handle_user_info_tracking(update, context)
-
     if not text:
         return
 
-    # 处理计算器功能
-    await handle_calculator(update, context)
+    # 这里可以添加其他处理逻辑
+    pass
 
-    # 处理记账指令（需要权限）
-    if not is_authorized(message.from_user.id):
-        return
-
-    # ========== 先处理带 + 和 - 的命令（避免与中文命令冲突） ==========
-    # +xxx 添加入款（支持备注）
-    if text.startswith('+'):
-        try:
-            # 去掉开头的 +，然后分割
-            content = text[1:].strip()
-            parts = content.split(maxsplit=1)
-            amount_str = parts[0]
-            category = parts[1] if len(parts) > 1 else ""
-
-            # 验证金额格式
-            amount = float(amount_str)
-            await handle_add_income(update, context, amount, is_correction=False, category=category)
-            return
-        except ValueError:
-            await message.reply_text("❌ 格式错误：+金额 或 +金额 备注（如：+1000 德国）")
-            return
-        except:
-            await message.reply_text("❌ 格式错误：+金额 或 +金额 备注（如：+1000 德国）")
-            return
-
-    # -xxx 修正入款（支持备注）
-    elif text.startswith('-') and len(text) > 1:
-        try:
-            # 去掉开头的 -，然后分割
-            content = text[1:].strip()
-            parts = content.split(maxsplit=1)
-            amount_str = parts[0]
-            category = parts[1] if len(parts) > 1 else ""
-
-            # 验证金额格式
-            amount = float(amount_str)
-            await handle_add_income(update, context, amount, is_correction=True, category=category)
-            return
-        except ValueError:
-            await message.reply_text("❌ 格式错误：-金额 或 -金额 备注（如：-500 德国）")
-            return
-        except:
-            await message.reply_text("❌ 格式错误：-金额 或 -金额 备注（如：-500 德国）")
-            return
-
-    # 下发 xxxu 添加出款（正数）
-    elif text.startswith('下发') and 'u' in text and not text.startswith('下发-'):
-        try:
-            amount_str = text.replace('下发', '').replace('u', '').strip()
-            if amount_str:
-                amount = float(amount_str)
-                await handle_add_expense(update, context, amount, is_correction=False)
-            else:
-                await message.reply_text("❌ 格式错误：下发金额u（如：下发100u）")
-            return
-        except:
-            await message.reply_text("❌ 格式错误：下发金额u（如：下发100u）")
-            return
-
-    # 下发- xxxu 修正出款（负数）
-    elif text.startswith('下发-') and 'u' in text:
-        try:
-            amount_str = text.replace('下发-', '').replace('u', '').strip()
-            if amount_str:
-                amount = float(amount_str)
-                await handle_add_expense(update, context, amount, is_correction=True)
-            else:
-                await message.reply_text("❌ 格式错误：下发-金额u（如：下发-50u）")
-            return
-        except:
-            await message.reply_text("❌ 格式错误：下发-金额u（如：下发-50u）")
-            return
-
-    # ========== 处理中文命令 ==========
-    # 设置手续费
-    if text.startswith('设置手续费'):
-        try:
-            rate_str = text.replace('设置手续费', '').strip()
-            if rate_str:
-                rate = float(rate_str)
-                await handle_set_fee(update, context, rate)
-        except:
-            await message.reply_text("❌ 格式错误：设置手续费 数字（如：设置手续费5）")
-        return
-
-    # 设置汇率
-    if text.startswith('设置汇率'):
-        try:
-            rate_str = text.replace('设置汇率', '').strip()
-            if rate_str:
-                rate = float(rate_str)
-                await handle_set_exchange(update, context, rate)
-        except:
-            await message.reply_text("❌ 格式错误：设置汇率 数字（如：设置汇率7.2）")
-        return
-
-    # 结束账单
-    if text == '结束账单':
-        await handle_end_bill(update, context)
-        return
-
-    # 今日总
-    if text == '今日总':
-        await handle_today_stats(update, context)
-        return
-
-    # 总
-    if text == '总':
-        await handle_total_stats(update, context)
-        return
-
-    # 当前账单
-    if text == '当前账单':
-        await handle_current_bill(update, context)
-        return
-
-    # 查询账单
-    if text == '查询账单':
-        await handle_query_bill(update, context)
-        return
-
-    # 清理账单 / 清空账单
-    if text in ['清理账单', '清空账单']:
-        await handle_clear_bill(update, context)
-        return
-
-    # 清理总账单（所有账单）
-    if text in ['清理总账单', '清空总账单', '清空所有账单']:
-        await handle_clear_all_bill(update, context)
-        return
-        
 async def group_manager_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """群组管理主菜单"""
     query = update.callback_query
@@ -380,16 +249,50 @@ async def set_group_category_start(update: Update, context: ContextTypes.DEFAULT
     await query.answer()
     print(f"[DEBUG] set_group_category_start 被调用")
 
-    categories = get_all_categories()
+    # 获取所有群组
     groups = get_all_groups_from_db()
 
     if not groups:
         await query.message.edit_text("📭 暂无群组")
         return
 
-    # 显示所有群组，让用户选择
+    # 初始化分页数据
+    context.user_data['group_list'] = groups
+    context.user_data['current_page'] = 0
+    context.user_data['selecting_group'] = True
+
+    # 显示第一页
+    await show_group_list_page(update, context)
+
+async def show_group_list_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """显示群组列表页面"""
+    groups = context.user_data.get('group_list', [])
+    current_page = context.user_data.get('current_page', 0)
+
+    if not groups:
+        if isinstance(update, Update) and update.callback_query:
+            await update.callback_query.message.edit_text("📭 暂无群组")
+        else:
+            await update.message.reply_text("📭 暂无群组")
+        return
+
+    # 计算分页
+    total_pages = (len(groups) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE
+    start_idx = current_page * ITEMS_PER_PAGE
+    end_idx = min(start_idx + ITEMS_PER_PAGE, len(groups))
+    current_groups = groups[start_idx:end_idx]
+
+    # 构建按钮列表
     keyboard = []
-    for group in groups[:30]:  # 限制显示30个
+
+    # 添加筛选按钮
+    keyboard.append([
+        InlineKeyboardButton("📋 未分类", callback_data="filter_uncategorized"),
+        InlineKeyboardButton("✅ 已分类", callback_data="filter_categorized")
+    ])
+
+    # 显示群组列表
+    for group in current_groups:
         title = group['title'][:25]
         current_cat = group.get('category', '未分类')
         keyboard.append([InlineKeyboardButton(
@@ -397,17 +300,103 @@ async def set_group_category_start(update: Update, context: ContextTypes.DEFAULT
             callback_data=f"sel_group_{group['id']}"
         )])
 
-    keyboard.append([InlineKeyboardButton("◀️ 返回", callback_data="group_manager")])
+    # 添加分页按钮
+    nav_buttons = []
+    if current_page > 0:
+        nav_buttons.append(InlineKeyboardButton("⬅️ 上一页", callback_data="group_page_prev"))
+    if current_page < total_pages - 1:
+        nav_buttons.append(InlineKeyboardButton("下一页 ➡️", callback_data="group_page_next"))
 
-    context.user_data['selecting_group'] = True
+    if nav_buttons:
+        keyboard.append(nav_buttons)
 
-    await query.message.edit_text(
-        "🏷️ **设置群组分类**\n\n"
-        "请先选择要设置分类的群组：\n"
-        f"共 {len(groups)} 个群组，显示前30个",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="Markdown"
-    )
+    # 添加刷新和返回按钮
+    keyboard.append([
+        InlineKeyboardButton("🔄 刷新", callback_data="refresh_group_list"),
+        InlineKeyboardButton("◀️ 返回", callback_data="group_manager")
+    ])
+
+    # 显示消息
+    text = f"🏷️ **设置群组分类**\n\n"
+    text += f"请选择要设置分类的群组：\n"
+    text += f"共 **{len(groups)}** 个群组，第 **{current_page + 1}/{total_pages}** 页\n\n"
+    text += f"📌 **筛选选项**：\n"
+    text += f"• 未分类：显示未设置分类的群组\n"
+    text += f"• 已分类：显示已设置分类的群组"
+
+    if isinstance(update, Update) and update.callback_query:
+        await update.callback_query.message.edit_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+    else:
+        await update.message.reply_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+
+async def handle_group_pagination(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理群组列表的分页"""
+    query = update.callback_query
+    data = query.data
+
+    if data == "group_page_prev":
+        current_page = context.user_data.get('current_page', 0)
+        context.user_data['current_page'] = max(0, current_page - 1)
+        await show_group_list_page(update, context)
+
+    elif data == "group_page_next":
+        current_page = context.user_data.get('current_page', 0)
+        groups = context.user_data.get('group_list', [])
+        total_pages = (len(groups) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE
+        context.user_data['current_page'] = min(total_pages - 1, current_page + 1)
+        await show_group_list_page(update, context)
+
+    elif data == "refresh_group_list":
+        # 刷新列表，恢复显示所有群组
+        groups = get_all_groups_from_db()
+        context.user_data['group_list'] = groups
+        context.user_data['current_page'] = 0
+        context.user_data.pop('filter_type', None)
+        await show_group_list_page(update, context)
+
+    elif data == "filter_uncategorized":
+        await filter_groups(update, context, "uncategorized")
+
+    elif data == "filter_categorized":
+        await filter_groups(update, context, "categorized")
+
+async def filter_groups(update: Update, context: ContextTypes.DEFAULT_TYPE, filter_type: str):
+    """筛选群组"""
+    query = update.callback_query
+    await query.answer()
+
+    all_groups = get_all_groups_from_db()
+
+    if filter_type == "uncategorized":
+        # 筛选未分类的群组
+        filtered_groups = [g for g in all_groups if g.get('category', '未分类') == '未分类']
+        filter_name = "未分类"
+    else:  # categorized
+        # 筛选已分类的群组
+        filtered_groups = [g for g in all_groups if g.get('category', '未分类') != '未分类']
+        filter_name = "已分类"
+
+    if not filtered_groups:
+        await query.message.edit_text(f"📭 暂无{filter_name}的群组")
+        await asyncio.sleep(1)
+        await show_group_list_page(update, context)
+        return
+
+    # 更新上下文中的群组列表
+    context.user_data['group_list'] = filtered_groups
+    context.user_data['current_page'] = 0
+    context.user_data['filter_type'] = filter_type
+
+    # 显示筛选后的群组列表
+    await show_group_list_page(update, context)
 
 async def select_group_for_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """选择要设置分类的群组"""
@@ -422,13 +411,23 @@ async def select_group_for_category(update: Update, context: ContextTypes.DEFAUL
     # 显示分类列表
     categories = get_all_categories()
     keyboard = []
+
+    # 添加"未分类"选项
+    keyboard.append([InlineKeyboardButton(f"📂 未分类", callback_data=f"set_cat_未分类_{group_id}")])
+
+    # 添加其他分类
     for cat in categories:
-        keyboard.append([InlineKeyboardButton(f"📁 {cat['name']}", callback_data=f"set_cat_{cat['name']}_{group_id}")])
+        if cat['name'] != '未分类':  # 避免重复添加未分类
+            keyboard.append([InlineKeyboardButton(f"📁 {cat['name']}", callback_data=f"set_cat_{cat['name']}_{group_id}")])
+
+    # 添加返回按钮
     keyboard.append([InlineKeyboardButton("◀️ 返回", callback_data="gm_set_cat")])
 
     await query.message.edit_text(
         "🏷️ **选择分类**\n\n"
-        "请选择要分配给该群组的分类：",
+        "请选择要分配给该群组的分类：\n"
+        "• 未分类：群组尚未分类\n"
+        "• 其他：已建立的分类",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown"
     )
@@ -451,11 +450,21 @@ async def set_group_category(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.message.edit_text(
             f"✅ 已将群组「{group_title}」的分类设置为「{category_name}」"
         )
+
+        # 刷新群组列表
+        await asyncio.sleep(1)
+
+        # 刷新列表，显示所有群组
+        all_groups = get_all_groups_from_db()
+        context.user_data['group_list'] = all_groups
+        context.user_data['current_page'] = 0
+        context.user_data.pop('filter_type', None)
+
+        await show_group_list_page(update, context)
     else:
         await query.message.edit_text(f"❌ 设置失败")
-
-    await asyncio.sleep(1)
-    await group_manager_menu(update, context)
+        await asyncio.sleep(1)
+        await group_manager_menu(update, context)
 
 # ==================== 文本输入处理 ====================
 async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -488,5 +497,9 @@ __all__ = [
     'select_group_for_category',
     'set_group_category',
     'handle_text_input',
-    'user_states'  # 添加这行
+    'show_group_list_page',
+    'handle_group_pagination',
+    'filter_groups',
+    'user_states',
+    'ITEMS_PER_PAGE'
 ]
