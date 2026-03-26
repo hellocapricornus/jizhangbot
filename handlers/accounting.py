@@ -1787,6 +1787,94 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
         except:
             await message.reply_text("❌ 格式错误：下发-金额u（如：下发-50u）")
 
+# ==================== 群组成员变化监听器（服务消息方式）====================
+
+async def handle_group_service_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    处理群组的服务消息（成员加入/退出）
+    这种方式更可靠，因为 Telegram 会在群组中发送服务消息
+    """
+    message = update.effective_message
+
+    if not message:
+        return
+
+    chat = message.chat
+    if chat.type not in ['group', 'supergroup']:
+        return
+
+    group_id = str(chat.id)
+
+    # ========== 检测新成员加入 ==========
+    if message.new_chat_members:
+        for new_member in message.new_chat_members:
+            # 跳过机器人自己
+            if new_member.id == context.bot.id:
+                logger.info(f"机器人加入群组 {chat.title}，跳过欢迎消息")
+                continue
+
+            user_name = new_member.full_name
+            username = f"@{new_member.username}" if new_member.username else ""
+
+            # 构建欢迎消息
+            welcome_message = f"{user_name} {username}\n欢迎进入本群组"
+
+            try:
+                await message.reply_text(welcome_message)
+                logger.info(f"✅ 已发送欢迎消息给 {user_name} (群组: {chat.title})")
+            except Exception as e:
+                logger.error(f"发送欢迎消息失败: {e}")
+
+            # 更新用户信息到数据库
+            try:
+                if accounting_manager:
+                    accounting_manager.update_user_info(
+                        group_id,
+                        new_member.id,
+                        new_member.username or "",
+                        new_member.first_name or "",
+                        new_member.last_name or ""
+                    )
+            except Exception as e:
+                logger.error(f"更新用户信息失败: {e}")
+
+        return
+
+    # ========== 检测成员退出 ==========
+    if message.left_chat_member:
+        left_member = message.left_chat_member
+
+        # 跳过机器人自己
+        if left_member.id == context.bot.id:
+            logger.info(f"机器人退出群组 {chat.title}，跳过告别消息")
+            return
+
+        user_name = left_member.full_name
+        username = f"@{left_member.username}" if left_member.username else ""
+
+        # 构建退出消息
+        leave_message = f"{user_name} {username}\n退出了本群组"
+
+        try:
+            await message.reply_text(leave_message)
+            logger.info(f"✅ 已发送退出消息 (用户: {user_name}, 群组: {chat.title})")
+        except Exception as e:
+            logger.error(f"发送退出消息失败: {e}")
+
+        return
+
+
+def get_service_message_handler():
+    """
+    获取服务消息处理器，用于 main.py 中注册
+    """
+    from telegram.ext import MessageHandler, filters
+    # 监听新成员加入和成员退出的事件
+    return MessageHandler(
+        filters.StatusUpdate.NEW_CHAT_MEMBERS | filters.StatusUpdate.LEFT_CHAT_MEMBER,
+        handle_group_service_message
+    )
+
 
 def get_conversation_handler():
     """获取记账模块的对话处理器"""
