@@ -1614,14 +1614,16 @@ async def handle_user_info_tracking(update: Update, context: ContextTypes.DEFAUL
                 parse_mode='Markdown'
             )
 
-# handlers/accounting.py - 在文件末尾添加
-
+# handlers/accounting.py - 修改 welcome_new_member 函数
 async def welcome_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理新成员加入事件"""
     chat_member = update.chat_member
     
-    # 只处理新成员加入
-    if chat_member.new_chat_member.status == 'member' and chat_member.old_chat_member.status in ['left', 'kicked']:
+    # 调试：打印状态信息
+    logger.info(f"ChatMember update: new={chat_member.new_chat_member.status}, old={chat_member.old_chat_member.status}")
+    
+    # 🔥 修改判断条件：只要新状态是 member，且旧状态不是 member
+    if chat_member.new_chat_member.status == 'member' and chat_member.old_chat_member.status != 'member':
         chat = chat_member.chat
         user = chat_member.new_chat_member.user
         
@@ -1637,8 +1639,8 @@ async def welcome_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
             else:
                 welcome_text = f"{first_name}\n欢迎加入本群"
             
+            logger.info(f"发送欢迎消息到群组 {chat.id}: {welcome_text}")
             await context.bot.send_message(chat_id=chat.id, text=welcome_text)
-
 
 async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理群组消息中的记账指令"""
