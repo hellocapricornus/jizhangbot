@@ -1614,33 +1614,52 @@ async def handle_user_info_tracking(update: Update, context: ContextTypes.DEFAUL
                 parse_mode='Markdown'
             )
 
-# handlers/accounting.py - 修改 welcome_new_member 函数
 async def welcome_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理新成员加入事件"""
+    # 获取 chat_member 更新
     chat_member = update.chat_member
     
-    # 调试：打印状态信息
-    logger.info(f"ChatMember update: new={chat_member.new_chat_member.status}, old={chat_member.old_chat_member.status}")
+    if not chat_member:
+        print("❌ 没有 chat_member 数据")
+        return
     
-    # 🔥 修改判断条件：只要新状态是 member，且旧状态不是 member
-    if chat_member.new_chat_member.status == 'member' and chat_member.old_chat_member.status != 'member':
-        chat = chat_member.chat
-        user = chat_member.new_chat_member.user
+    # 获取新旧状态
+    old_status = chat_member.old_chat_member.status if chat_member.old_chat_member else None
+    new_status = chat_member.new_chat_member.status if chat_member.new_chat_member else None
+    
+    print(f"[欢迎检测] 群组: {chat_member.chat.title}")
+    print(f"[欢迎检测] 旧状态: {old_status}")
+    print(f"[欢迎检测] 新状态: {new_status}")
+    
+    # 检测成员加入（从 left/kicked/restricted 变为 member）
+    if new_status == 'member' and old_status in ['left', 'kicked', 'restricted']:
+        print(f"✅ 检测到新成员加入！")
         
-        # 只处理群组
-        if chat.type in ['group', 'supergroup']:
-            # 获取用户信息
-            first_name = user.first_name or ""
-            username = user.username
-            
-            # 构建欢迎语
-            if username:
-                welcome_text = f"{first_name} @{username}\n欢迎加入本群"
-            else:
-                welcome_text = f"{first_name}\n欢迎加入本群"
-            
-            logger.info(f"发送欢迎消息到群组 {chat.id}: {welcome_text}")
+        user = chat_member.new_chat_member.user
+        chat = chat_member.chat
+        
+        # 获取用户信息
+        first_name = user.first_name or ""
+        username = user.username
+        
+        # 构建欢迎语
+        if username:
+            welcome_text = f"{first_name} @{username}\n欢迎加入本群"
+        else:
+            welcome_text = f"{first_name}\n欢迎加入本群"
+        
+        # 发送欢迎消息
+        try:
             await context.bot.send_message(chat_id=chat.id, text=welcome_text)
+            print(f"✅ 欢迎消息已发送: {welcome_text}")
+        except Exception as e:
+            print(f"❌ 发送欢迎消息失败: {e}")
+    
+    # 检测成员离开（从 member 变为 left/kicked）
+    elif old_status == 'member' and new_status in ['left', 'kicked']:
+        print(f"👋 检测到成员离开")
+        user = chat_member.new_chat_member.user
+        print(f"离开的用户: {user.first_name}")
 
 async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理群组消息中的记账指令"""
