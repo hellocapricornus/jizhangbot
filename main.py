@@ -22,8 +22,8 @@ from handlers.group_manager import (
     handle_text_input
 )
 from handlers.menu import get_main_menu
-# 🔥 添加 welcome_new_member 的导入
-from handlers.accounting import welcome_new_member
+# 新增：监听群组成员加入/退出的服务消息（更可靠的方式）
+from handlers.accounting import get_service_message_handler
 
 # 按钮路由处理器
 async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -451,11 +451,11 @@ def main():
         auto_save_group
     ), group=2)
 
-        # 🔥 监听普通成员加入事件（欢迎新成员）
-    app.add_handler(ChatMemberHandler(welcome_new_member, ChatMemberHandler.CHAT_MEMBER))
-
    # 11. 注册机器人成员状态监听器
     app.add_handler(ChatMemberHandler(on_bot_join_or_leave, ChatMemberHandler.MY_CHAT_MEMBER))
+
+    # 12. 注册群组成员加入/退出监听器（服务消息方式，处理普通成员加入/退出）
+    app.add_handler(get_service_message_handler())
 
     # ... 其余代码不变 ...
 
