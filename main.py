@@ -451,6 +451,9 @@ def main():
         auto_save_group
     ), group=2)
 
+        # 🔥 监听普通成员加入事件（欢迎新成员）
+    app.add_handler(ChatMemberHandler(welcome_new_member, ChatMemberHandler.CHAT_MEMBER))
+
    # 11. 注册机器人成员状态监听器
     app.add_handler(ChatMemberHandler(on_bot_join_or_leave, ChatMemberHandler.MY_CHAT_MEMBER))
 
