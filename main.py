@@ -1,4 +1,4 @@
-# main.py - 修复重复导入和添加缺失的导入
+# main.py - 修正后的版本
 
 import asyncio
 from telegram import Update
@@ -312,13 +312,17 @@ async def on_bot_join_or_leave(update: Update, context: ContextTypes.DEFAULT_TYP
     my_chat_member = update.my_chat_member
     chat = my_chat_member.chat
     new_status = my_chat_member.new_chat_member.status
+    old_status = my_chat_member.old_chat_member.status if my_chat_member.old_chat_member else None
 
     chat_id = str(chat.id)
     title = chat.title
 
+    print(f"[DEBUG] 机器人状态变化 - 群组: {title} ({chat_id})")
+    print(f"[DEBUG] 旧状态: {old_status}, 新状态: {new_status}")
+
     if new_status in ['member', 'administrator']:
         print(f"🎉 [系统事件] 机器人加入群组：{title} ({chat_id})")
-        save_group(chat_id, title, '未分类')  # 新群组默认分类为"未分类"
+        save_group(chat_id, title, '未分类')
         print(f"✅ [系统事件] 群组已自动存入数据库。")
 
     elif new_status in ['left', 'kicked', 'banned']:
@@ -363,6 +367,124 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=get_main_menu()
     )
 
+# ========== 群组验证函数 ==========
+async def verify_groups_on_startup(app: Application):
+    """启动时验证所有群组，删除机器人不在的群组（增强版）"""
+    from db import get_all_groups_from_db
+
+    await asyncio.sleep(5)  # 等待机器人完全启动
+
+    all_groups = get_all_groups_from_db()
+    print(f"[启动检查] 开始验证 {len(all_groups)} 个群组...")
+
+    groups_to_delete = []
+
+    for group in all_groups:
+        group_id = group['id']
+        group_name = group.get('name', '未知群组')
+
+        # 使用多种方法验证
+        should_delete = False
+        reason = ""
+
+        # 方法1：尝试发送测试动作
+        try:
+            await app.bot.send_chat_action(chat_id=group_id, action="typing")
+            print(f"[启动检查] 群组 {group_name} 可以发送动作，有效")
+            continue  # 可以发送动作，说明机器人在群组中
+        except Exception as e:
+            error_msg = str(e).lower()
+            if "chat not found" in error_msg:
+                reason = "群组不存在"
+                should_delete = True
+            elif "bot was kicked" in error_msg:
+                reason = "机器人被踢出"
+                should_delete = True
+            elif "bot is not a member" in error_msg:
+                reason = "机器人不是成员"
+                should_delete = True
+            elif "group chat was upgraded" in error_msg:
+                reason = "群组已升级"
+                should_delete = True
+            else:
+                # 其他错误，尝试方法2
+                print(f"[启动检查] 发送动作失败: {e}，尝试获取成员信息")
+
+                # 方法2：获取成员信息
+                try:
+                    bot_member = await app.bot.get_chat_member(group_id, app.bot.id)
+                    if bot_member.status not in ['member', 'administrator']:
+                        reason = f"状态为 {bot_member.status}"
+                        should_delete = True
+                    else:
+                        # 状态正常，可能是网络问题
+                        print(f"[启动检查] 成员状态正常: {bot_member.status}")
+                except Exception as e2:
+                    error_msg2 = str(e2).lower()
+                    if "chat not found" in error_msg2:
+                        reason = "群组不存在"
+                        should_delete = True
+                    elif "bot was kicked" in error_msg2:
+                        reason = "机器人被踢出"
+                        should_delete = True
+                    else:
+                        reason = f"无法访问: {e2}"
+                        should_delete = True
+
+        if should_delete:
+            print(f"[启动检查] 标记删除群组 {group_name} ({group_id}): {reason}")
+            groups_to_delete.append(group_id)
+        else:
+            print(f"[启动检查] 群组 {group_name} 验证通过")
+
+    # 删除无效的群组
+    for group_id in groups_to_delete:
+        print(f"[启动检查] 删除无效群组: {group_id}")
+        delete_group_from_db(group_id)
+
+    print(f"[启动检查] 完成！删除了 {len(groups_to_delete)} 个无效群组")
+
+# main.py - 修改 periodic_group_verification 函数
+
+async def periodic_group_verification(app: Application):
+    """定期验证所有群组（每天执行一次）"""
+    from db import get_all_groups_from_db
+
+    all_groups = get_all_groups_from_db()
+    print(f"[定期检查] 开始验证 {len(all_groups)} 个群组...")
+
+    groups_to_delete = []
+
+    for group in all_groups:
+        group_id = group['id']
+        group_name = group.get('name', '未知群组')
+
+        try:
+            # 尝试发送一个动作来测试连接
+            await app.bot.send_chat_action(chat_id=group_id, action="typing")
+            print(f"[定期检查] 群组 {group_name} 有效")
+        except Exception as e:
+            error_msg = str(e)
+            # 如果是这些错误，说明机器人不在群组中
+            if "chat not found" in error_msg.lower() or "bot was kicked" in error_msg.lower() or "bot is not a member" in error_msg.lower():
+                print(f"[定期检查] 机器人不在群组 {group_name} ({group_id}) 中: {error_msg}")
+                groups_to_delete.append(group_id)
+            else:
+                # 其他错误，可能是临时问题
+                print(f"[定期检查] 群组 {group_name} 可能有问题: {error_msg}")
+                # 尝试通过 get_chat 验证
+                try:
+                    await app.bot.get_chat(group_id)
+                except:
+                    groups_to_delete.append(group_id)
+
+    # 删除无效的群组
+    for group_id in groups_to_delete:
+        print(f"[定期检查] 删除无效群组: {group_id}")
+        delete_group_from_db(group_id)
+
+    print(f"[定期检查] 完成！删除了 {len(groups_to_delete)} 个无效群组")
+
 def main():
     # 初始化数据库和操作员
     init_db()
@@ -375,6 +497,44 @@ def main():
     # 创建应用
     app = Application.builder().token(BOT_TOKEN).build()
 
+    # 定义手动清理命令（放在 main 函数内部）
+    async def force_clean_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """手动强制清理所有机器人不在的群组"""
+        user_id = update.effective_user.id
+        if not is_authorized(user_id):
+            await update.message.reply_text("❌ 只有管理员可以使用此命令")
+            return
+
+        msg = await update.message.reply_text("🔍 开始强制检查所有群组...")
+
+        from db import get_all_groups_from_db
+        groups = get_all_groups_from_db()
+        deleted = 0
+        kept = 0
+        errors = 0
+
+        for group in groups:
+            group_id = group['id']
+            group_name = group.get('name', '未知')
+
+            try:
+                # 尝试发送动作
+                await context.bot.send_chat_action(chat_id=group_id, action="typing")
+                kept += 1
+                await msg.edit_text(f"✅ 仍在群组: {group_name}\n已检查: {kept + deleted + errors}/{len(groups)}")
+            except Exception as e:
+                error_msg = str(e).lower()
+                if any(keyword in error_msg for keyword in ["chat not found", "bot was kicked", "bot is not a member", "group chat was upgraded"]):
+                    delete_group_from_db(group_id)
+                    deleted += 1
+                    await msg.edit_text(f"🗑️ 已删除: {group_name}\n原因: {error_msg[:50]}\n已检查: {kept + deleted + errors}/{len(groups)}")
+                else:
+                    errors += 1
+                    await msg.edit_text(f"⚠️ 检查失败: {group_name}\n错误: {error_msg[:50]}\n已检查: {kept + deleted + errors}/{len(groups)}")
+                await asyncio.sleep(0.5)  # 避免请求过快
+
+        await msg.edit_text(f"✅ 强制清理完成！\n\n删除: {deleted} 个无效群组\n保留: {kept} 个有效群组\n错误: {errors} 个检查失败")
+
     # 🔥 0. 全局取消命令（最高优先级，放在最前面）
     app.add_handler(CommandHandler("cancel", cancel_command))
 
@@ -384,6 +544,9 @@ def main():
 
     # 1. 启动命令
     app.add_handler(CommandHandler("start", start))
+
+    # 添加手动清理命令（新增这一行）
+    app.add_handler(CommandHandler("clean", force_clean_groups))
 
     # 2. 添加 Git 更新命令（管理员专用）
     for handler in get_git_handlers():
@@ -422,7 +585,6 @@ def main():
     # 7. 调试处理器（降低优先级，避免干扰命令）
     async def debug_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """调试用的消息处理器，显示所有收到的消息"""
-        # 🔥 跳过所有命令消息，避免干扰
         if update.message and update.message.text:
             if update.message.text.startswith('/'):
                 return
@@ -430,7 +592,6 @@ def main():
             print(f"[DEBUG] 收到消息 - 聊天类型: {chat.type}, 聊天ID: {chat.id}, 文本: {update.message.text[:50]}")
         return None
 
-    # 调试处理器放在低优先级
     app.add_handler(MessageHandler(filters.ALL, debug_message_handler), group=10)
 
     # 8. 群组消息处理器（处理记账指令和计算器）
@@ -451,13 +612,32 @@ def main():
         auto_save_group
     ), group=2)
 
-   # 11. 注册机器人成员状态监听器
+    # 11. 注册机器人成员状态监听器
     app.add_handler(ChatMemberHandler(on_bot_join_or_leave, ChatMemberHandler.MY_CHAT_MEMBER))
 
     # 12. 注册群组成员加入/退出监听器（服务消息方式，处理普通成员加入/退出）
     app.add_handler(get_service_message_handler())
 
-    # ... 其余代码不变 ...
+    # ========== 添加启动验证和定期检查 ==========
+    # 使用 post_init 回调进行启动验证
+    app.post_init = verify_groups_on_startup
+
+    # 使用 JobQueue 进行定期检查（每24小时）
+    try:
+        # 获取 JobQueue
+        job_queue = app.job_queue
+        if job_queue:
+            # 每24小时执行一次定期检查
+            job_queue.run_repeating(
+                lambda context: periodic_group_verification(app),
+                interval=86400,  # 24小时 = 86400秒
+                first=3600  # 启动后1小时第一次执行
+            )
+            print("✅ 定期群组验证任务已启动（每24小时检查一次）")
+        else:
+            print("⚠️ JobQueue 未启用，无法启动定期群组验证")
+    except Exception as e:
+        print(f"⚠️ 启动定期群组验证失败: {e}")
 
     print("=" * 50)
     print("🤖 机器人启动成功...")
@@ -473,6 +653,8 @@ def main():
     print("📌 功能提示：")
     print("  • 机器人加入群组时会自动记录")
     print("  • 退出群组时会自动清理数据")
+    print("  • 启动时会自动验证所有群组并清理无效记录")
+    print("  • 每24小时自动验证一次群组状态")
     print("  • 记账功能仅在群组中可用，支持以下指令：")
     print("    - +金额：添加入款")
     print("    - -金额：修正入款")
@@ -487,28 +669,6 @@ def main():
     print("  • 计算器功能：群内发送如 100+200 即可计算")
     print("  • 群组管理：可创建分类，按分类筛选群组进行群发")
     print("=" * 50)
-
-    # 启动定时清理任务
-    try:
-        from apscheduler.schedulers.asyncio import AsyncIOScheduler
-
-        async def cleanup_wrapper():
-            """包装清理函数为异步"""
-            try:
-                from handlers.accounting import accounting_manager
-                accounting_manager.cleanup_expired_groups()
-                print("✅ 定时清理任务执行完成")
-            except Exception as e:
-                print(f"❌ 清理任务执行失败: {e}")
-
-        scheduler = AsyncIOScheduler()
-        scheduler.add_job(cleanup_wrapper, 'interval', hours=24)
-        scheduler.start()
-        print("✅ 定时清理任务已启动（每天清理过期群组数据）")
-    except ImportError:
-        print("⚠️ 未安装 apscheduler，跳过定时清理任务")
-    except Exception as e:
-        print(f"⚠️ 启动定时清理任务失败: {e}")
 
     # 启动机器人
     app.run_polling()
