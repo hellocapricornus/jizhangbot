@@ -387,8 +387,8 @@ class AccountingManager:
                     else:
                         expense_usdt = stat[1] or 0
 
-                start_beijing = beijing_time(start_time)
-                date_str = start_beijing.strftime('%Y-%m-%d')
+                end_beijing = beijing_time(now)
+                date_str = end_beijing.strftime('%Y-%m-%d')  # 使用结束时间
 
                 c.execute("""
                     INSERT OR REPLACE INTO accounting_sessions 
