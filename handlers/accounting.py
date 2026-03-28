@@ -353,7 +353,7 @@ class AccountingManager:
             }
 
     def end_session(self, group_id: str) -> Optional[Dict]:
-        """结束当前会话"""
+        """结束当前会话，并按自然日分割账单"""
         try:
             with self._get_conn() as conn:
                 c = conn.cursor()
@@ -369,33 +369,57 @@ class AccountingManager:
                 if not row:
                     return None
 
-                session_id, fee_rate, exchange_rate, start_time = row
+                old_session_id, fee_rate, exchange_rate, start_time = row
 
+                # 获取所有记录，按日期分组
                 c.execute("""
-                    SELECT record_type, SUM(amount_usdt)
+                    SELECT date, COUNT(*), 
+                           SUM(CASE WHEN record_type = 'income' THEN amount_usdt ELSE 0 END) as income_usdt,
+                           SUM(CASE WHEN record_type = 'expense' THEN amount_usdt ELSE 0 END) as expense_usdt
                     FROM accounting_records
                     WHERE group_id = ? AND session_id = ?
-                    GROUP BY record_type
-                """, (group_id, session_id))
-                stats_rows = c.fetchall()
+                    GROUP BY date
+                    ORDER BY date
+                """, (group_id, old_session_id))
+                date_groups = c.fetchall()
 
-                income_usdt = 0
-                expense_usdt = 0
-                for stat in stats_rows:
-                    if stat[0] == 'income':
-                        income_usdt = stat[1] or 0
-                    else:
-                        expense_usdt = stat[1] or 0
+                # 如果没有记录，直接结束
+                if not date_groups:
+                    c.execute("""
+                        UPDATE group_accounting_config 
+                        SET is_active = 0, session_end_time = ?, updated_at = ?
+                        WHERE group_id = ? AND is_active = 1
+                    """, (now, now, group_id))
+                    conn.commit()
+                    return None
 
-                end_beijing = beijing_time(now)
-                date_str = end_beijing.strftime('%Y-%m-%d')  # 使用结束时间
+                # 为每个日期创建独立的会话记录
+                for date_group in date_groups:
+                    date_str = date_group[0]
+                    income_usdt = date_group[2] or 0
+                    expense_usdt = date_group[3] or 0
 
-                c.execute("""
-                    INSERT OR REPLACE INTO accounting_sessions 
-                    (session_id, group_id, start_time, end_time, date, fee_rate, exchange_rate)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                """, (session_id, group_id, start_time, now, date_str, fee_rate, exchange_rate))
+                    # 为该日期的记录创建新的 session_id
+                    new_session_id = f"{old_session_id}_{date_str}"
 
+                    # 获取该日期的开始和结束时间
+                    c.execute("""
+                        SELECT MIN(created_at), MAX(created_at)
+                        FROM accounting_records
+                        WHERE group_id = ? AND session_id = ? AND date = ?
+                    """, (group_id, old_session_id, date_str))
+                    time_range = c.fetchone()
+                    day_start = time_range[0] or start_time
+                    day_end = time_range[1] or now
+
+                    # 插入该日期的会话记录
+                    c.execute("""
+                        INSERT INTO accounting_sessions 
+                        (session_id, group_id, start_time, end_time, date, fee_rate, exchange_rate)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """, (new_session_id, group_id, day_start, day_end, date_str, fee_rate, exchange_rate))
+
+                # 更新原会话为已结束（但实际数据已按日期拆分）
                 c.execute("""
                     UPDATE group_accounting_config 
                     SET is_active = 0, session_end_time = ?, updated_at = ?
@@ -404,12 +428,16 @@ class AccountingManager:
 
                 conn.commit()
 
+                # 计算总的统计（所有日期的总和）
+                total_income_usdt = sum(g[2] for g in date_groups)
+                total_expense_usdt = sum(g[3] for g in date_groups)
+
                 return {
-                    'session_id': session_id,
+                    'session_id': old_session_id,
                     'fee_rate': fee_rate,
                     'exchange_rate': exchange_rate,
-                    'income_usdt': income_usdt,
-                    'expense_usdt': expense_usdt
+                    'income_usdt': total_income_usdt,
+                    'expense_usdt': total_expense_usdt
                 }
         except Exception as e:
             logger.error(f"结束会话失败: {e}")
@@ -581,7 +609,7 @@ class AccountingManager:
         try:
             # 确保会话存在
             self.get_or_create_session(group_id)
-            
+
             with self._get_conn() as conn:
                 c = conn.cursor()
                 now = int(time.time())
@@ -601,7 +629,7 @@ class AccountingManager:
         try:
             # 确保会话存在
             self.get_or_create_session(group_id)
-            
+
             with self._get_conn() as conn:
                 c = conn.cursor()
                 now = int(time.time())
@@ -935,7 +963,7 @@ def _format_record_line(record: Dict) -> str:
     else:
         mention = f" {display_name}"
 
-    
+
     if amount < 0:
         return f"`{time_str} {amount:.2f} = {amount_usdt:.2f} USDT`{mention}"
     else:
@@ -1406,7 +1434,7 @@ async def handle_date_selection(update: Update, context: ContextTypes.DEFAULT_TY
         message += "\n\n"
     else:
         message += "📉 **出款 0 笔**\n\n"
-            
+
     total_income_cny = stats['income_total']
     total_income_usdt = stats['income_usdt']
     total_expense_usdt = stats['expense_usdt']
@@ -1618,43 +1646,43 @@ async def welcome_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
     """处理新成员加入事件"""
     # 获取 chat_member 更新
     chat_member = update.chat_member
-    
+
     if not chat_member:
         print("❌ 没有 chat_member 数据")
         return
-    
+
     # 获取新旧状态
     old_status = chat_member.old_chat_member.status if chat_member.old_chat_member else None
     new_status = chat_member.new_chat_member.status if chat_member.new_chat_member else None
-    
+
     print(f"[欢迎检测] 群组: {chat_member.chat.title}")
     print(f"[欢迎检测] 旧状态: {old_status}")
     print(f"[欢迎检测] 新状态: {new_status}")
-    
+
     # 检测成员加入（从 left/kicked/restricted 变为 member）
     if new_status == 'member' and old_status in ['left', 'kicked', 'restricted']:
         print(f"✅ 检测到新成员加入！")
-        
+
         user = chat_member.new_chat_member.user
         chat = chat_member.chat
-        
+
         # 获取用户信息
         first_name = user.first_name or ""
         username = user.username
-        
+
         # 构建欢迎语
         if username:
             welcome_text = f"{first_name} @{username}\n欢迎加入本群"
         else:
             welcome_text = f"{first_name}\n欢迎加入本群"
-        
+
         # 发送欢迎消息
         try:
             await context.bot.send_message(chat_id=chat.id, text=welcome_text)
             print(f"✅ 欢迎消息已发送: {welcome_text}")
         except Exception as e:
             print(f"❌ 发送欢迎消息失败: {e}")
-    
+
     # 检测成员离开（从 member 变为 left/kicked）
     elif old_status == 'member' and new_status in ['left', 'kicked']:
         print(f"👋 检测到成员离开")
