@@ -4,6 +4,7 @@ import re
 import time
 import sqlite3
 import logging
+import aiohttp
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Tuple, Optional
@@ -18,6 +19,17 @@ logger = logging.getLogger(__name__)
 # 常量配置
 MAX_DISPLAY_RECORDS = 8  # 账单显示的最大记录数
 DB_TIMEOUT = 10  # 数据库连接超时（秒）
+
+# USDT 合约地址（可根据需要添加更多）
+USDT_CONTRACTS = {
+    'TRC20': 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t',  # TRC20 USDT
+    'ERC20': '0xdAC17F958D2ee523a2206206994597C13D831ec7'  # ERC20 USDT
+}
+
+# API 配置
+TRONGRID_API = "https://api.trongrid.io"
+ETHERSCAN_API = "https://api.etherscan.io/api"
+ETHERSCAN_API_KEY = "MVYZTUF89KQ117USY6WH8CT2M6W7TK3PUD"  # 需要去 https://etherscan.io 注册获取
 
 # 设置北京时区 (UTC+8)
 BEIJING_TZ = timezone(timedelta(hours=8))
@@ -299,6 +311,34 @@ class AccountingManager:
             """)
 
             conn.commit()
+
+    def init_query_tables(self):
+        """初始化地址查询记录表"""
+        with self._get_conn() as conn:
+            c = conn.cursor()
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS address_queries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    group_id TEXT NOT NULL,
+                    address TEXT NOT NULL,
+                    chain_type TEXT NOT NULL,
+                    query_time INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    username TEXT,
+                    balance REAL,
+                    UNIQUE(group_id, address)
+                )
+            """)
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS address_query_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    address TEXT NOT NULL,
+                    query_time INTEGER NOT NULL,
+                    balance REAL
+                )
+            """)
+            conn.commit()
+            logger.info("✅ 地址查询表初始化完成")
 
     def get_or_create_session(self, group_id: str) -> Dict:
         """获取或创建当前会话"""
@@ -935,6 +975,52 @@ class AccountingManager:
             logger.error(f"清理过期群组失败: {e}")
             return 0
 
+    # ========== USDT 地址查询相关方法 ==========
+
+    def record_address_query(self, group_id: str, address: str, chain_type: str, 
+                              user_id: int, username: str, balance: float):
+        """记录地址查询次数"""
+        try:
+            now = int(time.time())
+            with self._get_conn() as conn:
+                c = conn.cursor()
+                c.execute("""
+                    INSERT INTO address_queries (group_id, address, chain_type, query_time, user_id, username, balance)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(group_id, address) DO UPDATE SET
+                        query_time = excluded.query_time,
+                        user_id = excluded.user_id,
+                        username = excluded.username,
+                        balance = excluded.balance
+                """, (group_id, address, chain_type, now, user_id, username, balance))
+                c.execute("""
+                    INSERT INTO address_query_log (address, query_time, balance)
+                    VALUES (?, ?, ?)
+                """, (address, now, balance))
+                conn.commit()
+        except Exception as e:
+            logger.error(f"记录地址查询失败: {e}")
+
+    def get_address_stats(self, address: str) -> dict:
+        """获取地址被查询的统计信息"""
+        try:
+            with self._get_conn() as conn:
+                c = conn.cursor()
+                c.execute("SELECT COUNT(*) FROM address_query_log WHERE address = ?", (address,))
+                total_queries = c.fetchone()[0]
+                c.execute("SELECT MIN(query_time) FROM address_query_log WHERE address = ?", (address,))
+                first_query = c.fetchone()[0]
+                c.execute("SELECT MAX(query_time) FROM address_query_log WHERE address = ?", (address,))
+                last_query = c.fetchone()[0]
+                return {
+                    'total_queries': total_queries,
+                    'first_query': first_query,
+                    'last_query': last_query
+                }
+        except Exception as e:
+            logger.error(f"获取地址统计失败: {e}")
+            return {'total_queries': 0, 'first_query': None, 'last_query': None}
+
 
 # 全局实例
 accounting_manager = None
@@ -944,6 +1030,67 @@ def init_accounting(db_path: str):
     global accounting_manager
     accounting_manager = AccountingManager(db_path)
     accounting_manager.init_tables()
+    accounting_manager.init_query_tables()  # 新增
+
+# ==================== USDT 地址查询函数 ====================
+
+async def query_trc20_balance(address: str) -> dict:
+    """查询 TRC20 USDT 余额"""
+    try:
+        async with aiohttp.ClientSession() as session:
+            url = f"{TRONGRID_API}/v1/accounts/{address}"
+            async with session.get(url) as resp:
+                data = await resp.json()
+
+            if data.get('data') and len(data['data']) > 0:
+                account = data['data'][0]
+                trc20_tokens = account.get('trc20', [])
+                for token in trc20_tokens:
+                    if USDT_CONTRACTS['TRC20'] in token:
+                        balance = int(token[USDT_CONTRACTS['TRC20']]) / 10**6
+                        return {'balance': balance, 'success': True, 'chain': 'TRC20'}
+            return {'balance': 0, 'success': True, 'chain': 'TRC20'}
+    except Exception as e:
+        logger.error(f"TRC20 查询失败: {e}")
+        return {'balance': None, 'success': False, 'error': str(e)}
+
+async def query_erc20_balance(address: str) -> dict:
+    """查询 ERC20 USDT 余额"""
+    try:
+        params = {
+            'module': 'account',
+            'action': 'tokenbalance',
+            'contractaddress': USDT_CONTRACTS['ERC20'],
+            'address': address,
+            'tag': 'latest',
+            'apikey': ETHERSCAN_API_KEY
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.get(ETHERSCAN_API, params=params) as resp:
+                data = await resp.json()
+
+            if data.get('status') == '1':
+                balance = int(data.get('result', 0)) / 10**6
+                return {'balance': balance, 'success': True, 'chain': 'ERC20'}
+            return {'balance': 0, 'success': True, 'chain': 'ERC20'}
+    except Exception as e:
+        logger.error(f"ERC20 查询失败: {e}")
+        return {'balance': None, 'success': False, 'error': str(e)}
+
+def is_valid_address(text: str) -> tuple:
+    """检测文本中的 USDT 地址，返回 (是否匹配, 地址, 链类型)"""
+    trc20_pattern = r'T[0-9A-Za-z]{33}'
+    erc20_pattern = r'0x[0-9a-fA-F]{40}'
+
+    trc20_match = re.search(trc20_pattern, text)
+    if trc20_match:
+        return True, trc20_match.group(), 'TRC20'
+
+    erc20_match = re.search(erc20_pattern, text)
+    if erc20_match:
+        return True, erc20_match.group(), 'ERC20'
+
+    return False, None, None
 
 
 def _format_record_line(record: Dict) -> str:
@@ -1698,6 +1845,44 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     text = message.text.strip() if message.text else ""
+
+    # ========== 1. 优先处理 USDT 地址查询（不需要权限） ==========
+    is_addr, address, chain_type = is_valid_address(text)
+    if is_addr:
+        user = message.from_user
+        group_id = str(chat.id)
+
+        status_msg = await message.reply_text(f"🔍 正在查询 {chain_type} 地址余额，请稍候...")
+
+        if chain_type == 'TRC20':
+            result = await query_trc20_balance(address)
+        else:
+            result = await query_erc20_balance(address)
+
+        if result.get('success'):
+            balance = result['balance']
+
+            if accounting_manager:
+                accounting_manager.record_address_query(
+                    group_id, address, chain_type, user.id,
+                    user.username or user.first_name, balance
+                )
+                stats = accounting_manager.get_address_stats(address)
+
+            first_time = datetime.fromtimestamp(stats['first_query']).strftime('%Y-%m-%d %H:%M') if stats['first_query'] else '首次'
+            last_time = datetime.fromtimestamp(stats['last_query']).strftime('%Y-%m-%d %H:%M') if stats['last_query'] else '刚刚'
+
+            reply = (
+                f"💰 **USDT 地址查询结果**\n\n"
+                f"📌 地址：`{address}`\n"
+                f"⛓️ 网络：{chain_type}\n"
+                f"💵 余额：**{balance:.2f} USDT**\n"
+            )
+            await status_msg.edit_text(reply, parse_mode='Markdown')
+        else:
+            error_msg = result.get('error', '查询失败，请稍后重试')
+            await status_msg.edit_text(f"❌ 查询失败：{error_msg}")
+        return
 
     # 追踪用户信息
     await handle_user_info_tracking(update, context)
