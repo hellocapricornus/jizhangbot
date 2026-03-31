@@ -32,27 +32,40 @@ def get_git_root():
 def restart_bot():
     """重启机器人"""
     try:
-        # 获取当前进程ID
+        import subprocess
+        import os
+        import sys
+        import signal
+        
         pid = os.getpid()
         print(f"[重启] 正在重启机器人 (PID: {pid})...")
 
-        # 使用 screen 重启
-        # 方法1：通过 screen 命令重启
         script_path = os.path.join(get_git_root(), "restart.sh")
 
-        # 创建重启脚本
+        # 修改重启脚本，先强制停止旧进程
         with open(script_path, 'w') as f:
             f.write(f"""#!/bin/bash
-# 等待当前进程结束
-sleep 2
+echo "正在重启机器人..."
+
+# 先停止所有旧进程
+pkill -f "python.*main.py" 2>/dev/null
+echo "已停止旧进程"
+
+# 等待更长时间确保连接释放
+sleep 5
+
+# 启动新进程
 cd {get_git_root()}
-source venv/bin/activate
-python3 main.py
+echo "启动新进程..."
+nohup python3 main.py > bot.log 2>&1 &
+echo "机器人已重启"
 """)
         os.chmod(script_path, 0o755)
 
-        # 启动新进程并退出当前进程
+        # 启动新进程
         subprocess.Popen([script_path], start_new_session=True)
+        
+        # 退出当前进程
         sys.exit(0)
 
     except Exception as e:
