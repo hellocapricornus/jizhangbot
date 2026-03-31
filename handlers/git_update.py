@@ -1,5 +1,3 @@
-# handlers/git_update.py
-
 import subprocess
 import os
 import sys
