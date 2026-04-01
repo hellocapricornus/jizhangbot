@@ -69,7 +69,7 @@ async def check_address_transactions(context: ContextTypes.DEFAULT_TYPE):
             update_address_last_check(address, current_time)
 
             for tx in txs:
-                tx_id = tx.get("txID", "")
+                tx_id = tx.get("transaction_id", "")
                 from_addr = tx.get("from", "")
                 to_addr = tx.get("to", "")
                 raw_amount = tx.get("value", 0)
@@ -308,7 +308,7 @@ async def monitor_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += f"   📅 添加时间：{added_time.strftime('%Y-%m-%d %H:%M')}\n\n"
 
     keyboard = [[InlineKeyboardButton("◀️ 返回", callback_data="monitor_menu")]]
-    await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
 
 
 async def monitor_remove_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
