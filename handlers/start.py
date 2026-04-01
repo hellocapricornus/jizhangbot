@@ -9,7 +9,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理 /start 命令"""
     user_id = update.effective_user.id
     chat = update.effective_chat
-    
+
     # 群组中的处理
     if chat.type in ['group', 'supergroup']:
         await update.message.reply_text(
@@ -21,16 +21,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🔧 **管理功能**请私聊机器人使用 /start"
         )
         return
-    
-    # 私聊中的处理
-    if not is_authorized(user_id):
-        await update.message.reply_text(
-            "❌ 您没有权限使用此机器人。\n"
-            "请联系 @ChinaEdward 管理员授权。"
-        )
-        return
-    
-    # 授权用户显示主菜单
+
+    # 所有人都能看到菜单，点击功能时会在 button_router 中检查权限
     await update.message.reply_text(
         "请选择功能：",
         reply_markup=get_main_menu()
