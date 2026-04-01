@@ -72,6 +72,13 @@ def init_db():
         )
     """)
 
+    # ========== 新增：自动迁移 note 字段 ==========
+    try:
+        c.execute("SELECT note FROM monitored_addresses LIMIT 1")
+    except sqlite3.OperationalError:
+        c.execute("ALTER TABLE monitored_addresses ADD COLUMN note TEXT DEFAULT ''")
+        print("✅ 已为 monitored_addresses 表添加 note 字段")
+
     # 新增：交易记录表
     c.execute("""
         CREATE TABLE IF NOT EXISTS address_transactions (
