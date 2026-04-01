@@ -67,6 +67,7 @@ def init_db():
             added_at INTEGER NOT NULL,
             last_check INTEGER DEFAULT 0,
             last_tx_id TEXT,
+            note TEXT DEFAULT '',
             UNIQUE(address, chain_type)
         )
     """)
@@ -97,24 +98,24 @@ def get_monitored_addresses(user_id: int = None):
     c = conn.cursor()
 
     if user_id is not None:
-        c.execute("SELECT id, address, chain_type, added_by, added_at, last_check FROM monitored_addresses WHERE added_by = ? ORDER BY added_at DESC", (user_id,))
+        c.execute("SELECT id, address, chain_type, added_by, added_at, last_check, note FROM monitored_addresses WHERE added_by = ? ORDER BY added_at DESC", (user_id,))
     else:
-        c.execute("SELECT id, address, chain_type, added_by, added_at, last_check FROM monitored_addresses ORDER BY added_at DESC")
+        c.execute("SELECT id, address, chain_type, added_by, added_at, last_check, note FROM monitored_addresses ORDER BY added_at DESC")
 
     rows = c.fetchall()
     conn.close()
-    return [{"id": r[0], "address": r[1], "chain_type": r[2], "added_by": r[3], "added_at": r[4], "last_check": r[5]} for r in rows]
+    return [{"id": r[0], "address": r[1], "chain_type": r[2], "added_by": r[3], "added_at": r[4], "last_check": r[5], "note": r[6] or ""} for r in rows]
 
 
-def add_monitored_address(address: str, chain_type: str, added_by: int):
-    """添加监控地址"""
+def add_monitored_address(address: str, chain_type: str, added_by: int, note: str = ""):
+    """添加监控地址（支持备注）"""
     conn = get_db_connection()
     c = conn.cursor()
     try:
         c.execute("""
-            INSERT INTO monitored_addresses (address, chain_type, added_by, added_at, last_check)
-            VALUES (?, ?, ?, ?, 0)
-        """, (address, chain_type, added_by, int(time.time())))
+            INSERT INTO monitored_addresses (address, chain_type, added_by, added_at, last_check, note)
+            VALUES (?, ?, ?, ?, 0, ?)
+        """, (address, chain_type, added_by, int(time.time()), note))
         conn.commit()
         return True
     except Exception as e:
