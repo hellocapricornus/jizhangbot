@@ -11,6 +11,9 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
+    # 设置模块标识（关键！）
+    context.user_data["active_module"] = "usdt"
+
     # 设置独立 session 存储用户查询状态
     context.user_data["usdt_session"] = {
         "waiting_for_address": True
