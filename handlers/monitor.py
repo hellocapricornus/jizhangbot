@@ -228,8 +228,8 @@ async def monitor_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = "📋 **您的监控地址列表**\n\n"
     for i, addr in enumerate(addresses, 1):
-        short_addr = f"{addr['address'][:10]}...{addr['address'][-8:]}"
-        text += f"{i}. `{short_addr}` ({addr['chain_type']})\n"
+        full_addr = addr['address']
+        text += f"{i}. `{full_addr}` ({addr['chain_type']})\n"
         added_time = datetime.fromtimestamp(addr['added_at'], tz=timezone.utc).astimezone(BEIJING_TZ)
         text += f"   📅 添加时间：{added_time.strftime('%Y-%m-%d %H:%M')}\n\n"
 
@@ -254,8 +254,11 @@ async def monitor_remove_start(update: Update, context: ContextTypes.DEFAULT_TYP
 
     keyboard = []
     for addr in addresses:
-        short_addr = f"{addr['address'][:12]}...{addr['address'][-8:]}"
-        keyboard.append([InlineKeyboardButton(f"🗑️ {short_addr}", callback_data=f"monitor_del_{addr['id']}")])
+        # 显示完整地址（或显示前15后10）
+        full_addr = addr['address']
+        # 如果地址太长，可以显示前15后10
+        # short_addr = f"{full_addr[:15]}...{full_addr[-10:]}" if len(full_addr) > 30 else full_addr
+        keyboard.append([InlineKeyboardButton(f"🗑️ {full_addr}", callback_data=f"monitor_del_{addr['id']}")])
 
     keyboard.append([InlineKeyboardButton("◀️ 返回", callback_data="monitor_menu")])
 
