@@ -298,11 +298,17 @@ async def input_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_text_input(update, context)
         return
 
-    # ========== 新增：检查是否在监控模块的添加状态 ==========
-    if context.user_data.get("monitor_action") == "add":
+    # ========== 检查是否在监控模块的添加状态 ==========
+    monitor_action = context.user_data.get("monitor_action")
+    if monitor_action == "add":
         print(f"[DEBUG] 监控模块: 处理地址输入")
         from handlers import monitor
         await monitor.monitor_add_input(update, context)
+        return
+    elif monitor_action == "add_note":
+        print(f"[DEBUG] 监控模块: 处理备注输入")
+        from handlers import monitor
+        await monitor.monitor_add_note(update, context)
         return
 
     module = context.user_data.get("active_module")
