@@ -1,6 +1,7 @@
 # main.py - 修正后的版本
 
 import asyncio
+from handlers import monitor
 from telegram import Update
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
@@ -32,6 +33,37 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     print(f"[DEBUG] button_router 收到: {query.data}")
+
+    # ========== 优先处理监控模块按钮（让 ConversationHandler 也能处理） ==========
+    if query.data == "monitor_add":
+        print(f"[DEBUG] 监控模块: 添加地址")
+        from handlers import monitor
+        await monitor.monitor_add_start(update, context)
+        return
+
+    if query.data == "monitor_remove":
+        print(f"[DEBUG] 监控模块: 删除地址")
+        from handlers import monitor
+        await monitor.monitor_remove_start(update, context)
+        return
+
+    if query.data.startswith("monitor_del_"):
+        print(f"[DEBUG] 监控模块: 确认删除")
+        from handlers import monitor
+        await monitor.monitor_remove_confirm(update, context)
+        return
+
+    if query.data == "monitor_list":
+        print(f"[DEBUG] 监控模块: 查看列表")
+        from handlers import monitor
+        await monitor.monitor_list(update, context)
+        return
+
+    if query.data == "monitor_menu":
+        print(f"[DEBUG] 监控模块: 主菜单")
+        from handlers import monitor
+        await monitor.monitor_menu(update, context)
+        return
 
     # ========== 先处理广播按钮 ==========
     if query.data == "broadcast":
@@ -264,6 +296,13 @@ async def input_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print(f"[DEBUG] 检测到群组管理状态，交给 handle_text_input")
         from handlers.group_manager import handle_text_input
         await handle_text_input(update, context)
+        return
+
+    # ========== 新增：检查是否在监控模块的添加状态 ==========
+    if context.user_data.get("monitor_action") == "add":
+        print(f"[DEBUG] 监控模块: 处理地址输入")
+        from handlers import monitor
+        await monitor.monitor_add_input(update, context)
         return
 
     module = context.user_data.get("active_module")
@@ -617,6 +656,31 @@ def main():
 
     # 12. 注册群组成员加入/退出监听器（服务消息方式，处理普通成员加入/退出）
     app.add_handler(get_service_message_handler())
+
+    # 添加监控模块
+    app.add_handler(CallbackQueryHandler(monitor.monitor_menu, pattern="^monitor_menu$"))
+    app.add_handler(CallbackQueryHandler(monitor.monitor_list, pattern="^monitor_list$"))
+    app.add_handler(CallbackQueryHandler(monitor.monitor_remove_start, pattern="^monitor_remove$"))
+
+    # 添加监控模块的对话处理器
+    monitor_conv_handler = monitor.get_monitor_conversation_handler()
+    app.add_handler(monitor_conv_handler)
+
+    # 添加取消命令
+    app.add_handler(CommandHandler("cancel_monitor", monitor.monitor_cancel))
+
+    # 添加定时任务（每30秒检查一次）
+    async def start_monitor_check():
+        """启动监控定时任务"""
+        job_queue = app.job_queue
+        if job_queue:
+            job_queue.run_repeating(monitor.check_address_transactions, interval=30, first=10)
+            print("✅ USDT 地址监控已启动（每30秒检查一次）")
+
+    # 在 app 启动后添加定时任务（在 app.run_polling() 之前）
+    if app.job_queue:
+        app.job_queue.run_repeating(monitor.check_address_transactions, interval=30, first=10)
+        print("✅ USDT 地址监控已启动（每30秒检查一次）")
 
     # ========== 添加启动验证和定期检查 ==========
     # 使用 post_init 回调进行启动验证
