@@ -25,7 +25,23 @@ BEIJING_TZ = timezone(timedelta(hours=8))
 TRONGRID_API = "https://api.trongrid.io"
 USDT_CONTRACT = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
 
-
+async def get_address_balance(address: str) -> float:
+    """获取地址的 USDT 余额"""
+    import aiohttp
+    try:
+        url = f"{TRONGRID_API}/v1/accounts/{address}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                data = await resp.json()
+                if data.get('data') and len(data['data']) > 0:
+                    trc20 = data['data'][0].get('trc20', [])
+                    for token in trc20:
+                        if USDT_CONTRACT in token:
+                            return int(token[USDT_CONTRACT]) / 1_000_000
+    except Exception as e:
+        print(f"查询余额失败: {e}")
+    return 0.0
+    
 async def get_trc20_transactions(address: str, min_timestamp: int = 0):
     """获取 TRC20 USDT 交易记录"""
     import aiohttp
@@ -68,6 +84,9 @@ async def check_address_transactions(context: ContextTypes.DEFAULT_TYPE):
             # 更新最后检查时间
             update_address_last_check(address, current_time)
 
+            # 获取当前余额
+            current_balance = await get_address_balance(address)
+
             for tx in txs:
                 tx_id = tx.get("transaction_id", "")
                 from_addr = tx.get("from", "")
@@ -101,9 +120,11 @@ async def check_address_transactions(context: ContextTypes.DEFAULT_TYPE):
 
                 # 如果有备注，显示备注
                 if note:
-                    message += f"📝 备注：{note}\n\n"
+                    message += f"📝 备注：{note}\n"
                 else:
                     message += "\n"
+
+                message += f"💎 当前余额：**{current_balance:.2f} USDT**\n\n"
 
                 message += (
                     f"💰 金额：**{amount:.2f} USDT**\n"
