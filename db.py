@@ -67,10 +67,16 @@ def init_db():
             added_at INTEGER NOT NULL,
             last_check INTEGER DEFAULT 0,
             last_tx_id TEXT,
-            note TEXT DEFAULT '',
-            UNIQUE(address, chain_type)
+            note TEXT DEFAULT ''
         )
     """)
+    
+    # 迁移：删除旧的唯一约束（如果存在）
+    try:
+        c.execute("DROP INDEX IF EXISTS sqlite_autoindex_monitored_addresses_1")
+        print("✅ 已移除 monitored_addresses 的唯一约束")
+    except:
+        pass
 
     # ========== 新增：自动迁移 note 字段 ==========
     try:
