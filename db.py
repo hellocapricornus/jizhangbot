@@ -121,10 +121,20 @@ def get_monitored_addresses(user_id: int = None):
 
 
 def add_monitored_address(address: str, chain_type: str, added_by: int, note: str = ""):
-    """添加监控地址（支持备注）"""
+    """添加监控地址（支持备注）
+    - 不同用户可以添加同一个地址
+    - 同一用户不能重复添加同一个地址
+    """
     conn = get_db_connection()
     c = conn.cursor()
     try:
+        # 检查该用户是否已经添加过这个地址
+        c.execute("SELECT id FROM monitored_addresses WHERE address = ? AND added_by = ?", (address, added_by))
+        if c.fetchone():
+            print(f"用户 {added_by} 已添加过地址 {address}")
+            return False
+
+        # 允许不同用户添加
         c.execute("""
             INSERT INTO monitored_addresses (address, chain_type, added_by, added_at, last_check, note)
             VALUES (?, ?, ?, ?, 0, ?)
