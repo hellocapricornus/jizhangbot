@@ -41,6 +41,51 @@ async def get_address_balance(address: str) -> float:
     except Exception as e:
         print(f"查询余额失败: {e}")
     return 0.0
+
+async def get_monthly_stats(address: str) -> dict:
+    """获取地址本月的 USDT 收支统计"""
+    import aiohttp
+    from datetime import datetime
+    
+    # 获取本月第一天的时间戳（北京时间）
+    now = datetime.now()
+    first_day = datetime(now.year, now.month, 1, 0, 0, 0)
+    start_timestamp = int(first_day.timestamp())
+    
+    total_received = 0.0
+    total_sent = 0.0
+    
+    try:
+        url = f"{TRONGRID_API}/v1/accounts/{address}/transactions/trc20"
+        params = {
+            "contract_address": USDT_CONTRACT,
+            "limit": 200,
+            "min_timestamp": start_timestamp * 1000
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    txs = data.get("data", [])
+                    
+                    for tx in txs:
+                        from_addr = tx.get("from", "")
+                        to_addr = tx.get("to", "")
+                        raw_amount = tx.get("value", 0)
+                        amount = int(raw_amount) / 1_000_000 if raw_amount else 0
+                        
+                        if to_addr == address:
+                            total_received += amount
+                        elif from_addr == address:
+                            total_sent += amount
+    except Exception as e:
+        print(f"查询月度统计失败: {e}")
+    
+    return {
+        "received": total_received,
+        "sent": total_sent,
+        "net": total_received - total_sent
+    }
     
 async def get_trc20_transactions(address: str, min_timestamp: int = 0):
     """获取 TRC20 USDT 交易记录"""
@@ -87,6 +132,8 @@ async def check_address_transactions(context: ContextTypes.DEFAULT_TYPE):
             # 获取当前余额
             current_balance = await get_address_balance(address)
 
+            monthly_stats = await get_monthly_stats(address)
+
             for tx in txs:
                 tx_id = tx.get("transaction_id", "")
                 from_addr = tx.get("from", "")
@@ -131,8 +178,14 @@ async def check_address_transactions(context: ContextTypes.DEFAULT_TYPE):
                     f"🔄 方向：{direction}\n"
                     f"📤 发送方：`{short_from}`\n"
                     f"📥 接收方：`{short_to}`\n"
-                    f"🔗 [查看交易](https://tronscan.org/#/transaction/{tx_id})\n"
-                    f"⏰ 时间：{time_str}"
+                    f"⏰ 时间：{time_str}\n\n""
+                )
+
+                message += (
+                    f"📅 **本月统计**\n"
+                    f"• 累计收到：**{monthly_stats['received']:.2f} USDT**\n"
+                    f"• 累计转出：**{monthly_stats['sent']:.2f} USDT**\n"
+                    f"• 净收入：**{monthly_stats['net']:.2f} USDT**\n\n"
                 )
 
                 # 只发送给添加该地址的用户
@@ -162,6 +215,7 @@ async def monitor_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("➕ 添加监控地址", callback_data="monitor_add")],
         [InlineKeyboardButton("📋 查看监控列表", callback_data="monitor_list")],
+        [InlineKeyboardButton("📊 月度统计", callback_data="monitor_stats")],
         [InlineKeyboardButton("❌ 删除监控地址", callback_data="monitor_remove")],
         [InlineKeyboardButton("◀️ 返回主菜单", callback_data="main_menu")]
     ]
@@ -186,6 +240,46 @@ async def monitor_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
 
+async def monitor_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """查看监控地址的月度统计"""
+    query = update.callback_query
+    user_id = query.from_user.id
+    
+    if not is_authorized(user_id):
+        await query.answer("❌ 无权限", show_alert=True)
+        return
+    
+    await query.answer()
+    
+    addresses = get_monitored_addresses(user_id=user_id)
+    
+    if not addresses:
+        await query.message.edit_text("📭 您还没有添加任何监控地址")
+        await asyncio.sleep(1)
+        await monitor_menu(update, context)
+        return
+    
+    # 发送"查询中"提示
+    await query.message.edit_text("📊 正在查询月度统计，请稍候...")
+    
+    text = "📊 **监控地址月度统计**\n\n"
+    
+    for addr_info in addresses:
+        address = addr_info["address"]
+        note = addr_info.get("note", "")
+        short_addr = f"{address[:8]}...{address[-6:]}"
+        
+        stats = await get_monthly_stats(address)
+        
+        text += f"📌 {short_addr}"
+        if note:
+            text += f" ({note})"
+        text += f"\n   💰 本月收到：**{stats['received']:.2f} USDT**"
+        text += f"\n   📤 本月转出：**{stats['sent']:.2f} USDT**"
+        text += f"\n   📈 净收入：**{stats['net']:.2f} USDT**\n\n"
+    
+    keyboard = [[InlineKeyboardButton("◀️ 返回", callback_data="monitor_menu")]]
+    await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
 
 async def monitor_add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """开始添加监控地址"""
@@ -398,6 +492,7 @@ async def monitor_menu_from_message(update: Update, context: ContextTypes.DEFAUL
     keyboard = [
         [InlineKeyboardButton("➕ 添加监控地址", callback_data="monitor_add")],
         [InlineKeyboardButton("📋 查看监控列表", callback_data="monitor_list")],
+        [InlineKeyboardButton("📊 月度统计", callback_data="monitor_stats")],
         [InlineKeyboardButton("❌ 删除监控地址", callback_data="monitor_remove")],
         [InlineKeyboardButton("◀️ 返回主菜单", callback_data="main_menu")]
     ]
