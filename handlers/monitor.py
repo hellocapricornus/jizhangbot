@@ -178,7 +178,7 @@ async def check_address_transactions(context: ContextTypes.DEFAULT_TYPE):
                     f"🔄 方向：{direction}\n"
                     f"📤 发送方：`{short_from}`\n"
                     f"📥 接收方：`{short_to}`\n"
-                    f"⏰ 时间：{time_str}\n\n""
+                    f"⏰ 时间：{time_str}\n\n"
                 )
 
                 message += (
