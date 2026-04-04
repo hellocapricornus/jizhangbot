@@ -23,6 +23,7 @@ BEIJING_TZ = timezone(timedelta(hours=8))
 
 # API 配置
 TRONGRID_API = "https://api.trongrid.io"
+TRONGRID_API_KEY = "b7f1c9fa-a622-49ad-972e-9ce838faccbe"  # 添加你的 API Key
 USDT_CONTRACT = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
 
 async def get_address_balance(address: str) -> float:
@@ -30,8 +31,9 @@ async def get_address_balance(address: str) -> float:
     import aiohttp
     try:
         url = f"{TRONGRID_API}/v1/accounts/{address}"
+        headers = {"TRON-PRO-API-KEY": TRONGRID_API_KEY}
         async with aiohttp.ClientSession() as session:
-            async with session.get(url) as resp:
+            async with session.get(url, headers=headers) as resp:  # 添加 headers 参数
                 data = await resp.json()
                 if data.get('data') and len(data['data']) > 0:
                     trc20 = data['data'][0].get('trc20', [])
@@ -57,13 +59,14 @@ async def get_monthly_stats(address: str) -> dict:
     
     try:
         url = f"{TRONGRID_API}/v1/accounts/{address}/transactions/trc20"
+        headers = {"TRON-PRO-API-KEY": TRONGRID_API_KEY}  # 添加请求头
         params = {
             "contract_address": USDT_CONTRACT,
             "limit": 200,
             "min_timestamp": start_timestamp * 1000
         }
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params) as resp:
+            async with session.get(url, headers=headers, params=params) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     txs = data.get("data", [])
@@ -92,13 +95,14 @@ async def get_trc20_transactions(address: str, min_timestamp: int = 0):
     import aiohttp
     try:
         url = f"{TRONGRID_API}/v1/accounts/{address}/transactions/trc20"
+        headers = {"TRON-PRO-API-KEY": TRONGRID_API_KEY}  # 添加请求头
         params = {
             "contract_address": USDT_CONTRACT,
             "limit": 20,
             "min_timestamp": min_timestamp if min_timestamp > 0 else 0
         }
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params) as resp:
+            async with session.get(url, headers=headers, params=params) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     return data.get("data", [])
