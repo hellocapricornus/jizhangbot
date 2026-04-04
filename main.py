@@ -59,6 +59,11 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await monitor.monitor_list(update, context)
         return
 
+    if query.data == "monitor_stats":
+    from handlers import monitor
+    await monitor.monitor_stats(update, context)
+    return
+
     if query.data == "monitor_menu":
         print(f"[DEBUG] 监控模块: 主菜单")
         from handlers import monitor
