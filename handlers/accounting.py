@@ -8,6 +8,7 @@ import aiohttp
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Tuple, Optional
+from handlers.ai_client import get_ai_client
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler, CallbackQueryHandler
@@ -2000,6 +2001,34 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
         except:
             await message.reply_text("❌ 格式错误：下发-金额u（如：下发-50u）")
 
+    # ========== 3. AI 对话（需要管理员或操作员权限） ==========
+    bot_username = context.bot.username
+    if f"@{bot_username}" in text:
+        question = text.replace(f"@{bot_username}", "").strip()
+        if question:
+            # 权限检查
+            if not is_authorized(message.from_user.id):
+                try:
+                    await context.bot.send_message(
+                        chat_id=message.chat_id,
+                        text="❌ AI 对话功能仅限管理员和操作员使用\n\n如需使用，请联系 @ChinaEdward 申请权限",
+                        reply_to_message_id=message.message_id  # 引用原消息
+                    )
+                except Exception as e:
+                    print(f"[ERROR] 发送权限提示失败: {e}")
+                    # 如果失败，尝试简单回复
+                    await message.reply_text("❌ 无权限使用 AI 对话")
+                return
+
+            # 有权限，继续处理
+            thinking_msg = await message.reply_text("🤔 思考中...")
+            ai_client = get_ai_client()
+            reply = await ai_client.chat(question)
+            if len(reply) > 4000:
+                reply = reply[:4000] + "...\n\n(回复过长已截断)"
+            await thinking_msg.edit_text(reply)
+        return
+
 # ==================== 群组成员变化监听器（服务消息方式）====================
 
 async def handle_group_service_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2126,7 +2155,12 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not is_authorized(query.from_user.id):
         await query.message.reply_text("❌ 此功能仅限管理员或操作员使用")
+        # 清除状态
+        context.user_data.pop("active_module", None)
         return
+
+    # 设置模块标识
+    context.user_data["active_module"] = "accounting"
 
     message = (
         "📒 **记账功能说明**\n\n"
@@ -2161,3 +2195,4 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     await query.message.reply_text(message, parse_mode='Markdown')
+    context.user_data.pop("active_module", None)
