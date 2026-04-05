@@ -1,7 +1,7 @@
 # main.py - 修正后的版本
 
 import asyncio
-from handlers import monitor
+from handlers import monitor, operator
 from telegram import Update
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
@@ -137,6 +137,12 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "请选择功能：",
             reply_markup=get_main_menu()
         )
+        return
+
+    # ========== 处理互转查询返回主菜单 ==========
+    if query.data == "transfer_back_to_main":
+        from handlers.transfer import transfer_back_to_main
+        await transfer_back_to_main(update, context)
         return
 
     # 在 button_router 函数中，添加记账模块的按钮处理
@@ -285,48 +291,131 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     print(f"Unhandled callback data: {data}")
 
-# 输入路由处理器（仅处理私聊）
 async def input_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理私聊的文本输入（用于USDT、操作员管理等模块）"""
+    """处理私聊的文本输入"""
     chat = update.effective_chat
-    print(f"[DEBUG] input_router 收到消息，聊天类型: {chat.type}")
+    print(f"[DEBUG] ========== input_router 开始 ==========")
+    print(f"[DEBUG] 聊天类型: {chat.type}")
+    print(f"[DEBUG] 消息内容: {update.message.text if update.message else 'None'}")
 
-    # 只在私聊中处理输入路由
     if chat.type != 'private':
+        print(f"[DEBUG] 不是私聊，跳过")
         return
 
-    # 先检查是否有群组管理的状态
     user_id = update.effective_user.id
+
+    # 1. 检查群组管理状态
     from handlers.group_manager import user_states
+    print(f"[DEBUG] 1. 检查群组管理状态: user_id in user_states = {user_id in user_states}")
     if user_id in user_states:
-        print(f"[DEBUG] 检测到群组管理状态，交给 handle_text_input")
+        print(f"[DEBUG] → 交给群组管理处理")
         from handlers.group_manager import handle_text_input
         await handle_text_input(update, context)
         return
 
-    # ========== 检查是否在监控模块的添加状态 ==========
+    # 2. 检查广播模块状态
+    in_broadcast = context.user_data.get("in_broadcast", False)
+    print(f"[DEBUG] 2. 检查广播状态: in_broadcast = {in_broadcast}")
+    if in_broadcast:
+        print(f"[DEBUG] → 广播激活中，跳过（让 ConversationHandler 处理）")
+        return
+
+    # 3. 检查监控模块状态
     monitor_action = context.user_data.get("monitor_action")
+    print(f"[DEBUG] 3. 检查监控状态: monitor_action = {monitor_action}")
+    
     if monitor_action == "add":
-        print(f"[DEBUG] 监控模块: 处理地址输入")
+        print(f"[DEBUG] → 交给监控模块添加地址")
         from handlers import monitor
         await monitor.monitor_add_input(update, context)
         return
     elif monitor_action == "add_note":
-        print(f"[DEBUG] 监控模块: 处理备注输入")
+        print(f"[DEBUG] → 交给监控模块添加备注")
         from handlers import monitor
         await monitor.monitor_add_note(update, context)
         return
 
+    # 4. 检查其他模块状态
     module = context.user_data.get("active_module")
-    print(f"[DEBUG] 当前模块: {module}")
+    print(f"[DEBUG] 4. 检查其他模块: active_module = {module}")
+    
+    # 检查是否在互转查询的 ConversationHandler 状态中
+    if context.user_data.get("transfer_results") is not None:
+        print(f"[DEBUG] → 互转查询有结果数据，跳过 AI 回复")
+        return
 
+    if module == "transfer":
+        print(f"[DEBUG] → 互转查询模块激活中，交给 ConversationHandler 处理")
+        return
     if module == "operator":
+        print(f"[DEBUG] → 交给操作员模块")
         await operator.handle_input(update, context)
+        return
+    # main.py - 修改 input_router 中的 USDT 处理
+
     elif module == "usdt":
-        await usdt.handle_input(update, context)
+        print(f"[DEBUG] → 交给 USDT 模块")
+        try:
+            await usdt.handle_input(update, context)
+        except Exception as e:
+            print(f"[DEBUG] USDT 模块错误: {e}")
+            # ✅ 异常时清除状态
+            context.user_data.pop("active_module", None)
+            context.user_data.pop("usdt_session", None)
+            await update.message.reply_text("❌ USDT 查询出错，请重试")
+        return
     elif module == "accounting":
-        # 记账模块在私聊中不需要输入处理
-        pass
+        print(f"[DEBUG] → 记账模块，忽略")
+        return
+
+    # ========== 5. AI 回复（需要管理员或操作员权限） ==========
+    print(f"[DEBUG] 5. 检查 AI 回复权限...")
+    text = update.message.text.strip() if update.message.text else ""
+    print(f"[DEBUG] AI 回复文本: {text[:50] if text else '空'}")
+
+    if not text or text.startswith('/'):
+        print(f"[DEBUG] 文本为空或命令，跳过 AI")
+        return
+
+    # 检查是否是互转查询的地址格式
+    import re
+    transfer_pattern = r'^T[0-9A-Za-z]{33}\s+T[0-9A-Za-z]{33}$'
+    if re.match(transfer_pattern, text):
+        print(f"[DEBUG] 检测到互转查询地址格式，跳过 AI 回复，交给 ConversationHandler 处理")
+        return
+
+    # ✅ 权限检查：只有管理员和操作员才能使用 AI
+    from auth import is_authorized
+    user_id = update.effective_user.id
+    if not is_authorized(user_id):
+        print(f"[DEBUG] 用户 {user_id} 无权限使用 AI，跳过")
+        await update.message.reply_text(
+            "❌ AI 对话功能仅限管理员和操作员使用\n\n"
+            "如需使用，请联系 @ChinaEdward 申请权限"
+        )
+        return
+
+    thinking_msg = await update.message.reply_text("🤔 思考中...")
+    print(f"[DEBUG] 已发送思考中消息")
+
+    try:
+        from handlers.ai_client import get_ai_client
+        ai_client = get_ai_client()
+        print(f"[DEBUG] AI 客户端获取成功")
+
+        reply = await ai_client.chat(text)
+        print(f"[DEBUG] AI 回复获取成功，长度: {len(reply)}")
+
+        if len(reply) > 4000:
+            reply = reply[:4000] + "...\n\n(回复过长已截断)"
+
+        await thinking_msg.edit_text(reply)
+        print(f"[DEBUG] AI 回复已发送")
+    except Exception as e:
+        print(f"[DEBUG] AI 调用失败: {e}")
+        await thinking_msg.edit_text(f"❌ AI 服务出错: {str(e)[:100]}")
+
+    print(f"[DEBUG] ========== input_router 结束 ==========")
 
 # 自动保存群组信息（作为备份）
 async def auto_save_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -548,6 +637,11 @@ def main():
     # 创建应用
     app = Application.builder().token(BOT_TOKEN).build()
 
+    async def cleanup_expired_states_job(context: ContextTypes.DEFAULT_TYPE):
+        """定时清理过期状态"""
+        from handlers.group_manager import cleanup_expired_states
+        await cleanup_expired_states()
+
     # 定义手动清理命令（放在 main 函数内部）
     async def force_clean_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """手动强制清理所有机器人不在的群组"""
@@ -695,12 +789,36 @@ def main():
         print("✅ USDT 地址监控已启动（每30秒检查一次）")
 
     # ========== 添加启动验证和定期检查 ==========
-    # 使用 post_init 回调进行启动验证
-    app.post_init = verify_groups_on_startup
+
+    # 统一的 post_init 函数
+    async def post_init(app: Application):
+        """启动后初始化"""
+        # 1. 启动验证群组
+        await verify_groups_on_startup(app)
+
+        # 2. 启动状态清理任务
+        job_queue = app.job_queue
+        if job_queue:
+            # 每5分钟清理一次过期状态
+            job_queue.run_repeating(
+                cleanup_expired_states_job,
+                interval=300,  # 5分钟
+                first=60  # 启动后60秒第一次执行
+            )
+            print("✅ 状态清理任务已启动（每5分钟检查一次）")
+        else:
+            print("⚠️ JobQueue 未启用，无法启动状态清理任务")
+
+    async def cleanup_expired_states_job(context: ContextTypes.DEFAULT_TYPE):
+        """定时清理过期状态"""
+        from handlers.group_manager import cleanup_expired_states
+        await cleanup_expired_states()
+
+    # 设置统一的 post_init
+    app.post_init = post_init
 
     # 使用 JobQueue 进行定期检查（每24小时）
     try:
-        # 获取 JobQueue
         job_queue = app.job_queue
         if job_queue:
             # 每24小时执行一次定期检查
