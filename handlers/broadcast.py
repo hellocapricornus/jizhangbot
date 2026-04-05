@@ -225,10 +225,14 @@ async def show_group_selection(update: Update, context: ContextTypes.DEFAULT_TYP
         InlineKeyboardButton("📤 发送选中", callback_data="bc_send_selected")
     ]
 
+    # 取消按钮单独一行，更加醒目
+    cancel_row = [
+        InlineKeyboardButton("❌ 取消群发并返回主菜单", callback_data="bc_cancel_and_exit")
+    ]
+
     keyboard.append(nav_row)
     keyboard.append(send_row)
-    # 改为返回主菜单按钮
-    keyboard.append([InlineKeyboardButton("◀️ 返回主菜单", callback_data="bc_back_to_main")])
+    keyboard.append(cancel_row)  # 添加取消按钮
 
     reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -247,12 +251,18 @@ async def bc_back_to_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
+    # 发送退出提示
+    await query.message.reply_text("✅ 已退出群发功能")
+
     # 清理所有广播相关的临时数据
     keys = ["bc_all_groups", "bc_selected_ids", "bc_message_content", "bc_temp_target_ids",
             "bc_selected_category", "bc_batches", "bc_current_batch", "bc_batch_results",
             "bc_waiting_for_next", "in_broadcast"]
     for k in keys:
         context.user_data.pop(k, None)
+
+    # 清除 active_module
+    context.user_data.pop("active_module", None)
 
     # 返回主菜单
     from handlers.menu import get_main_menu
@@ -261,6 +271,31 @@ async def bc_back_to_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "请选择功能：",
         reply_markup=get_main_menu(),
         parse_mode=None
+    )
+    return ConversationHandler.END
+
+# broadcast.py - 添加新函数
+
+async def bc_cancel_and_exit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """取消群发并退出，清理所有状态"""
+    query = update.callback_query
+    await query.answer("已取消群发")
+
+    # 发送退出提示
+    await query.message.reply_text("❌ 已取消群发功能，返回主菜单")
+
+    # 清理所有广播相关的临时数据
+    keys = ["bc_all_groups", "bc_selected_ids", "bc_message_content", "bc_temp_target_ids",
+            "bc_selected_category", "bc_batches", "bc_current_batch", "bc_batch_results",
+            "bc_waiting_for_next", "in_broadcast", "active_module"]
+    for k in keys:
+        context.user_data.pop(k, None)
+
+    # 返回主菜单
+    from handlers.menu import get_main_menu
+    await query.message.edit_text(
+        "请选择功能：",
+        reply_markup=get_main_menu()
     )
     return ConversationHandler.END
 
@@ -357,29 +392,42 @@ async def bc_prepare_send(update: Update, context: ContextTypes.DEFAULT_TYPE, mo
     # 临时存储目标 ID
     context.user_data["bc_temp_target_ids"] = target_ids
 
+    # broadcast.py - 修改 bc_prepare_send 函数中的这段代码
+
     try:
+        # 添加取消按钮的键盘
+        cancel_keyboard = [[InlineKeyboardButton("❌ 取消群发", callback_data="bc_cancel_and_exit")]]
+        cancel_markup = InlineKeyboardMarkup(cancel_keyboard)
+
         await query.message.reply_text(
             f"📝 确认发送配置\n\n"
             f"{mode_text}\n"
             f"🎯 目标数量：{len(target_ids)} 个\n\n"
             f"👉 请输入要发送的消息内容：\n"
-            f"(支持 Markdown，输入 /cancel_broadcast 取消)",
-            parse_mode=None  # 不使用任何格式解析
+            f"(支持 Markdown，输入 /cancel_broadcast 取消)\n\n"
+            f"💡 提示：直接输入文字开始群发，或点击下方按钮取消",
+            parse_mode=None,
+            reply_markup=cancel_markup  # 添加取消按钮
         )
     except Exception as e:
         logger.error(f"发送提示消息失败: {e}")
         # 如果失败，尝试使用 HTML
+        cancel_keyboard = [[InlineKeyboardButton("❌ 取消群发", callback_data="bc_cancel_and_exit")]]
+        cancel_markup = InlineKeyboardMarkup(cancel_keyboard)
+
         await query.message.reply_text(
             f"📝 <b>确认发送配置</b>\n\n"
             f"{mode_text}\n"
             f"🎯 目标数量：{len(target_ids)} 个\n\n"
             f"👉 请输入要发送的消息内容：\n"
-            f"(支持 Markdown，输入 /cancel_broadcast 取消)",
-            parse_mode="HTML"
+            f"(支持 Markdown，输入 /cancel_broadcast 取消)\n\n"
+            f"💡 提示：直接输入文字开始群发，或点击下方按钮取消",
+            parse_mode="HTML",
+            reply_markup=cancel_markup  # 添加取消按钮
         )
 
     return BC_INPUT_MESSAGE
-
+    
 async def bc_send_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """发送给所有群组（支持分批提示）"""
     query = update.callback_query
@@ -468,7 +516,7 @@ async def bc_execute_batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if current_batch >= len(batches):
         await query.message.reply_text("✅ 所有批次已发送完成！")
-        return end_conversation(update, context)
+        return await end_conversation(update, context)
 
     batch = batches[current_batch]
     progress_msg = await query.message.reply_text(
@@ -537,7 +585,7 @@ async def bc_execute_batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"❌ 失败：{batch_results['failed']}\n"
             f"📦 总群组数：{batch_results['success'] + batch_results['failed']}"
         )
-        return end_conversation(update, context)
+        return await end_conversation(update, context)
 
 async def bc_next_batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """手动开始下一批"""
@@ -560,6 +608,7 @@ async def receive_message_input(update: Update, context: ContextTypes.DEFAULT_TY
                 "bc_waiting_for_next"]
         for k in keys:
             context.user_data.pop(k, None)
+        context.user_data.pop("active_module", None)
 
         # 返回主菜单
         from handlers.menu import get_main_menu
@@ -572,9 +621,11 @@ async def receive_message_input(update: Update, context: ContextTypes.DEFAULT_TY
     context.user_data["bc_message_content"] = text
     count = len(context.user_data.get("bc_temp_target_ids", []))
 
+    # 添加取消按钮
     keyboard = [
         [InlineKeyboardButton("🚀 确认发送", callback_data="bc_exec_confirm")],
-        [InlineKeyboardButton("✏️ 重新输入", callback_data="bc_reinput")]
+        [InlineKeyboardButton("✏️ 重新输入", callback_data="bc_reinput")],
+        [InlineKeyboardButton("❌ 取消群发", callback_data="bc_cancel_and_exit")]
     ]
 
     preview = text[:60] + "..." if len(text) > 60 else text
@@ -608,7 +659,7 @@ async def execute_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not target_ids or not message_text:
         await query.message.reply_text("❌ 数据异常，请重新开始。")
-        return end_conversation(update, context)
+        return await end_conversation(update, context)
 
     progress_msg = await query.message.reply_text(
         f"🚀 **群发进行中...**\n"
@@ -668,7 +719,7 @@ async def execute_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         await query.message.reply_text(result_text)
 
-    return end_conversation(update, context)
+    return await end_conversation(update, context)
 
 # --- 辅助函数 ---
 # 在文件末尾添加
@@ -816,6 +867,15 @@ async def bc_cancel_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     """作为 ConversationHandler fallback 的取消处理"""
     print(f"[DEBUG] bc_cancel_fallback 被调用")
 
+    # 发送提示消息
+    try:
+        if update.callback_query:
+            await update.callback_query.message.reply_text("❌ 已取消群发功能")
+        elif update.message:
+            await update.message.reply_text("❌ 已取消群发功能")
+    except Exception as e:
+        logger.error(f"发送取消提示失败: {e}")
+
     # 清理所有数据
     keys = ["bc_all_groups", "bc_selected_ids", "bc_message_content", "bc_temp_target_ids",
             "bc_selected_category", "bc_batches", "bc_current_batch", "bc_batch_results",
@@ -852,8 +912,7 @@ async def bc_cancel_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return ConversationHandler.END
 
 # --- 注册处理器 ---
-
-# broadcast.py - 确保 fallbacks 包含 bc_cancel_fallback
+# broadcast.py - 修改 get_handlers 函数中的 states
 
 def get_handlers():
     return [
@@ -876,19 +935,21 @@ def get_handlers():
                     CallbackQueryHandler(bc_back_to_main, pattern="^bc_back_to_main$"),
                     CallbackQueryHandler(bc_cancel_broadcast, pattern="^bc_cancel$"),
                     CallbackQueryHandler(bc_force_cleanup, pattern="^main_menu$"),
+                    CallbackQueryHandler(bc_cancel_and_exit, pattern="^bc_cancel_and_exit$"),  # 新增
                 ],
                 BC_INPUT_MESSAGE: [
                     MessageHandler(filters.TEXT & ~filters.COMMAND, receive_message_input),
+                    CallbackQueryHandler(bc_cancel_and_exit, pattern="^bc_cancel_and_exit$"),  # 新增
                 ],
                 BC_CONFIRM_SEND: [
                     CallbackQueryHandler(execute_broadcast, pattern="^bc_exec_confirm$"),
                     CallbackQueryHandler(bc_reinput, pattern="^bc_reinput$"),
                     CallbackQueryHandler(bc_back_to_main, pattern="^bc_back_to_main$"),  
                     CallbackQueryHandler(bc_cancel_broadcast, pattern="^bc_cancel$"),
+                    CallbackQueryHandler(bc_cancel_and_exit, pattern="^bc_cancel_and_exit$"),  # 新增
                 ],
             },
             fallbacks=[
-                # 🔥 这里必须添加
                 CommandHandler("cancel_broadcast", bc_cancel_fallback),
                 MessageHandler(filters.ALL, bc_fallback_handler),
             ],
