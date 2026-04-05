@@ -52,6 +52,14 @@ async def start_transfer_query(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.message.reply_text("❌ 无权限使用此功能")
         return ConversationHandler.END
 
+    # 设置模块状态
+    context.user_data["active_module"] = "transfer"
+
+    # ✅ 清除旧数据
+    context.user_data.pop("transfer_results", None)
+    context.user_data.pop("current_page", None)
+    context.user_data.pop("query_type", None)
+
     await query.message.reply_text(
         "🔍 **转账查询**\n\n请输入两个 USDT 地址，中间用空格隔开：\n"
         "例如：`Txxxx... Tyyyy...`",
@@ -106,6 +114,7 @@ async def process_transfer_query(update: Update, context: ContextTypes.DEFAULT_T
 
     if not unique_matches:
         await update.message.reply_text(f"📭 在最近的交易记录中，未找到 <code>{addr_a}</code> 和 <code>{addr_b}</code> 之间的直接转账。", parse_mode="HTML")
+        context.user_data.pop("active_module", None)
         return ConversationHandler.END
 
     # 分页显示 (每页 5 条)
@@ -114,6 +123,13 @@ async def process_transfer_query(update: Update, context: ContextTypes.DEFAULT_T
     context.user_data["query_type"] = "direct" # 标记当前是直接查询
 
     await send_transfer_page(update, context, 0)
+    
+    # 查询完成，清除状态（让 AI 恢复）
+    context.user_data.pop("active_module", None)
+    context.user_data.pop("transfer_results", None)
+    context.user_data.pop("current_page", None)
+    context.user_data.pop("query_type", None)
+    
     return ConversationHandler.END
 
 # --- 功能 2: 转账分析 (共同交易对手) ---
@@ -125,10 +141,19 @@ async def start_transfer_analysis(update: Update, context: ContextTypes.DEFAULT_
         await query.message.reply_text("❌ 无权限使用此功能")
         return ConversationHandler.END
 
+    # 设置模块状态
+    context.user_data["active_module"] = "transfer"
+
+    # ✅ 清除旧数据
+    context.user_data.pop("transfer_results", None)
+    context.user_data.pop("current_page", None)
+    context.user_data.pop("query_type", None)
+
     await query.message.reply_text(
         "🕵️ **转账分析**\n\n将分析是否有第三方地址与这两个地址都产生过交易。\n"
         "请输入两个 USDT 地址，中间用空格隔开：\n"
-        "例如：`Txxxx... Tyyyy...`",
+        "例如：`Txxxx... Tyyyy...`"
+         "💡 提示：输入 /cancel 可取消操作",
         parse_mode="Markdown"
     )
     return TRANSFER_ANALYSIS_WAIT_ADDR
@@ -165,6 +190,7 @@ async def process_transfer_analysis(update: Update, context: ContextTypes.DEFAUL
 
     if not common_parties:
         await update.message.reply_text(f"📭 在最近的交易记录中，未发现与 <code>{addr_a}</code> 和 <code>{addr_b}</code> 同时有过交易的第三方地址。", parse_mode="HTML")
+        context.user_data.pop("active_module", None)
         return ConversationHandler.END
 
     context.user_data["transfer_results"] = common_parties
@@ -172,6 +198,13 @@ async def process_transfer_analysis(update: Update, context: ContextTypes.DEFAUL
     context.user_data["query_type"] = "analysis" # 标记当前是分析模式
 
     await send_transfer_page(update, context, 0)
+
+    # 查询完成，清除状态（让 AI 恢复）
+    context.user_data.pop("active_module", None)
+    context.user_data.pop("transfer_results", None)
+    context.user_data.pop("current_page", None)
+    context.user_data.pop("query_type", None)
+    
     return ConversationHandler.END
 
 # --- 通用：发送分页结果 ---
@@ -274,6 +307,9 @@ async def send_transfer_page(update: Update, context: ContextTypes.DEFAULT_TYPE,
     if nav_buttons:
         keyboard.append(nav_buttons)
 
+    # ✅ 添加返回主菜单按钮
+    keyboard.append([InlineKeyboardButton("◀️ 返回主菜单", callback_data="transfer_back_to_main")])
+
     reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
 
     if update.callback_query:
@@ -293,10 +329,30 @@ async def handle_transfer_pagination(update: Update, context: ContextTypes.DEFAU
     elif data.startswith("copy_addr_"):
         addr = data.replace("copy_addr_", "")
         await query.message.reply_text(f"📋 已获取地址，长按复制：\n<code>{addr}</code>", parse_mode="HTML")
+        # 清除数据并返回主菜单
+        context.user_data.pop("transfer_results", None)
+        context.user_data.pop("current_page", None)
+        context.user_data.pop("query_type", None)
+        context.user_data.pop("active_module", None)
+        await query.message.edit_text("✅ 查询完成，返回主菜单")
+        from handlers.menu import get_main_menu
+        await query.message.reply_text("请选择功能：", reply_markup=get_main_menu())
 
 # --- 取消 ---
 async def cancel_transfer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("操作已取消。")
+    """取消互转查询"""
+    context.user_data.pop("active_module", None)
+    context.user_data.pop("transfer_results", None)
+    context.user_data.pop("current_page", None)
+    context.user_data.pop("query_type", None)
+
+    await update.message.reply_text("❌ 已取消互转查询")
+
+    from handlers.menu import get_main_menu
+    await update.message.reply_text(
+        "请选择功能：",
+        reply_markup=get_main_menu()
+    )
     return ConversationHandler.END
 
 # --- 主菜单入口 ---
@@ -308,9 +364,19 @@ async def show_transfer_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.message.reply_text("❌ 无权限")
         return
 
+    # ✅ 清除旧的互转查询数据（重要！）
+    context.user_data.pop("transfer_results", None)
+    context.user_data.pop("current_page", None)
+    context.user_data.pop("query_type", None)
+    context.user_data.pop("active_module", None)
+
+    # 设置模块状态
+    context.user_data["active_module"] = "transfer"
+
     keyboard = [
         [InlineKeyboardButton("🔍 转账查询 (直接记录)", callback_data="trans_direct")],
-        [InlineKeyboardButton("🕸️ 转账分析 (共同对手)", callback_data="trans_analysis")]
+        [InlineKeyboardButton("🕸️ 转账分析 (共同对手)", callback_data="trans_analysis")],
+        [InlineKeyboardButton("◀️ 返回主菜单", callback_data="transfer_back_to_main")]  # ✅ 添加返回按钮
     ]
 
     await query.message.reply_text(
@@ -318,3 +384,41 @@ async def show_transfer_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown"
     )
+
+# transfer.py - 在文件末尾添加以下代码
+
+async def transfer_back_to_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """返回主菜单并清除互转查询状态"""
+    query = update.callback_query
+    await query.answer()
+
+    # 清除所有互转查询相关的状态
+    context.user_data.pop("transfer_results", None)
+    context.user_data.pop("current_page", None)
+    context.user_data.pop("query_type", None)
+    context.user_data.pop("active_module", None)
+
+    from handlers.menu import get_main_menu
+    await query.message.edit_text(
+        "✅ 已退出互转查询\n\n请选择功能：",
+        reply_markup=get_main_menu()
+    )
+    return ConversationHandler.END
+
+
+async def cancel_transfer_from_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """从消息中取消互转查询（处理 /cancel 命令）"""
+    # 清除所有互转查询相关的状态
+    context.user_data.pop("transfer_results", None)
+    context.user_data.pop("current_page", None)
+    context.user_data.pop("query_type", None)
+    context.user_data.pop("active_module", None)
+
+    await update.message.reply_text("❌ 已取消互转查询")
+
+    from handlers.menu import get_main_menu
+    await update.message.reply_text(
+        "请选择功能：",
+        reply_markup=get_main_menu()
+    )
+    return ConversationHandler.END
