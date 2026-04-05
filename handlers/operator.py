@@ -40,9 +40,11 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "op_add":
         context.user_data["current_action"] = ADD_OPERATOR
+        context.user_data["active_module"] = "operator"  # 设置模块
         await query.message.reply_text("请输入要添加的用户ID（纯数字）：")
     elif data == "op_remove":
         context.user_data["current_action"] = REMOVE_OPERATOR
+        context.user_data["active_module"] = "operator"  # 设置模块
         await query.message.reply_text("请输入要删除的用户ID（纯数字）：")
     elif data == "op_list":
         ops = list_operators()
@@ -51,6 +53,9 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             text = "📋 操作人列表：\n" + "\n".join([str(i) for i in ops])
             await query.message.reply_text(text)
+
+        # 操作完成后清除模块状态
+        context.user_data.pop("active_module", None)
 
 # 输入处理
 async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -75,3 +80,12 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ 已删除操作人：{target_id}")
 
     context.user_data.pop("current_action", None)
+    # 清除 active_module，让 AI 恢复
+    context.user_data.pop("active_module", None)
+
+async def cancel_operator(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """取消操作员管理"""
+    context.user_data.pop("current_action", None)
+    context.user_data.pop("active_module", None)
+    await update.message.reply_text("❌ 已取消操作")
+    return ConversationHandler.END
