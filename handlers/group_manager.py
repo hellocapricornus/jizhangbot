@@ -15,6 +15,45 @@ user_states = {}
 # 分页常量
 ITEMS_PER_PAGE = 10
 
+# 用户状态超时清理（1分钟）
+USER_STATE_TIMEOUT = 60
+
+async def cleanup_expired_states():
+    """清理过期的用户状态"""
+    current_time = time.time()
+    expired_users = []
+
+    for user_id, state in user_states.items():
+        if 'timestamp' not in state:
+            state['timestamp'] = current_time
+        elif current_time - state['timestamp'] > USER_STATE_TIMEOUT:
+            expired_users.append(user_id)
+
+    for user_id in expired_users:
+        del user_states[user_id]
+        print(f"[清理] 已清除用户 {user_id} 的过期状态")
+
+# 修改添加状态的函数，添加时间戳
+async def add_category_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """开始添加分类"""
+    query = update.callback_query
+    user_id = query.from_user.id
+    await query.answer()
+    print(f"[DEBUG] add_category_start 被调用")
+
+    # ✅ 添加时间戳
+    user_states[user_id] = {
+        "action": "add_category_name",
+        "timestamp": time.time()
+    }
+
+    await query.message.edit_text(
+        "➕ **创建新分类**\n\n"
+        "请输入分类名称（如：VIP群组）：\n\n"
+        "❌ 输入 /cancel 取消",
+        parse_mode="Markdown"
+    )
+
 async def group_manager_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """群组管理主菜单"""
     query = update.callback_query
@@ -589,9 +628,7 @@ async def add_category_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from handlers.menu import get_main_menu
     await message.reply_text("请选择功能：", reply_markup=get_main_menu())
 
-# group_manager.py - 在文件末尾添加
-
-# group_manager.py - 修改 handle_cancel_in_group_manager
+# group_manager.py - 确保 cancel 命令清除状态后返回主菜单
 
 async def handle_cancel_in_group_manager(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """群组管理专用的取消处理"""
@@ -602,10 +639,11 @@ async def handle_cancel_in_group_manager(update: Update, context: ContextTypes.D
     if user_id in user_states:
         print(f"[DEBUG] 清除 user_states[{user_id}], 当前状态: {user_states[user_id]}")
         del user_states[user_id]
-    else:
-        print(f"[DEBUG] user_id {user_id} 不在 user_states 中")
 
-    # 🔥 重要：确保回复消息
+    # ✅ 同时清除 active_module
+    context.user_data.pop("active_module", None)
+
+    # 发送取消消息
     if update.message:
         await update.message.reply_text("❌ 已取消创建分类")
     elif update.callback_query:
@@ -614,7 +652,6 @@ async def handle_cancel_in_group_manager(update: Update, context: ContextTypes.D
     # 返回主菜单
     from handlers.menu import get_main_menu
 
-    # 发送主菜单
     if update.message:
         await update.message.reply_text(
             "请选择功能：",
