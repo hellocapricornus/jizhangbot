@@ -46,12 +46,17 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"📊 地址：<code>{address}</code>\n❌ 该地址无余额或未激活",
                 parse_mode="HTML"
             )
+            # 无余额时也要清除状态
+            context.user_data.pop("active_module", None)
+            context.user_data.pop("usdt_session", None)
         else:
             await send_trx_usdt_page(update, context)
 
     except Exception as e:
         print("❗ USDT 查询异常:", e)
         await update.message.reply_text("❌ 查询失败，请稍后再试")
+        context.user_data.pop("active_module", None)
+        context.user_data.pop("usdt_session", None)
 
 # 查询 TronGrid API
 async def query_tron(address: str):
@@ -110,6 +115,9 @@ async def send_trx_usdt_page(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if end < len(data["transactions"]):
         buttons.append(InlineKeyboardButton("➡ 下一页", callback_data="usdt_next"))
 
+    # 添加完成按钮
+    buttons.append(InlineKeyboardButton("✅ 完成", callback_data="usdt_done"))
+
     markup = InlineKeyboardMarkup([buttons]) if buttons else None
 
     if update.callback_query:
@@ -122,6 +130,18 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     session = context.user_data.get("usdt_session")
+
+    # ✅ 添加完成按钮处理
+    if query.data == "usdt_done":
+        context.user_data.pop("active_module", None)
+        context.user_data.pop("usdt_session", None)
+        from handlers.menu import get_main_menu
+        await query.message.edit_text(
+            "✅ 查询完成\n\n请选择功能：",
+            reply_markup=get_main_menu()
+        )
+        return
+    
     if not session or "data" not in session:
         await query.message.reply_text("❌ 未查询数据")
         return
@@ -133,3 +153,18 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data["page"] = min(data["page"] + 1, (len(data["transactions"]) - 1) // PAGE_SIZE)
 
     await send_trx_usdt_page(update, context)
+
+# 添加一个函数来处理分页完成后的清理
+async def usdt_finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """USDT 查询完成，清除状态"""
+    query = update.callback_query
+    await query.answer()
+
+    context.user_data.pop("active_module", None)
+    context.user_data.pop("usdt_session", None)
+
+    from handlers.menu import get_main_menu
+    await query.message.reply_text(
+        "✅ 查询完成\n\n请选择功能：",
+        reply_markup=get_main_menu()
+    )
