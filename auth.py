@@ -59,7 +59,7 @@ def is_authorized(user_id: int) -> bool:
 def add_operator(user_id: int):
     """添加操作员并同步到数据库"""
     if user_id in operators:
-        return # 已存在
+        return False # 已存在
 
     operators.add(user_id)
 
