@@ -443,6 +443,33 @@ async def auto_save_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # 保存时保留原有分类
         save_group(chat_id, title, category)
+        # ✅ 新增：自动分类检测（仅当分类为"未分类"时）
+        from db import update_group_category_if_needed
+        update_group_category_if_needed(chat_id, title)
+
+# main.py - 添加启动时自动分类函数
+
+async def auto_classify_all_groups_on_startup(app: Application):
+    """启动时对所有现有群组进行自动分类"""
+    from db import get_all_groups_from_db, update_group_category_if_needed
+
+    await asyncio.sleep(3)  # 等待机器人完全启动
+
+    groups = get_all_groups_from_db()
+    print(f"[自动分类] 开始检查 {len(groups)} 个群组的分类...")
+
+    classified_count = 0
+    for group in groups:
+        group_id = group['id']
+        group_name = group['title']
+        current_category = group.get('category', '未分类')
+
+        # 只处理未分类的群组
+        if current_category == '未分类':
+            if update_group_category_if_needed(group_id, group_name):
+                classified_count += 1
+
+    print(f"[自动分类] 完成！自动分类了 {classified_count} 个群组")
 
 # 监听机器人加入/离开群组的事件
 async def on_bot_join_or_leave(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -796,23 +823,20 @@ def main():
         # 1. 启动验证群组
         await verify_groups_on_startup(app)
 
-        # 2. 启动状态清理任务
+        # 2. 启动自动分类（新增）
+        await auto_classify_all_groups_on_startup(app)
+
+        # 3. 启动状态清理任务
         job_queue = app.job_queue
         if job_queue:
-            # 每5分钟清理一次过期状态
             job_queue.run_repeating(
                 cleanup_expired_states_job,
-                interval=300,  # 5分钟
-                first=60  # 启动后60秒第一次执行
+                interval=300,
+                first=60
             )
             print("✅ 状态清理任务已启动（每5分钟检查一次）")
         else:
             print("⚠️ JobQueue 未启用，无法启动状态清理任务")
-
-    async def cleanup_expired_states_job(context: ContextTypes.DEFAULT_TYPE):
-        """定时清理过期状态"""
-        from handlers.group_manager import cleanup_expired_states
-        await cleanup_expired_states()
 
     # 设置统一的 post_init
     app.post_init = post_init
