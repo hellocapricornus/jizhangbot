@@ -20,6 +20,9 @@ logger = logging.getLogger(__name__)
     BC_CONFIRM_SEND
 ) = range(3)
 
+# 分页常量
+GROUPS_PER_PAGE = 8
+
 # 在文件开头添加国家代码映射（可以根据需要扩展）
 COUNTRY_EMOJI = {
     '中国': '🇨🇳', '美国': '🇺🇸', '日本': '🇯🇵', '韩国': '🇰🇷',
@@ -125,7 +128,7 @@ async def start_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 🔥 重要：开始新对话前，清理所有旧数据
     keys = ["bc_all_groups", "bc_selected_ids", "bc_message_content", "bc_temp_target_ids",
                 "bc_selected_category", "bc_batches", "bc_current_batch", "bc_batch_results",
-                "bc_waiting_for_next", "bc_current_state"]
+                "bc_waiting_for_next", "bc_current_state", "bc_current_page"]
     for k in keys:
         if k in context.user_data:
             context.user_data.pop(k, None)
@@ -150,6 +153,7 @@ async def show_group_selection(update: Update, context: ContextTypes.DEFAULT_TYP
     groups = context.user_data.get("bc_all_groups", [])
     selected_ids = context.user_data.get("bc_selected_ids", [])
     selected_category = context.user_data.get("bc_selected_category", None)
+    current_page = context.user_data.get("bc_current_page", 0)
 
     # 如果选择了分类，筛选群组
     if selected_category and selected_category != "所有群组":
@@ -158,51 +162,45 @@ async def show_group_selection(update: Update, context: ContextTypes.DEFAULT_TYP
     total_count = len(groups)
     selected_count = len([g for g in groups if g['id'] in selected_ids])
 
-    # 🔥 移除 Markdown 格式，使用普通文本
+    # 分页计算
+    total_pages = (total_count + GROUPS_PER_PAGE - 1) // GROUPS_PER_PAGE if total_count > 0 else 1
+    start_idx = current_page * GROUPS_PER_PAGE
+    end_idx = min(start_idx + GROUPS_PER_PAGE, total_count)
+    display_groups = groups[start_idx:end_idx]
+
+    # 构建消息文本
     text = f"📢 群发任务设置\n\n"
     text += f"📊 当前显示：{total_count} 个群\n"
     if selected_category and selected_category != "所有群组":
         text += f"🏷️ 分类筛选：{selected_category}\n"
-    text += f"✅ 已勾选：{selected_count} 个\n\n"
-    text += f"👇 点击群名勾选/取消 (支持多选)："
+    text += f"✅ 已勾选：{selected_count} 个\n"
+    if total_pages > 1:
+        text += f"📄 第 {current_page + 1}/{total_pages} 页\n\n"
+    else:
+        text += "\n"
+    text += f"👇 点击群名勾选/取消："
 
     keyboard = []
 
-    # ========== 修改分类筛选按钮部分：每行3个，自动识别国旗 ==========
+    # ========== 分类筛选按钮 ==========
+    from db import get_all_categories
     categories = get_all_categories()
     if categories:
-        # 第一行：所有群组按钮单独一行
         keyboard.append([InlineKeyboardButton("🌍 所有群组", callback_data="bc_filter_cat_all")])
-
-        # 分类按钮：每行显示3个
         cat_row = []
         for cat in categories:
             cat_name = cat['name']
             is_active = (selected_category == cat_name)
-            icon = get_category_icon(cat_name)  # 自动获取国旗图标
-            # 如果选中，使用 ✅ 前缀；否则只显示图标
-            if is_active:
-                button_text = f"✅ {icon} {cat_name}"
-            else:
-                button_text = f"{icon} {cat_name}"
+            icon = get_category_icon(cat_name)
+            button_text = f"✅ {icon} {cat_name}" if is_active else f"{icon} {cat_name}"
             cat_row.append(InlineKeyboardButton(button_text, callback_data=f"bc_filter_cat_{cat_name}"))
-
-            # 每行3个
             if len(cat_row) == 3:
                 keyboard.append(cat_row)
                 cat_row = []
-
-        # 添加剩余的分类
         if cat_row:
             keyboard.append(cat_row)
 
-    # 显示群组列表
-    display_limit = 40
-    display_groups = groups[:display_limit]
-
-    if len(groups) > display_limit:
-        text += f"\n_(仅显示前 {display_limit} 个，建议使用全选或筛选)_"
-
+    # ========== 群组列表（当前页） ==========
     for g in display_groups:
         gid = g["id"]
         title = g["title"]
@@ -214,7 +212,16 @@ async def show_group_selection(update: Update, context: ContextTypes.DEFAULT_TYP
             InlineKeyboardButton(f"{icon} [{category}] {safe_title}", callback_data=f"bc_toggle_{gid}")
         ])
 
-    # 底部按钮
+    # ========== 分页导航按钮 ==========
+    nav_buttons = []
+    if current_page > 0:
+        nav_buttons.append(InlineKeyboardButton("⬅️ 上一页", callback_data="bc_page_prev"))
+    if current_page < total_pages - 1:
+        nav_buttons.append(InlineKeyboardButton("下一页 ➡️", callback_data="bc_page_next"))
+    if nav_buttons:
+        keyboard.append(nav_buttons)
+
+    # ========== 操作按钮 ==========
     nav_row = [
         InlineKeyboardButton("✅ 全选当前", callback_data="bc_select_all"),
         InlineKeyboardButton("🚫 清空", callback_data="bc_deselect_all")
@@ -257,7 +264,7 @@ async def bc_back_to_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 清理所有广播相关的临时数据
     keys = ["bc_all_groups", "bc_selected_ids", "bc_message_content", "bc_temp_target_ids",
             "bc_selected_category", "bc_batches", "bc_current_batch", "bc_batch_results",
-            "bc_waiting_for_next", "in_broadcast"]
+            "bc_waiting_for_next", "in_broadcast", "bc_current_page"]
     for k in keys:
         context.user_data.pop(k, None)
 
@@ -287,7 +294,7 @@ async def bc_cancel_and_exit(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # 清理所有广播相关的临时数据
     keys = ["bc_all_groups", "bc_selected_ids", "bc_message_content", "bc_temp_target_ids",
             "bc_selected_category", "bc_batches", "bc_current_batch", "bc_batch_results",
-            "bc_waiting_for_next", "in_broadcast", "active_module"]
+            "bc_waiting_for_next", "in_broadcast", "active_module", "bc_current_page"]
     for k in keys:
         context.user_data.pop(k, None)
 
@@ -313,6 +320,8 @@ async def bc_filter_by_category(update: Update, context: ContextTypes.DEFAULT_TY
 
     # 清空当前选中
     context.user_data["bc_selected_ids"] = []
+    # 重置页码
+    context.user_data["bc_current_page"] = 0
 
     await show_group_selection(update, context)
     return BC_SELECT_GROUPS
@@ -335,18 +344,37 @@ async def bc_toggle_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return BC_SELECT_GROUPS
 
 async def bc_select_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """全选当前显示的群组"""
+    """全选当前分类下的所有群组（所有页）"""
     query = update.callback_query
     await query.answer("已全选")
 
     groups = context.user_data.get("bc_all_groups", [])
     selected_category = context.user_data.get("bc_selected_category", None)
 
-    # 只全选当前筛选条件下的群组
     if selected_category and selected_category != "所有群组":
         groups = [g for g in groups if g.get('category', '未分类') == selected_category]
 
     context.user_data["bc_selected_ids"] = [g["id"] for g in groups]
+    # 重置页码（可选，保持当前页）
+    await show_group_selection(update, context)
+    return BC_SELECT_GROUPS
+
+async def bc_page_prev(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """上一页"""
+    query = update.callback_query
+    await query.answer()
+    current_page = context.user_data.get("bc_current_page", 0)
+    context.user_data["bc_current_page"] = max(0, current_page - 1)
+    await show_group_selection(update, context)
+    return BC_SELECT_GROUPS
+
+
+async def bc_page_next(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """下一页"""
+    query = update.callback_query
+    await query.answer()
+    current_page = context.user_data.get("bc_current_page", 0)
+    context.user_data["bc_current_page"] = current_page + 1
     await show_group_selection(update, context)
     return BC_SELECT_GROUPS
 
@@ -605,7 +633,7 @@ async def receive_message_input(update: Update, context: ContextTypes.DEFAULT_TY
         # 清理数据
         keys = ["bc_all_groups", "bc_selected_ids", "bc_message_content", "bc_temp_target_ids",
                 "bc_selected_category", "bc_batches", "bc_current_batch", "bc_batch_results",
-                "bc_waiting_for_next"]
+                "bc_waiting_for_next", "bc_current_page"]
         for k in keys:
             context.user_data.pop(k, None)
         context.user_data.pop("active_module", None)
@@ -728,7 +756,7 @@ async def end_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 清理所有广播相关的临时数据
     keys = ["bc_all_groups", "bc_selected_ids", "bc_message_content", "bc_temp_target_ids",
             "bc_selected_category", "bc_batches", "bc_current_batch", "bc_batch_results",
-            "bc_waiting_for_next", "bc_current_state", "in_broadcast"]
+            "bc_waiting_for_next", "bc_current_state", "in_broadcast", "bc_current_page"]
     for k in keys:
         if k in context.user_data:
             context.user_data.pop(k, None)
@@ -772,6 +800,7 @@ async def bc_cancel_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE
     """取消广播"""
     query = update.callback_query
     await query.answer("已取消")
+    context.user_data.pop("bc_current_page", None)
     return await end_conversation(update, context)
 
 # 添加 fallback 处理器
@@ -782,7 +811,7 @@ async def bc_fallback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     # 清理所有数据
     keys = ["bc_all_groups", "bc_selected_ids", "bc_message_content", "bc_temp_target_ids",
             "bc_selected_category", "bc_batches", "bc_current_batch", "bc_batch_results",
-            "bc_waiting_for_next"]
+            "bc_waiting_for_next", "bc_current_page"]
     for k in keys:
         context.user_data.pop(k, None)
 
@@ -811,7 +840,7 @@ async def bc_force_cleanup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 清理所有数据
     keys = ["bc_all_groups", "bc_selected_ids", "bc_message_content", "bc_temp_target_ids",
             "bc_selected_category", "bc_batches", "bc_current_batch", "bc_batch_results",
-            "bc_waiting_for_next"]
+            "bc_waiting_for_next", "bc_current_page"]
     for k in keys:
         context.user_data.pop(k, None)
 
@@ -833,7 +862,7 @@ async def bc_cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 清理所有数据
     keys = ["bc_all_groups", "bc_selected_ids", "bc_message_content", "bc_temp_target_ids",
             "bc_selected_category", "bc_batches", "bc_current_batch", "bc_batch_results",
-            "bc_waiting_for_next", "bc_current_state", "in_broadcast"]
+            "bc_waiting_for_next", "bc_current_state", "in_broadcast", "bc_current_page"]
     for k in keys:
         if k in context.user_data:
             context.user_data.pop(k, None)
@@ -879,7 +908,7 @@ async def bc_cancel_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # 清理所有数据
     keys = ["bc_all_groups", "bc_selected_ids", "bc_message_content", "bc_temp_target_ids",
             "bc_selected_category", "bc_batches", "bc_current_batch", "bc_batch_results",
-            "bc_waiting_for_next", "bc_current_state", "in_broadcast"]
+            "bc_waiting_for_next", "bc_current_state", "in_broadcast", "bc_current_page"]
     for k in keys:
         if k in context.user_data:
             context.user_data.pop(k, None)
@@ -912,8 +941,6 @@ async def bc_cancel_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return ConversationHandler.END
 
 # --- 注册处理器 ---
-# broadcast.py - 修改 get_handlers 函数中的 states
-
 def get_handlers():
     return [
         ConversationHandler(
@@ -926,6 +953,8 @@ def get_handlers():
                     CallbackQueryHandler(bc_filter_by_category, pattern="^bc_filter_cat_"),
                     CallbackQueryHandler(bc_select_all, pattern="^bc_select_all$"),
                     CallbackQueryHandler(bc_deselect_all, pattern="^bc_deselect_all$"),
+                    CallbackQueryHandler(bc_page_prev, pattern="^bc_page_prev$"),      # 新增
+                    CallbackQueryHandler(bc_page_next, pattern="^bc_page_next$"),      # 新增
                     CallbackQueryHandler(bc_send_all, pattern="^bc_send_all$"),
                     CallbackQueryHandler(bc_send_all_force, pattern="^bc_send_all_force$"),
                     CallbackQueryHandler(bc_send_selected, pattern="^bc_send_selected$"),
