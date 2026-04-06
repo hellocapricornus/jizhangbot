@@ -12,6 +12,9 @@ if not os.path.isabs(DB_PATH):
 COUNTRY_KEYWORDS = {
     # ========== 亚洲 ==========
     '中国': ['中国', 'china', 'cn', '🇨🇳', 'zhongguo'],
+    '台湾': ['台湾', 'taiwan', 'tw', '🇹🇼', 'taiwan china'],
+    '香港': ['香港', 'hong kong', 'hk', '🇭🇰', 'hongkong'],
+    '澳门': ['澳门', 'macau', 'mo', '🇲🇴', 'macao'],
     '日本': ['日本', 'japan', 'jp', '🇯🇵', 'japon'],
     '韩国': ['韩国', 'korea', 'kr', '🇰🇷', 'south korea', 'republic of korea'],
     '朝鲜': ['朝鲜', 'north korea', 'kp', '🇰🇵', 'democratic people republic of korea'],
@@ -105,6 +108,13 @@ COUNTRY_KEYWORDS = {
     '圣马力诺': ['圣马力诺', 'san marino', 'sm', '🇸🇲'],
     '梵蒂冈': ['梵蒂冈', 'vatican', 'va', '🇻🇦'],
     '马耳他': ['马耳他', 'malta', 'mt', '🇲🇹'],
+    '直布罗陀': ['直布罗陀', 'gibraltar', 'gi', '🇬🇮'],
+    '马恩岛': ['马恩岛', 'isle of man', 'im', '🇮🇲'],
+    '泽西岛': ['泽西岛', 'jersey', 'je', '🇯🇪'],
+    '根西岛': ['根西岛', 'guernsey', 'gg', '🇬🇬'],
+    '法罗群岛': ['法罗群岛', 'faroe islands', 'fo', '🇫🇴'],
+    '奥兰群岛': ['奥兰群岛', 'aland islands', 'ax', '🇦🇽'],
+    '斯瓦尔巴群岛': ['斯瓦尔巴', 'svalbard', 'sj', '🇸🇯'],
 
     # ========== 北美洲 ==========
     '美国': ['美国', 'usa', 'us', 'america', 'united states', '🇺🇸'],
@@ -591,7 +601,7 @@ def update_group_category_if_needed(group_id: str, group_name: str):
 
     # 如果已经分类且不是"未分类"，则不再自动覆盖
     if current_category != '未分类':
-        return
+        return False  # ✅ 统一返回 False
 
     # 检测国家
     country = detect_country_from_group_name(group_name)
