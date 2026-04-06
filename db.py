@@ -3,10 +3,242 @@
 import sqlite3
 import os
 import time
+import re
 
 DB_PATH = "bot.db"
 if not os.path.isabs(DB_PATH):
     DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), DB_PATH)
+
+COUNTRY_KEYWORDS = {
+    # ========== 亚洲 ==========
+    '中国': ['中国', 'china', 'cn', '🇨🇳', 'zhongguo'],
+    '日本': ['日本', 'japan', 'jp', '🇯🇵', 'japon'],
+    '韩国': ['韩国', 'korea', 'kr', '🇰🇷', 'south korea', 'republic of korea'],
+    '朝鲜': ['朝鲜', 'north korea', 'kp', '🇰🇵', 'democratic people republic of korea'],
+    '蒙古': ['蒙古', 'mongolia', 'mn', '🇲🇳'],
+    '印度': ['印度', 'india', 'in', '🇮🇳', 'bharat'],
+    '巴基斯坦': ['巴基斯坦', 'pakistan', 'pk', '🇵🇰'],
+    '孟加拉国': ['孟加拉国', 'bangladesh', 'bd', '🇧🇩'],
+    '尼泊尔': ['尼泊尔', 'nepal', 'np', '🇳🇵'],
+    '不丹': ['不丹', 'bhutan', 'bt', '🇧🇹'],
+    '斯里兰卡': ['斯里兰卡', 'sri lanka', 'lk', '🇱🇰'],
+    '马尔代夫': ['马尔代夫', 'maldives', 'mv', '🇲🇻'],
+    '泰国': ['泰国', 'thailand', 'th', '🇹🇭', 'siamese'],
+    '越南': ['越南', 'vietnam', 'vn', '🇻🇳'],
+    '老挝': ['老挝', 'laos', 'la', '🇱🇦'],
+    '柬埔寨': ['柬埔寨', 'cambodia', 'kh', '🇰🇭'],
+    '缅甸': ['缅甸', 'myanmar', 'mm', '🇲🇲', 'burma'],
+    '马来西亚': ['马来西亚', 'malaysia', 'my', '🇲🇾'],
+    '新加坡': ['新加坡', 'singapore', 'sg', '🇸🇬'],
+    '印度尼西亚': ['印度尼西亚', 'indonesia', 'id', '🇮🇩'],
+    '菲律宾': ['菲律宾', 'philippines', 'ph', '🇵🇭'],
+    '东帝汶': ['东帝汶', 'timor leste', 'tl', '🇹🇱'],
+    '文莱': ['文莱', 'brunei', 'bn', '🇧🇳'],
+    '阿富汗': ['阿富汗', 'afghanistan', 'af', '🇦🇫'],
+    '伊朗': ['伊朗', 'iran', 'ir', '🇮🇷', 'persia'],
+    '伊拉克': ['伊拉克', 'iraq', 'iq', '🇮🇶'],
+    '科威特': ['科威特', 'kuwait', 'kw', '🇰🇼'],
+    '沙特阿拉伯': ['沙特', 'saudi', 'saudi arabia', 'sa', '🇸🇦'],
+    '也门': ['也门', 'yemen', 'ye', '🇾🇪'],
+    '阿曼': ['阿曼', 'oman', 'om', '🇴🇲'],
+    '阿联酋': ['阿联酋', 'uae', 'united arab emirates', 'ae', '🇦🇪'],
+    '卡塔尔': ['卡塔尔', 'qatar', 'qa', '🇶🇦'],
+    '巴林': ['巴林', 'bahrain', 'bh', '🇧🇭'],
+    '约旦': ['约旦', 'jordan', 'jo', '🇯🇴'],
+    '黎巴嫩': ['黎巴嫩', 'lebanon', 'lb', '🇱🇧'],
+    '叙利亚': ['叙利亚', 'syria', 'sy', '🇸🇾'],
+    '塞浦路斯': ['塞浦路斯', 'cyprus', 'cy', '🇨🇾'],
+    '以色列': ['以色列', 'israel', 'il', '🇮🇱'],
+    '巴勒斯坦': ['巴勒斯坦', 'palestine', 'ps', '🇵🇸'],
+    '土耳其': ['土耳其', 'turkey', 'tr', '🇹🇷'],
+    '阿塞拜疆': ['阿塞拜疆', 'azerbaijan', 'az', '🇦🇿'],
+    '格鲁吉亚': ['格鲁吉亚', 'georgia', 'ge', '🇬🇪'],
+    '亚美尼亚': ['亚美尼亚', 'armenia', 'am', '🇦🇲'],
+    '哈萨克斯坦': ['哈萨克斯坦', 'kazakhstan', 'kz', '🇰🇿'],
+    '吉尔吉斯斯坦': ['吉尔吉斯斯坦', 'kyrgyzstan', 'kg', '🇰🇬'],
+    '塔吉克斯坦': ['塔吉克斯坦', 'tajikistan', 'tj', '🇹🇯'],
+    '乌兹别克斯坦': ['乌兹别克斯坦', 'uzbekistan', 'uz', '🇺🇿'],
+    '土库曼斯坦': ['土库曼斯坦', 'turkmenistan', 'tm', '🇹🇲'],
+
+    # ========== 欧洲 ==========
+    '英国': ['英国', 'uk', 'united kingdom', 'england', 'britain', 'gb', '🇬🇧'],
+    '法国': ['法国', 'france', 'fr', '🇫🇷'],
+    '德国': ['德国', 'germany', 'de', '🇩🇪'],
+    '意大利': ['意大利', 'italy', 'it', '🇮🇹'],
+    '西班牙': ['西班牙', 'spain', 'es', '🇪🇸'],
+    '葡萄牙': ['葡萄牙', 'portugal', 'pt', '🇵🇹'],
+    '荷兰': ['荷兰', 'netherlands', 'nl', '🇳🇱', 'holland'],
+    '比利时': ['比利时', 'belgium', 'be', '🇧🇪'],
+    '卢森堡': ['卢森堡', 'luxembourg', 'lu', '🇱🇺'],
+    '瑞士': ['瑞士', 'switzerland', 'ch', '🇨🇭'],
+    '奥地利': ['奥地利', 'austria', 'at', '🇦🇹'],
+    '列支敦士登': ['列支敦士登', 'liechtenstein', 'li', '🇱🇮'],
+    '波兰': ['波兰', 'poland', 'pl', '🇵🇱'],
+    '捷克': ['捷克', 'czech', 'cz', '🇨🇿', 'czech republic'],
+    '斯洛伐克': ['斯洛伐克', 'slovakia', 'sk', '🇸🇰'],
+    '匈牙利': ['匈牙利', 'hungary', 'hu', '🇭🇺'],
+    '罗马尼亚': ['罗马尼亚', 'romania', 'ro', '🇷🇴'],
+    '保加利亚': ['保加利亚', 'bulgaria', 'bg', '🇧🇬'],
+    '塞尔维亚': ['塞尔维亚', 'serbia', 'rs', '🇷🇸'],
+    '克罗地亚': ['克罗地亚', 'croatia', 'hr', '🇭🇷'],
+    '斯洛文尼亚': ['斯洛文尼亚', 'slovenia', 'si', '🇸🇮'],
+    '波黑': ['波黑', 'bosnia', 'ba', '🇧🇦', 'bosnia and herzegovina'],
+    '黑山': ['黑山', 'montenegro', 'me', '🇲🇪'],
+    '北马其顿': ['北马其顿', 'north macedonia', 'mk', '🇲🇰'],
+    '阿尔巴尼亚': ['阿尔巴尼亚', 'albania', 'al', '🇦🇱'],
+    '希腊': ['希腊', 'greece', 'gr', '🇬🇷'],
+    '爱尔兰': ['爱尔兰', 'ireland', 'ie', '🇮🇪'],
+    '丹麦': ['丹麦', 'denmark', 'dk', '🇩🇰'],
+    '瑞典': ['瑞典', 'sweden', 'se', '🇸🇪'],
+    '挪威': ['挪威', 'norway', 'no', '🇳🇴'],
+    '芬兰': ['芬兰', 'finland', 'fi', '🇫🇮'],
+    '冰岛': ['冰岛', 'iceland', 'is', '🇮🇸'],
+    '俄罗斯': ['俄罗斯', 'russia', 'ru', '🇷🇺'],
+    '爱沙尼亚': ['爱沙尼亚', 'estonia', 'ee', '🇪🇪'],
+    '拉脱维亚': ['拉脱维亚', 'latvia', 'lv', '🇱🇻'],
+    '立陶宛': ['立陶宛', 'lithuania', 'lt', '🇱🇹'],
+    '白俄罗斯': ['白俄罗斯', 'belarus', 'by', '🇧🇾'],
+    '摩尔多瓦': ['摩尔多瓦', 'moldova', 'md', '🇲🇩'],
+    '乌克兰': ['乌克兰', 'ukraine', 'ua', '🇺🇦'],
+    '摩纳哥': ['摩纳哥', 'monaco', 'mc', '🇲🇨'],
+    '安道尔': ['安道尔', 'andorra', 'ad', '🇦🇩'],
+    '圣马力诺': ['圣马力诺', 'san marino', 'sm', '🇸🇲'],
+    '梵蒂冈': ['梵蒂冈', 'vatican', 'va', '🇻🇦'],
+    '马耳他': ['马耳他', 'malta', 'mt', '🇲🇹'],
+
+    # ========== 北美洲 ==========
+    '美国': ['美国', 'usa', 'us', 'america', 'united states', '🇺🇸'],
+    '加拿大': ['加拿大', 'canada', 'ca', '🇨🇦'],
+    '墨西哥': ['墨西哥', 'mexico', 'mx', '🇲🇽'],
+    '古巴': ['古巴', 'cuba', 'cu', '🇨🇺'],
+    '牙买加': ['牙买加', 'jamaica', 'jm', '🇯🇲'],
+    '海地': ['海地', 'haiti', 'ht', '🇭🇹'],
+    '多米尼加': ['多米尼加', 'dominican', 'do', '🇩🇴'],
+    '波多黎各': ['波多黎各', 'puerto rico', 'pr', '🇵🇷'],
+    '巴哈马': ['巴哈马', 'bahamas', 'bs', '🇧🇸'],
+    '特立尼达和多巴哥': ['特立尼达', 'trinidad', 'tt', '🇹🇹'],
+    '巴巴多斯': ['巴巴多斯', 'barbados', 'bb', '🇧🇧'],
+    '圣卢西亚': ['圣卢西亚', 'saint lucia', 'lc', '🇱🇨'],
+    '格林纳达': ['格林纳达', 'grenada', 'gd', '🇬🇩'],
+    '安提瓜和巴布达': ['安提瓜', 'antigua', 'ag', '🇦🇬'],
+    '圣基茨和尼维斯': ['圣基茨', 'saint kitts', 'kn', '🇰🇳'],
+    '伯利兹': ['伯利兹', 'belize', 'bz', '🇧🇿'],
+    '哥斯达黎加': ['哥斯达黎加', 'costa rica', 'cr', '🇨🇷'],
+    '萨尔瓦多': ['萨尔瓦多', 'el salvador', 'sv', '🇸🇻'],
+    '危地马拉': ['危地马拉', 'guatemala', 'gt', '🇬🇹'],
+    '洪都拉斯': ['洪都拉斯', 'honduras', 'hn', '🇭🇳'],
+    '尼加拉瓜': ['尼加拉瓜', 'nicaragua', 'ni', '🇳🇮'],
+    '巴拿马': ['巴拿马', 'panama', 'pa', '🇵🇦'],
+
+    # ========== 南美洲 ==========
+    '巴西': ['巴西', 'brazil', 'br', '🇧🇷'],
+    '阿根廷': ['阿根廷', 'argentina', 'ar', '🇦🇷'],
+    '乌拉圭': ['乌拉圭', 'uruguay', 'uy', '🇺🇾'],
+    '巴拉圭': ['巴拉圭', 'paraguay', 'py', '🇵🇾'],
+    '玻利维亚': ['玻利维亚', 'bolivia', 'bo', '🇧🇴'],
+    '智利': ['智利', 'chile', 'cl', '🇨🇱'],
+    '秘鲁': ['秘鲁', 'peru', 'pe', '🇵🇪'],
+    '哥伦比亚': ['哥伦比亚', 'colombia', 'co', '🇨🇴'],
+    '委内瑞拉': ['委内瑞拉', 'venezuela', 've', '🇻🇪'],
+    '厄瓜多尔': ['厄瓜多尔', 'ecuador', 'ec', '🇪🇨'],
+    '圭亚那': ['圭亚那', 'guyana', 'gy', '🇬🇾'],
+    '苏里南': ['苏里南', 'suriname', 'sr', '🇸🇷'],
+    '法属圭亚那': ['法属圭亚那', 'french guiana', 'gf', '🇬🇫'],
+
+    # ========== 非洲 ==========
+    '南非': ['南非', 'south africa', 'za', '🇿🇦'],
+    '埃及': ['埃及', 'egypt', 'eg', '🇪🇬'],
+    '摩洛哥': ['摩洛哥', 'morocco', 'ma', '🇲🇦'],
+    '阿尔及利亚': ['阿尔及利亚', 'algeria', 'dz', '🇩🇿'],
+    '突尼斯': ['突尼斯', 'tunisia', 'tn', '🇹🇳'],
+    '利比亚': ['利比亚', 'libya', 'ly', '🇱🇾'],
+    '苏丹': ['苏丹', 'sudan', 'sd', '🇸🇩'],
+    '埃塞俄比亚': ['埃塞俄比亚', 'ethiopia', 'et', '🇪🇹'],
+    '肯尼亚': ['肯尼亚', 'kenya', 'ke', '🇰🇪'],
+    '坦桑尼亚': ['坦桑尼亚', 'tanzania', 'tz', '🇹🇿'],
+    '乌干达': ['乌干达', 'uganda', 'ug', '🇺🇬'],
+    '卢旺达': ['卢旺达', 'rwanda', 'rw', '🇷🇼'],
+    '布隆迪': ['布隆迪', 'burundi', 'bi', '🇧🇮'],
+    '索马里': ['索马里', 'somalia', 'so', '🇸🇴'],
+    '吉布提': ['吉布提', 'djibouti', 'dj', '🇩🇯'],
+    '厄立特里亚': ['厄立特里亚', 'eritrea', 'er', '🇪🇷'],
+    '南苏丹': ['南苏丹', 'south sudan', 'ss', '🇸🇸'],
+    '刚果金': ['刚果金', 'congo', 'cd', '🇨🇩', 'drc'],
+    '刚果布': ['刚果布', 'congo brazzaville', 'cg', '🇨🇬'],
+    '加蓬': ['加蓬', 'gabon', 'ga', '🇬🇦'],
+    '赤道几内亚': ['赤道几内亚', 'equatorial guinea', 'gq', '🇬🇶'],
+    '喀麦隆': ['喀麦隆', 'cameroon', 'cm', '🇨🇲'],
+    '尼日利亚': ['尼日利亚', 'nigeria', 'ng', '🇳🇬'],
+    '加纳': ['加纳', 'ghana', 'gh', '🇬🇭'],
+    '科特迪瓦': ['科特迪瓦', 'ivory coast', 'ci', '🇨🇮'],
+    '塞内加尔': ['塞内加尔', 'senegal', 'sn', '🇸🇳'],
+    '几内亚': ['几内亚', 'guinea', 'gn', '🇬🇳'],
+    '几内亚比绍': ['几内亚比绍', 'guinea bissau', 'gw', '🇬🇼'],
+    '马里': ['马里', 'mali', 'ml', '🇲🇱'],
+    '布基纳法索': ['布基纳法索', 'burkina faso', 'bf', '🇧🇫'],
+    '尼日尔': ['尼日尔', 'niger', 'ne', '🇳🇪'],
+    '乍得': ['乍得', 'chad', 'td', '🇹🇩'],
+    '中非': ['中非', 'central african', 'cf', '🇨🇫'],
+    '安哥拉': ['安哥拉', 'angola', 'ao', '🇦🇴'],
+    '纳米比亚': ['纳米比亚', 'namibia', 'na', '🇳🇦'],
+    '博茨瓦纳': ['博茨瓦纳', 'botswana', 'bw', '🇧🇼'],
+    '赞比亚': ['赞比亚', 'zambia', 'zm', '🇿🇲'],
+    '津巴布韦': ['津巴布韦', 'zimbabwe', 'zw', '🇿🇼'],
+    '莫桑比克': ['莫桑比克', 'mozambique', 'mz', '🇲🇿'],
+    '马拉维': ['马拉维', 'malawi', 'mw', '🇲🇼'],
+    '马达加斯加': ['马达加斯加', 'madagascar', 'mg', '🇲🇬'],
+    '毛里求斯': ['毛里求斯', 'mauritius', 'mu', '🇲🇺'],
+    '塞舌尔': ['塞舌尔', 'seychelles', 'sc', '🇸🇨'],
+    '科摩罗': ['科摩罗', 'comoros', 'km', '🇰🇲'],
+    '毛里塔尼亚': ['毛里塔尼亚', 'mauritania', 'mr', '🇲🇷'],
+    '西撒哈拉': ['西撒哈拉', 'western sahara', 'eh', '🇪🇭'],
+    '冈比亚': ['冈比亚', 'gambia', 'gm', '🇬🇲'],
+    '塞拉利昂': ['塞拉利昂', 'sierra leone', 'sl', '🇸🇱'],
+    '利比里亚': ['利比里亚', 'liberia', 'lr', '🇱🇷'],
+    '贝宁': ['贝宁', 'benin', 'bj', '🇧🇯'],
+    '多哥': ['多哥', 'togo', 'tg', '🇹🇬'],
+
+    # ========== 大洋洲 ==========
+    '澳大利亚': ['澳大利亚', 'australia', 'au', '🇦🇺'],
+    '新西兰': ['新西兰', 'new zealand', 'nz', '🇳🇿'],
+    '斐济': ['斐济', 'fiji', 'fj', '🇫🇯'],
+    '巴布亚新几内亚': ['巴布亚新几内亚', 'papua new guinea', 'pg', '🇵🇬'],
+    '所罗门群岛': ['所罗门群岛', 'solomon islands', 'sb', '🇸🇧'],
+    '瓦努阿图': ['瓦努阿图', 'vanuatu', 'vu', '🇻🇺'],
+    '新喀里多尼亚': ['新喀里多尼亚', 'new caledonia', 'nc', '🇳🇨'],
+    '萨摩亚': ['萨摩亚', 'samoa', 'ws', '🇼🇸'],
+    '汤加': ['汤加', 'tonga', 'to', '🇹🇴'],
+    '密克罗尼西亚': ['密克罗尼西亚', 'micronesia', 'fm', '🇫🇲'],
+    '马绍尔群岛': ['马绍尔群岛', 'marshall islands', 'mh', '🇲🇭'],
+    '帕劳': ['帕劳', 'palau', 'pw', '🇵🇼'],
+    '瑙鲁': ['瑙鲁', 'nauru', 'nr', '🇳🇷'],
+    '基里巴斯': ['基里巴斯', 'kiribati', 'ki', '🇰🇮'],
+    '图瓦卢': ['图瓦卢', 'tuvalu', 'tv', '🇹🇻'],
+}
+
+def detect_country_from_group_name(group_name: str) -> str:
+    """从群组名称中检测国家，返回国家名称，没有匹配返回 None"""
+    if not group_name:
+        return None
+
+    group_name_lower = group_name.lower()
+
+    for country, keywords in COUNTRY_KEYWORDS.items():
+        for keyword in keywords:
+            if keyword.lower() in group_name_lower:
+                return country
+
+    return None
+
+def ensure_country_category(country_name: str) -> bool:
+    """确保国家的分类存在，不存在则自动创建"""
+    categories = get_all_categories()
+    category_names = [cat['name'] for cat in categories]
+
+    if country_name not in category_names:
+        return add_category(country_name, f"自动创建的{country_name}分类")
+
+    return True
 
 def get_db_connection():
     """获取数据库连接"""
@@ -207,7 +439,7 @@ def mark_tx_notified(tx_id: str):
 # ========== 原有函数保持不变 ==========
 
 def save_group(group_id: str, title: str, category: str = None):
-    """保存或更新群组信息"""
+    """保存或更新群组信息（支持自动分类）"""
     import time
     conn = get_db_connection()
     c = conn.cursor()
@@ -217,6 +449,14 @@ def save_group(group_id: str, title: str, category: str = None):
             c.execute("SELECT category FROM groups WHERE group_id = ?", (group_id,))
             row = c.fetchone()
             category = row[0] if row else '未分类'
+
+            # 新增：如果分类是"未分类"，尝试自动识别
+            if category == '未分类':
+                country = detect_country_from_group_name(title)  # 直接调用，不需要导入
+                if country:
+                    if ensure_country_category(country):  # 直接调用，不需要导入
+                        category = country
+                        print(f"✅ 自动分类：群组「{title}」已归类到「{country}」")
 
         c.execute("""
             INSERT OR REPLACE INTO groups (group_id, title, last_seen, category)
@@ -329,3 +569,43 @@ def get_groups_by_category():
     rows = c.fetchall()
     conn.close()
     return {row[0]: row[1] for row in rows}
+
+#更新群组分类的函数
+def update_group_category_if_needed(group_id: str, group_name: str):
+    """
+    根据群组名称自动更新群组分类
+    如果群组名称包含国家关键词，则自动分类
+    """
+
+    # 获取当前群组信息
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT category FROM groups WHERE group_id = ?", (group_id,))
+    row = c.fetchone()
+    conn.close()
+
+    if not row:
+        return False  # 改为返回 False
+
+    current_category = row[0]
+
+    # 如果已经分类且不是"未分类"，则不再自动覆盖
+    if current_category != '未分类':
+        return
+
+    # 检测国家
+    country = detect_country_from_group_name(group_name)
+
+    if country:
+        # 确保分类存在
+        if ensure_country_category(country):
+            # 更新群组分类
+            conn = get_db_connection()
+            c = conn.cursor()
+            c.execute("UPDATE groups SET category = ? WHERE group_id = ?", (country, group_id))
+            conn.commit()
+            conn.close()
+            print(f"✅ 自动分类：群组「{group_name}」已归类到「{country}」")
+            return True
+
+    return False
