@@ -1,5 +1,5 @@
 # handlers/group_manager.py - 完整功能版
-
+import time
 import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
@@ -32,27 +32,6 @@ async def cleanup_expired_states():
     for user_id in expired_users:
         del user_states[user_id]
         print(f"[清理] 已清除用户 {user_id} 的过期状态")
-
-# 修改添加状态的函数，添加时间戳
-async def add_category_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """开始添加分类"""
-    query = update.callback_query
-    user_id = query.from_user.id
-    await query.answer()
-    print(f"[DEBUG] add_category_start 被调用")
-
-    # ✅ 添加时间戳
-    user_states[user_id] = {
-        "action": "add_category_name",
-        "timestamp": time.time()
-    }
-
-    await query.message.edit_text(
-        "➕ **创建新分类**\n\n"
-        "请输入分类名称（如：VIP群组）：\n\n"
-        "❌ 输入 /cancel 取消",
-        parse_mode="Markdown"
-    )
 
 async def group_manager_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """群组管理主菜单"""
@@ -155,8 +134,11 @@ async def add_category_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.answer()
     print(f"[DEBUG] add_category_start 被调用")
 
-    # 设置用户状态，等待输入分类名称
-    user_states[user_id] = {"action": "add_category_name"}
+    # ✅ 添加时间戳
+    user_states[user_id] = {
+        "action": "add_category_name",
+        "timestamp": time.time()
+    }
 
     await query.message.edit_text(
         "➕ **创建新分类**\n\n"
