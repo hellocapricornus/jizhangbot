@@ -133,9 +133,8 @@ async def start_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if k in context.user_data:
             context.user_data.pop(k, None)
 
-    await query.answer("正在检测群组状态...")
-
-    groups = await sync_and_clean_groups(context)
+    from db import get_all_groups_from_db
+    groups = get_all_groups_from_db()
 
     if not groups:
         await query.message.reply_text("⚠️ **未找到任何有效群组**\n\n请确保机器人已添加到群组中。")
