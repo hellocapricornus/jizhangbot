@@ -152,7 +152,7 @@ async def start_transfer_analysis(update: Update, context: ContextTypes.DEFAULT_
     await query.message.reply_text(
         "🕵️ **转账分析**\n\n将分析是否有第三方地址与这两个地址都产生过交易。\n"
         "请输入两个 USDT 地址，中间用空格隔开：\n"
-        "例如：`Txxxx... Tyyyy...`"
+        "例如：`Txxxx... Tyyyy...`\n"
          "💡 提示：输入 /cancel 可取消操作",
         parse_mode="Markdown"
     )
