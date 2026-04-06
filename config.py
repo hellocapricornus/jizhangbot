@@ -8,10 +8,10 @@ OPERATORS = set()
 
 # ========== AI API Key 配置 ==========
 # 注册地址：https://platform.deepseek.com/
-DEEPSEEK_API_KEY = ""
+DEEPSEEK_API_KEY = "sk-c698bcb1b9684093af15a01ecfc3046a"
 
 # 注册地址：https://cloud.siliconflow.cn/
-SILICONFLOW_API_KEY = ""
+SILICONFLOW_API_KEY = "sk-ivbgfpqbtdfdilziuqotlycwexyoohjgnnmbfzgcilmcvmpc"
 
 # 注册地址：https://dashscope.console.aliyun.com/
 DASHSCOPE_API_KEY = "sk-72b329fa6e6e48d8b1fe98a69d6c3b3e"
