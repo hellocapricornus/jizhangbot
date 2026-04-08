@@ -8,7 +8,6 @@ import aiohttp
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Tuple, Optional
-from handlers.ai_client import get_ai_client
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler, CallbackQueryHandler
@@ -2148,8 +2147,16 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
             # 有权限，继续处理
             thinking_msg = await message.reply_text("🤔 思考中...")
+            from handlers.ai_client import get_ai_client
             ai_client = get_ai_client()
-            reply = await ai_client.chat(question)
+            
+            # 使用工具调用版本
+            reply = await ai_client.chat_with_data(
+                prompt=question,
+                group_id=str(chat.id),
+                user_id=message.from_user.id
+            )
+            
             if len(reply) > 4000:
                 reply = reply[:4000] + "...\n\n(回复过长已截断)"
             await thinking_msg.edit_text(reply)
