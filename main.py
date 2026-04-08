@@ -291,8 +291,40 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     print(f"Unhandled callback data: {data}")
 
+# 在 button_router 函数之前添加
+async def extract_address_from_text(text: str) -> str:
+    """从用户消息中提取地址（支持备注名称）"""
+    import re
+    from db import get_monitored_addresses
+
+    # 先尝试匹配 TRC20 地址格式
+    trc20_pattern = r'T[0-9A-Za-z]{33}'
+    match = re.search(trc20_pattern, text)
+    if match:
+        return match.group()
+
+    # 如果没有地址，尝试根据备注查找
+    addresses = get_monitored_addresses()
+
+    # 提取可能的备注关键词
+    # 常见模式："地址xxx"、"备注xxx"、"爱德华"
+    for keyword in ["地址", "备注", "分析"]:
+        text = text.replace(keyword, "")
+
+    # 清理文本，提取可能的备注名
+    possible_note = text.strip()
+    if possible_note:
+        for addr in addresses:
+            note = addr.get('note', '')
+            if possible_note.lower() in note.lower() or note.lower() in possible_note.lower():
+                return addr['address']
+
+    # 如果都没找到，提示用户
+    return None
+
 async def input_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理私聊的文本输入"""
+    from datetime import datetime, timedelta
     chat = update.effective_chat
     print(f"[DEBUG] ========== input_router 开始 ==========")
     print(f"[DEBUG] 聊天类型: {chat.type}")
@@ -323,7 +355,7 @@ async def input_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 3. 检查监控模块状态
     monitor_action = context.user_data.get("monitor_action")
     print(f"[DEBUG] 3. 检查监控状态: monitor_action = {monitor_action}")
-    
+
     if monitor_action == "add":
         print(f"[DEBUG] → 交给监控模块添加地址")
         from handlers import monitor
@@ -338,7 +370,7 @@ async def input_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 4. 检查其他模块状态
     module = context.user_data.get("active_module")
     print(f"[DEBUG] 4. 检查其他模块: active_module = {module}")
-    
+
     # 检查是否在互转查询的 ConversationHandler 状态中
     if context.user_data.get("transfer_results") is not None:
         print(f"[DEBUG] → 互转查询有结果数据，跳过 AI 回复")
@@ -351,15 +383,12 @@ async def input_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print(f"[DEBUG] → 交给操作员模块")
         await operator.handle_input(update, context)
         return
-    # main.py - 修改 input_router 中的 USDT 处理
-
     elif module == "usdt":
         print(f"[DEBUG] → 交给 USDT 模块")
         try:
             await usdt.handle_input(update, context)
         except Exception as e:
             print(f"[DEBUG] USDT 模块错误: {e}")
-            # ✅ 异常时清除状态
             context.user_data.pop("active_module", None)
             context.user_data.pop("usdt_session", None)
             await update.message.reply_text("❌ USDT 查询出错，请重试")
@@ -367,6 +396,884 @@ async def input_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif module == "accounting":
         print(f"[DEBUG] → 记账模块，忽略")
         return
+
+    # ========== 4.5 私聊中的意图识别和数据查询 ==========
+    print(f"[DEBUG] 4.5 检查私聊数据查询意图...")
+    text = update.message.text.strip() if update.message.text else ""
+
+    if text and not text.startswith('/'):
+        # 权限检查
+        from auth import is_authorized
+        if not is_authorized(user_id):
+            await update.message.reply_text(
+                "❌ AI 对话功能仅限管理员和操作员使用\n\n"
+                "如需使用，请联系 @ChinaEdward 申请权限"
+            )
+            return
+
+        # ========== 先直接匹配关键词（临时方案） ==========
+        if "新加入" in text or "今天加入" in text:
+            from db import get_all_groups_from_db
+            from datetime import datetime, timezone, timedelta
+
+            # 使用北京时间
+            beijing_tz = timezone(timedelta(hours=8))
+            now_beijing = datetime.now(beijing_tz)
+            today_start_beijing = now_beijing.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+
+            groups = get_all_groups_from_db()
+            today_joined = [g for g in groups if g.get('joined_at', 0) >= today_start_beijing]
+
+            if today_joined:
+                result = f"🆕 今天新加入了 {len(today_joined)} 个群组：\n"
+                for g in today_joined:
+                    joined_time = datetime.fromtimestamp(g.get('joined_at', 0), tz=beijing_tz).strftime('%H:%M')
+                    result += f"• {g['title']}（{joined_time}）\n"
+                await update.message.reply_text(result)
+            else:
+                await update.message.reply_text("📭 今天没有新加入的群组")
+            return
+
+        if "收入情况" in text or "交易情况" in text:
+            from handlers.accounting import accounting_manager
+            from db import get_all_groups_from_db
+            groups = get_all_groups_from_db()
+            group_details = []
+            for group in groups:
+                try:
+                    stats = accounting_manager.get_today_stats(group['id'])
+                    if stats['income_count'] > 0 or stats['expense_count'] > 0:
+                        group_details.append({
+                            'name': group['title'],
+                            'income_usdt': stats['income_usdt'],
+                            'expense_usdt': stats['expense_usdt']
+                        })
+                except:
+                    pass
+            if group_details:
+                result = f"📊 今日有交易的群组：\n\n"
+                for g in group_details:
+                    result += f"• {g['name']}\n"
+                    result += f"  入款：{g['income_usdt']:.0f} USDT"
+                    if g['expense_usdt'] > 0:
+                        result += f"，出款：{g['expense_usdt']:.0f} USDT"
+                    result += "\n\n"
+                await update.message.reply_text(result)
+            else:
+                await update.message.reply_text("📭 今日没有任何群组有交易记录")
+            return
+
+        # 使用 AI 识别意图
+        from handlers.ai_client import get_ai_client
+        ai_client = get_ai_client()
+
+        intent_prompt = f"""判断用户问题的意图，只返回以下类型之一：
+
+# 能力查询（新增）
+- CAPABILITY_QUERY: 询问机器人能做什么、能分析哪些数据、有什么功能
+
+# 基础统计
+- TOTAL_GROUP_COUNT: 询问机器人总共加入了多少个群组
+- GROUP_CATEGORY: 询问群组有哪些国家/分类
+- TODAY_JOINED_GROUPS: 询问今天新加入的群组
+
+# 收入统计
+- TODAY_ALL_INCOME: 询问所有群组今天的收入/入款情况
+- MONTH_TOTAL_INCOME: 询问本月所有群组的总收入
+- PERIOD_COMPARISON: 询问本周vs上周、本月vs上月对比
+- CATEGORY_INCOME_PERCENTAGE: 询问各分类入款占比
+- GROUP_BILL: 查询指定群组的账单详情（如"查询XX群的账单"）
+
+# 群组活跃度
+- TODAY_ACTIVE_GROUPS: 询问今天哪些群组使用了记账功能
+- TODAY_TOP_GROUP: 询问今天哪个群组交易最多
+- GROUP_ACTIVITY_RANKING: 询问群组活跃度排行
+
+# 用户统计
+- TODAY_ACTIVE_USERS: 询问今天有谁使用了记账命令
+- TODAY_TOP_USER: 询问今日入款最多的用户
+
+# 待处理
+- PENDING_USDT_GROUPS: 询问哪些群组有未下发的USDT
+
+# 异常检测
+- LARGE_TRANSACTION_ALERT: 询问大额交易提醒
+- TODAY_HOURLY_DISTRIBUTION: 询问今日各时段入款分布
+
+# 监听地址分析（新增）
+- ADDRESS_INCOME_TODAY: 分析监听地址今天的收支情况
+- ADDRESS_INCOME_WEEK: 分析监听地址本周的收支情况
+- ADDRESS_INCOME_MONTH: 分析监听地址这个月的收支情况
+
+# 其他
+- OTHER: 其他问题
+
+用户问题：{text}
+
+只返回类型，不要其他内容。"""
+
+        try:
+            intent = await ai_client.chat(intent_prompt, "你是一个意图识别助手，只返回指定的类型代码。")
+            intent = intent.strip().upper()
+            print(f"[DEBUG] 意图识别结果: {intent}")
+        except Exception as e:
+            print(f"[DEBUG] 意图识别失败: {e}")
+            intent = "OTHER"
+
+        # ========== 0. 能力查询（机器人能做什么） ==========
+        if intent == "CAPABILITY_QUERY":
+            result = f"""📊 我可以帮你分析以下数据：
+
+📁 **群组统计**
+• 总共加入了多少个群组
+• 群组有哪些国家/分类
+• 今天新加入的群组
+
+💰 **收入统计**
+• 所有群组今天的收入情况（入款/出款/净收入）
+• 本月所有群组的总收入
+• 本周 vs 上周收入对比
+• 各分类入款占比
+• 指定群组的今日账单详情
+
+📈 **群组活跃度**
+• 今天哪些群组使用了记账功能
+• 今天哪个群组交易最多
+• 群组活跃度排行（按交易笔数）
+
+👥 **用户统计**
+• 今天谁使用了记账命令
+• 今日入款最多的用户
+
+⏳ **待处理**
+• 哪些群组有未下发的USDT
+
+⚠️ **异常检测**
+• 大额交易提醒（≥5000元）
+• 今日各时段入款分布
+
+🔔 **监听地址分析**
+• 监听地址今日收支情况
+• 监听地址本周收支情况
+• 监听地址本月收支情况
+
+💡 直接提问即可，例如：
+• "今天收入情况"
+• "查询测试5群账单"
+• "分析爱德华今天的收支"
+• "哪些群组有未下发"
+• "今日入款冠军是谁"
+• "本周vs上周收入对比"
+
+需要我帮你分析什么？"""
+            await update.message.reply_text(result)
+            return
+
+        # ========== 1. 总群组数量 ==========
+        if intent == "TOTAL_GROUP_COUNT":
+            from db import get_all_groups_from_db
+            groups = get_all_groups_from_db()
+            count = len(groups)
+            await update.message.reply_text(f"📊 当前机器人共加入 {count} 个群组")
+            return
+
+        # ========== 2. 群组分类 ==========
+        elif intent == "GROUP_CATEGORY":
+            from db import get_groups_by_category
+            groups_by_cat = get_groups_by_category()
+            if groups_by_cat:
+                result = "📁 群组分类统计：\n"
+                for cat, count in groups_by_cat.items():
+                    if cat != '未分类':
+                        result += f"• {cat}：{count} 个\n"
+                if '未分类' in groups_by_cat:
+                    result += f"• 未分类：{groups_by_cat['未分类']} 个\n"
+                await update.message.reply_text(result)
+            else:
+                await update.message.reply_text("📭 暂无分类群组")
+            return
+
+        # ========== 3. 今天加入的群组 ==========
+        elif intent == "TODAY_JOINED_GROUPS":
+            from db import get_all_groups_from_db
+            from datetime import datetime, timezone, timedelta
+
+            # 使用北京时间
+            beijing_tz = timezone(timedelta(hours=8))
+            now_beijing = datetime.now(beijing_tz)
+            today_start_beijing = now_beijing.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+
+            groups = get_all_groups_from_db()
+            # 使用 joined_at 字段判断（joined_at 已经是北京时间戳）
+            today_joined = [g for g in groups if g.get('joined_at', 0) >= today_start_beijing]
+
+            if today_joined:
+                # 按加入时间排序
+                today_joined.sort(key=lambda x: x.get('joined_at', 0))
+
+                result = f"🆕 今天新加入了 {len(today_joined)} 个群组：\n\n"
+                for i, g in enumerate(today_joined, 1):
+                    # 使用北京时间显示
+                    joined_time = datetime.fromtimestamp(g.get('joined_at', 0), tz=beijing_tz).strftime('%H:%M')
+                    result += f"{i}. {g['title']}\n"
+                    result += f"   加入时间：{joined_time}\n"
+                    result += f"   分类：{g.get('category', '未分类')}\n\n"
+                await update.message.reply_text(result)
+            else:
+                await update.message.reply_text("📭 今天没有新加入的群组")
+            return
+        # ========== 4. 所有群组今日收入统计（分群显示） ==========
+        elif intent == "TODAY_ALL_INCOME":
+            from handlers.accounting import accounting_manager
+            from db import get_all_groups_from_db
+            from datetime import datetime
+
+            groups = get_all_groups_from_db()
+
+            # 收集每个有交易的群组数据
+            group_details = []
+            total_income_usdt = 0
+            total_expense_usdt = 0
+
+            for group in groups:
+                try:
+                    stats = accounting_manager.get_today_stats(group['id'])
+                    # 只显示有交易的群组
+                    if stats['income_count'] > 0 or stats['expense_count'] > 0:
+                        group_details.append({
+                            'name': group['title'],
+                            'category': group.get('category', '未分类'),
+                            'income_cny': stats['income_total'],
+                            'income_usdt': stats['income_usdt'],
+                            'income_count': stats['income_count'],
+                            'expense_usdt': stats['expense_usdt'],
+                            'expense_count': stats['expense_count'],
+                            'pending': stats['pending_usdt']
+                        })
+                        total_income_usdt += stats['income_usdt']
+                        total_expense_usdt += stats['expense_usdt']
+                except:
+                    pass
+
+            if group_details:
+                # 按入款金额排序
+                group_details.sort(key=lambda x: x['income_usdt'], reverse=True)
+
+                result = f"📊 今日有交易的群组（{len(group_details)}个）：\n\n"
+                for g in group_details:
+                    result += f"📌 {g['name']}（{g['category']}）\n"
+                    result += f"   💰 入款：{g['income_cny']:.0f}元 = {g['income_usdt']:.0f} USDT（{g['income_count']}笔）\n"
+                    if g['expense_usdt'] > 0:
+                        result += f"   📤 出款：{g['expense_usdt']:.0f} USDT（{g['expense_count']}笔）\n"
+                    if g['pending'] > 0:
+                        result += f"   ⏳ 待下发：{g['pending']:.0f} USDT\n"
+                    result += "\n"
+
+                result += f"📊 今日汇总：\n"
+                result += f"• 总入款：{total_income_usdt:.0f} USDT\n"
+                result += f"• 总出款：{total_expense_usdt:.0f} USDT\n"
+                result += f"• 净收入：{total_income_usdt - total_expense_usdt:.0f} USDT"
+
+                await update.message.reply_text(result)
+            else:
+                await update.message.reply_text("📭 今日没有任何群组有交易记录")
+            return
+        # ========== 5. 今天哪些群组使用了记账功能 ==========
+        elif intent == "TODAY_ACTIVE_GROUPS":
+            from handlers.accounting import accounting_manager
+            from db import get_all_groups_from_db
+            groups = get_all_groups_from_db()
+            active_groups = []
+
+            for group in groups:
+                try:
+                    stats = accounting_manager.get_today_stats(group['id'])
+                    if stats['income_count'] > 0 or stats['expense_count'] > 0:
+                        active_groups.append({
+                            'name': group['title'],
+                            'income_count': stats['income_count'],
+                            'expense_count': stats['expense_count'],
+                            'income_usdt': stats['income_usdt']
+                        })
+                except:
+                    pass
+
+            if active_groups:
+                result = f"📊 今日使用记账功能的群组（{len(active_groups)}个）：\n"
+                for g in active_groups[:10]:
+                    result += f"• {g['name']}：入款{g['income_count']}笔，{g['income_usdt']:.0f}U\n"
+                await update.message.reply_text(result)
+            else:
+                await update.message.reply_text("📭 今日没有任何群组使用记账功能")
+            return
+
+        # ========== 6. 今天哪个群组交易最多 ==========
+        elif intent == "TODAY_TOP_GROUP":
+            from handlers.accounting import accounting_manager
+            from db import get_all_groups_from_db
+            groups = get_all_groups_from_db()
+            top_group = None
+            max_income = 0
+
+            for group in groups:
+                try:
+                    stats = accounting_manager.get_today_stats(group['id'])
+                    if stats['income_usdt'] > max_income:
+                        max_income = stats['income_usdt']
+                        top_group = group
+                except:
+                    pass
+
+            if top_group:
+                stats = accounting_manager.get_today_stats(top_group['id'])
+                result = f"🏆 今日交易最多的群组：\n"
+                result += f"• 群组：{top_group['title']}\n"
+                result += f"• 入款：{stats['income_total']:.0f}元 = {stats['income_usdt']:.0f} USDT\n"
+                result += f"• 笔数：{stats['income_count']}笔\n"
+                await update.message.reply_text(result)
+            else:
+                await update.message.reply_text("📭 今日没有任何群组有交易记录")
+            return
+
+        # ========== 7. 哪些群组有未下发USDT ==========
+        elif intent == "PENDING_USDT_GROUPS":
+            from handlers.accounting import accounting_manager
+            from db import get_all_groups_from_db
+            groups = get_all_groups_from_db()
+            pending_groups = []
+            total_pending = 0
+
+            for group in groups:
+                try:
+                    stats = accounting_manager.get_current_stats(group['id'])
+                    if stats['pending_usdt'] > 0:
+                        pending_groups.append({
+                            'name': group['title'],
+                            'pending': stats['pending_usdt']
+                        })
+                        total_pending += stats['pending_usdt']
+                except:
+                    pass
+
+            if pending_groups:
+                result = f"⏳ 有待下发的群组（{len(pending_groups)}个）：\n"
+                for g in pending_groups[:10]:
+                    result += f"• {g['name']}：{g['pending']:.0f} USDT\n"
+                result += f"\n📊 总计待下发：{total_pending:.0f} USDT"
+                await update.message.reply_text(result)
+            else:
+                await update.message.reply_text("✅ 所有群组均无待下发USDT")
+            return
+
+        # ========== 8. 今天谁使用了记账命令 ==========
+        elif intent == "TODAY_ACTIVE_USERS":
+            from handlers.accounting import accounting_manager
+            from db import get_all_groups_from_db
+            from collections import defaultdict
+
+            groups = get_all_groups_from_db()
+            user_activity = defaultdict(lambda: {'count': 0, 'groups': set(), 'income': 0})
+
+            for group in groups:
+                try:
+                    records = accounting_manager.get_today_records(group['id'])
+                    for record in records:
+                        user_id_key = record.get('user_id')
+                        display_name = record.get('display_name', str(user_id_key))
+                        user_activity[user_id_key]['name'] = display_name
+                        user_activity[user_id_key]['count'] += 1
+                        user_activity[user_id_key]['groups'].add(group['title'])
+                        if record['type'] == 'income':
+                            user_activity[user_id_key]['income'] += record['amount']
+                except:
+                    pass
+
+            if user_activity:
+                sorted_users = sorted(user_activity.items(), key=lambda x: x[1]['count'], reverse=True)
+                result = f"👥 今日使用记账命令的用户（{len(sorted_users)}人）：\n"
+                for uid, data in sorted_users[:10]:
+                    result += f"• {data['name']}：{data['count']}次，入款{data['income']:.0f}元\n"
+                await update.message.reply_text(result)
+            else:
+                await update.message.reply_text("📭 今日无人使用记账命令")
+            return
+
+        # ========== 9. 本月所有群组总收入 ==========
+        elif intent == "MONTH_TOTAL_INCOME":
+            from handlers.accounting import accounting_manager
+            from db import get_all_groups_from_db
+            from datetime import datetime, timezone, timedelta
+
+            # 使用北京时间
+            beijing_tz = timezone(timedelta(hours=8))
+            now_beijing = datetime.now(beijing_tz)
+            month_start_beijing = now_beijing.replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp()
+
+            groups = get_all_groups_from_db()
+            total_income_cny = 0
+            total_income_usdt = 0
+
+            for group in groups:
+                try:
+                    records = accounting_manager.get_total_records(group['id'])
+                    for record in records:
+                        if record['type'] == 'income' and record.get('created_at', 0) >= month_start_beijing:
+                            total_income_cny += record['amount']
+                            total_income_usdt += record['amount_usdt']
+                except:
+                    pass
+
+            current_month = now_beijing.strftime('%Y年%m月')
+            result = f"📊 {current_month}所有群组总收入：\n"
+            result += f"• 总入款：{total_income_cny:.2f} 元 = {total_income_usdt:.2f} USDT"
+            await update.message.reply_text(result)
+            return
+
+        # ========== 10. 群组活跃度排行 ==========
+        elif intent == "GROUP_ACTIVITY_RANKING":
+            from handlers.accounting import accounting_manager
+            from db import get_all_groups_from_db
+            groups = get_all_groups_from_db()
+            group_stats = []
+
+            for group in groups:
+                try:
+                    stats = accounting_manager.get_total_stats(group['id'])
+                    if stats['income_count'] > 0 or stats['expense_count'] > 0:
+                        group_stats.append({
+                            'name': group['title'],
+                            'total_income': stats['income_usdt'],
+                            'total_count': stats['income_count'] + stats['expense_count']
+                        })
+                except:
+                    pass
+
+            group_stats.sort(key=lambda x: x['total_count'], reverse=True)
+
+            if group_stats:
+                result = "🏆 群组活跃度排行（按交易笔数）：\n"
+                for i, g in enumerate(group_stats[:5], 1):
+                    result += f"{i}. {g['name']}：{g['total_count']}笔，{g['total_income']:.0f}U\n"
+                await update.message.reply_text(result)
+            else:
+                await update.message.reply_text("📭 暂无群组活跃数据")
+            return
+
+        # ========== 11. 今日入款最多的用户 ==========
+        elif intent == "TODAY_TOP_USER":
+            from handlers.accounting import accounting_manager
+            from db import get_all_groups_from_db
+            from collections import defaultdict
+
+            groups = get_all_groups_from_db()
+            user_income = defaultdict(float)
+            user_name_map = {}
+
+            for group in groups:
+                try:
+                    records = accounting_manager.get_today_records(group['id'])
+                    for record in records:
+                        if record['type'] == 'income':
+                            user_id_key = record.get('user_id')
+                            user_name_map[user_id_key] = record.get('display_name', str(user_id_key))
+                            user_income[user_id_key] += record['amount']
+                except:
+                    pass
+
+            if user_income:
+                top_user = max(user_income.items(), key=lambda x: x[1])
+                result = f"🏆 今日入款冠军：\n"
+                result += f"• 用户：{user_name_map.get(top_user[0], top_user[0])}\n"
+                result += f"• 入款：{top_user[1]:.2f} 元"
+                await update.message.reply_text(result)
+            else:
+                await update.message.reply_text("📭 今日暂无入款记录")
+            return
+
+        # ========== 12. 本周vs上周对比 ==========
+        elif intent == "PERIOD_COMPARISON":
+            from handlers.accounting import accounting_manager
+            from db import get_all_groups_from_db
+            from datetime import datetime, timezone, timedelta
+
+            # 使用北京时间
+            beijing_tz = timezone(timedelta(hours=8))
+            now_beijing = datetime.now(beijing_tz)
+
+            # 本周一（北京时间）
+            this_week_start = (now_beijing - timedelta(days=now_beijing.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+            # 上周一
+            last_week_start = this_week_start - timedelta(days=7)
+            # 上周日结束
+            last_week_end = this_week_start - timedelta(seconds=1)
+
+            this_week_total = 0
+            last_week_total = 0
+
+            # ✅ 获取群组列表
+            groups = get_all_groups_from_db()
+
+            for group in groups:
+                try:
+                    records = accounting_manager.get_total_records(group['id'])
+                    for record in records:
+                        if record['type'] == 'income':
+                            ts = record.get('created_at', 0)
+                            if this_week_start.timestamp() <= ts:
+                                this_week_total += record['amount_usdt']
+                            elif last_week_start.timestamp() <= ts < last_week_end.timestamp():
+                                last_week_total += record['amount_usdt']
+                except:
+                    pass
+
+            if this_week_total > 0 or last_week_total > 0:
+                change = ((this_week_total - last_week_total) / last_week_total * 100) if last_week_total > 0 else 100
+                trend = "📈 上涨" if change >= 0 else "📉 下跌"
+                result = f"📊 本周 vs 上周对比：\n"
+                result += f"• 本周收入：{this_week_total:.0f} USDT\n"
+                result += f"• 上周收入：{last_week_total:.0f} USDT\n"
+                result += f"• {trend} {abs(change):.1f}%"
+                await update.message.reply_text(result)
+            else:
+                await update.message.reply_text("📭 暂无周度数据对比")
+            return
+        # ========== 13. 各分类入款占比 ==========
+        elif intent == "CATEGORY_INCOME_PERCENTAGE":
+            from handlers.accounting import accounting_manager
+            from db import get_all_groups_from_db
+
+            groups = get_all_groups_from_db()
+            category_income = {}
+            total = 0
+
+            for group in groups:
+                try:
+                    records = accounting_manager.get_total_records(group['id'])
+                    for record in records:
+                        if record['type'] == 'income':
+                            category = record.get('category', '未分类')
+                            if not category:
+                                category = '未分类'
+                            category_income[category] = category_income.get(category, 0) + record['amount_usdt']
+                            total += record['amount_usdt']
+                except:
+                    pass
+
+            if total > 0:
+                sorted_cats = sorted(category_income.items(), key=lambda x: x[1], reverse=True)
+                result = f"📊 各分类入款占比：\n"
+                for cat, amount in sorted_cats[:5]:
+                    percentage = amount / total * 100
+                    result += f"• {cat}：{amount:.0f} USDT（{percentage:.1f}%）\n"
+                await update.message.reply_text(result)
+            else:
+                await update.message.reply_text("📭 暂无入款数据")
+            return
+        # ========== 14. 今日各时段入款分布 ==========
+        elif intent == "TODAY_HOURLY_DISTRIBUTION":
+            from handlers.accounting import accounting_manager
+            from db import get_all_groups_from_db
+            from datetime import datetime, timezone, timedelta
+
+            # 使用北京时间时区
+            beijing_tz = timezone(timedelta(hours=8))
+
+            groups = get_all_groups_from_db()
+            hourly_data = [0] * 24
+
+            for group in groups:
+                try:
+                    records = accounting_manager.get_today_records(group['id'])
+                    for record in records:
+                        if record['type'] == 'income':
+                            hour = datetime.fromtimestamp(record['created_at'], tz=beijing_tz).hour
+                            hourly_data[hour] += record['amount_usdt']
+                except:
+                    pass
+
+            peak_hour = max(range(24), key=lambda x: hourly_data[x])
+            active_hours = [(h, hourly_data[h]) for h in range(24) if hourly_data[h] > 0]
+
+            if active_hours:
+                result = f"⏰ 今日入款时段分布：\n"
+                result += f"• 高峰时段：{peak_hour}:00-{peak_hour+1}:00，{hourly_data[peak_hour]:.0f} USDT\n"
+                result += f"• 活跃时段：{', '.join([f'{h}:00' for h, _ in active_hours[:5]])}"
+                await update.message.reply_text(result)
+            else:
+                await update.message.reply_text("📭 今日暂无入款记录")
+            return
+
+        # ========== 15. 大额交易提醒 ==========
+        elif intent == "LARGE_TRANSACTION_ALERT":
+            from handlers.accounting import accounting_manager
+            from db import get_all_groups_from_db
+            from datetime import datetime, timezone, timedelta
+
+            # 使用北京时间时区
+            beijing_tz = timezone(timedelta(hours=8))
+
+            groups = get_all_groups_from_db()
+            large_threshold = 5000
+            large_transactions = []
+
+            for group in groups:
+                try:
+                    records = accounting_manager.get_today_records(group['id'])
+                    for record in records:
+                        if record['type'] == 'income' and record['amount'] >= large_threshold:
+                            # 使用北京时间格式化时间
+                            time_str = datetime.fromtimestamp(record['created_at'], tz=beijing_tz).strftime('%H:%M')
+                            large_transactions.append({
+                                'group': group['title'],
+                                'user': record.get('display_name', '未知'),
+                                'amount': record['amount'],
+                                'time': time_str
+                            })
+                except:
+                    pass
+
+            if large_transactions:
+                result = f"⚠️ 今日大额入款提醒（≥{large_threshold}元）：\n"
+                for tx in large_transactions[:5]:
+                    result += f"• {tx['time']} {tx['group']} - {tx['user']}：{tx['amount']:.0f}元\n"
+                await update.message.reply_text(result)
+            else:
+                await update.message.reply_text(f"✅ 今日无大额入款（≥{large_threshold}元）")
+            return
+
+        # ========== 16. 查询指定群组账单 ==========
+        elif intent == "GROUP_BILL":
+            from handlers.accounting import accounting_manager
+            from db import get_all_groups_from_db
+            from datetime import datetime, timezone, timedelta
+
+            # 使用北京时间时区
+            beijing_tz = timezone(timedelta(hours=8))
+
+            # 提取群组名称
+            import re
+            group_name_match = re.search(r'[「"\'【]?(.+?)[」"\'】]?群', text)
+            if not group_name_match:
+                # 尝试其他匹配方式
+                for word in ["查询", "查看", "的账单", "账单"]:
+                    text = text.replace(word, "")
+                group_name = text.strip()
+            else:
+                group_name = group_name_match.group(1)
+
+            # 查找群组
+            groups = get_all_groups_from_db()
+            target_group = None
+            for group in groups:
+                if group_name.lower() in group['title'].lower():
+                    target_group = group
+                    break
+
+            if not target_group:
+                await update.message.reply_text(f"❌ 未找到群组「{group_name}」")
+                return
+
+            # 获取账单
+            stats = accounting_manager.get_today_stats(target_group['id'])
+            records = accounting_manager.get_today_records(target_group['id'])
+
+            if stats['income_count'] == 0 and stats['expense_count'] == 0:
+                await update.message.reply_text(f"📭 群组「{target_group['title']}」今日无记账记录")
+                return
+
+            result = f"📊 群组「{target_group['title']}」今日账单：\n\n"
+            result += f"💰 入款：{stats['income_total']:.2f}元 = {stats['income_usdt']:.2f} USDT（{stats['income_count']}笔）\n"
+            result += f"📤 出款：{stats['expense_usdt']:.2f} USDT（{stats['expense_count']}笔）\n"
+            result += f"⏳ 待下发：{stats['pending_usdt']:.2f} USDT\n"
+
+            # 显示最近的几笔记录
+            if records:
+                result += f"\n📋 最近记录：\n"
+                for r in records[:5]:
+                    time_str = datetime.fromtimestamp(r['created_at'], tz=beijing_tz).strftime('%H:%M')
+                    if r['type'] == 'income':
+                        result += f"  {time_str} +{r['amount']:.0f}元 = {r['amount_usdt']:.0f}U"
+                    else:
+                        result += f"  {time_str} 下发 {r['amount_usdt']:.0f}U"
+                    if r.get('category'):
+                        result += f" [{r['category']}]"
+                    result += f" {r.get('display_name', '')}\n"
+
+            await update.message.reply_text(result)
+            return
+
+        # ========== 17. 监听地址今日收支分析 ==========
+        elif intent == "ADDRESS_INCOME_TODAY":
+            from handlers.monitor import get_trc20_transactions, get_address_balance
+            from db import get_monitored_addresses
+            from datetime import datetime, timezone, timedelta
+
+            # 使用北京时间
+            beijing_tz = timezone(timedelta(hours=8))
+            now_beijing = datetime.now(beijing_tz)
+            today_start_beijing = int(now_beijing.replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
+
+            # 提取地址或备注名称
+            address = await extract_address_from_text(text)
+            if not address:
+                await update.message.reply_text("❌ 请提供要分析的监控地址或备注名称")
+                return
+
+            # 获取交易记录
+            txs = await get_trc20_transactions(address, today_start_beijing)
+
+            received = 0.0
+            sent = 0.0
+            for tx in txs:
+                to_addr = tx.get("to", "")
+                raw_amount = tx.get("value", 0)
+                amount = int(raw_amount) / 1_000_000 if raw_amount else 0
+
+                if to_addr == address:
+                    received += amount
+                else:
+                    sent += amount
+
+            # 获取当前余额
+            balance = await get_address_balance(address)
+
+            # 获取备注
+            addresses = get_monitored_addresses()
+            note = ""
+            for a in addresses:
+                if a['address'] == address:
+                    note = a.get('note', '')
+                    break
+
+            short_addr = f"{address[:8]}...{address[-6:]}"
+            addr_display = f"{short_addr} ({note})" if note else short_addr
+
+            result = f"💰 监听地址 {addr_display} 今日收支：\n\n"
+            result += f"• 收到：{received:.2f} USDT\n"
+            result += f"• 转出：{sent:.2f} USDT\n"
+            result += f"• 净收入：{received - sent:.2f} USDT\n"
+            result += f"• 当前余额：{balance:.2f} USDT"
+
+            await update.message.reply_text(result)
+            return
+
+        # ========== 18. 监听地址本周收支分析 ==========
+        elif intent == "ADDRESS_INCOME_WEEK":
+            from handlers.monitor import get_trc20_transactions, get_address_balance
+            from db import get_monitored_addresses
+            from datetime import datetime, timezone, timedelta
+
+            # 使用北京时间
+            beijing_tz = timezone(timedelta(hours=8))
+            now_beijing = datetime.now(beijing_tz)
+            # 本周一（北京时间）
+            week_start_beijing = (now_beijing - timedelta(days=now_beijing.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+            week_start_ts = int(week_start_beijing.timestamp() * 1000)
+
+            # 提取地址或备注名称
+            address = await extract_address_from_text(text)
+            if not address:
+                await update.message.reply_text("❌ 请提供要分析的监控地址或备注名称")
+                return
+
+            # 获取交易记录
+            txs = await get_trc20_transactions(address, week_start_ts)
+
+            received = 0.0
+            sent = 0.0
+            for tx in txs:
+                to_addr = tx.get("to", "")
+                raw_amount = tx.get("value", 0)
+                amount = int(raw_amount) / 1_000_000 if raw_amount else 0
+
+                if to_addr == address:
+                    received += amount
+                else:
+                    sent += amount
+
+            # 获取当前余额
+            balance = await get_address_balance(address)
+
+            # 获取备注
+            addresses = get_monitored_addresses()
+            note = ""
+            for a in addresses:
+                if a['address'] == address:
+                    note = a.get('note', '')
+                    break
+
+            short_addr = f"{address[:8]}...{address[-6:]}"
+            addr_display = f"{short_addr} ({note})" if note else short_addr
+
+            result = f"💰 监听地址 {addr_display} 本周收支：\n\n"
+            result += f"• 收到：{received:.2f} USDT\n"
+            result += f"• 转出：{sent:.2f} USDT\n"
+            result += f"• 净收入：{received - sent:.2f} USDT\n"
+            result += f"• 当前余额：{balance:.2f} USDT"
+
+            await update.message.reply_text(result)
+            return
+
+        # ========== 19. 监听地址本月收支分析 ==========
+        elif intent == "ADDRESS_INCOME_MONTH":
+            from handlers.monitor import get_trc20_transactions, get_address_balance
+            from db import get_monitored_addresses
+            from datetime import datetime, timezone, timedelta
+
+            # 使用北京时间
+            beijing_tz = timezone(timedelta(hours=8))
+            now_beijing = datetime.now(beijing_tz)
+            # 本月1日（北京时间）
+            month_start_beijing = now_beijing.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            month_start_ts = int(month_start_beijing.timestamp() * 1000)
+
+            # 提取地址或备注名称
+            address = await extract_address_from_text(text)
+            if not address:
+                await update.message.reply_text("❌ 请提供要分析的监控地址或备注名称")
+                return
+
+            # 获取交易记录
+            txs = await get_trc20_transactions(address, month_start_ts)
+
+            received = 0.0
+            sent = 0.0
+            for tx in txs:
+                to_addr = tx.get("to", "")
+                raw_amount = tx.get("value", 0)
+                amount = int(raw_amount) / 1_000_000 if raw_amount else 0
+
+                if to_addr == address:
+                    received += amount
+                else:
+                    sent += amount
+
+            # 获取当前余额
+            balance = await get_address_balance(address)
+
+            # 获取备注
+            addresses = get_monitored_addresses()
+            note = ""
+            for a in addresses:
+                if a['address'] == address:
+                    note = a.get('note', '')
+                    break
+
+            short_addr = f"{address[:8]}...{address[-6:]}"
+            addr_display = f"{short_addr} ({note})" if note else short_addr
+
+            result = f"💰 监听地址 {addr_display} 本月收支：\n\n"
+            result += f"• 收到：{received:.2f} USDT\n"
+            result += f"• 转出：{sent:.2f} USDT\n"
+            result += f"• 净收入：{received - sent:.2f} USDT\n"
+            result += f"• 当前余额：{balance:.2f} USDT"
+
+            await update.message.reply_text(result)
+            return
+
+        # ========== 其他意图，继续 AI 对话 ==========
+        else:
+            print(f"[DEBUG] 意图为 OTHER，继续 AI 对话")
 
     # ========== 5. AI 回复（需要管理员或操作员权限） ==========
     print(f"[DEBUG] 5. 检查 AI 回复权限...")
