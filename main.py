@@ -291,35 +291,72 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     print(f"Unhandled callback data: {data}")
 
-# 在 button_router 函数之前添加
 async def extract_address_from_text(text: str) -> str:
     """从用户消息中提取地址（支持备注名称）"""
     import re
     from db import get_monitored_addresses
 
+    print(f"[DEBUG] extract_address_from_text 收到文本: {text}")
+
     # 先尝试匹配 TRC20 地址格式
     trc20_pattern = r'T[0-9A-Za-z]{33}'
     match = re.search(trc20_pattern, text)
     if match:
+        print(f"[DEBUG] 匹配到地址: {match.group()}")
         return match.group()
 
-    # 如果没有地址，尝试根据备注查找
+    # 获取所有监控地址
     addresses = get_monitored_addresses()
+    print(f"[DEBUG] 监控地址数量: {len(addresses)}")
 
-    # 提取可能的备注关键词
-    # 常见模式："地址xxx"、"备注xxx"、"爱德华"
-    for keyword in ["地址", "备注", "分析"]:
-        text = text.replace(keyword, "")
+    if not addresses:
+        print(f"[DEBUG] 没有监控地址")
+        return None
 
-    # 清理文本，提取可能的备注名
-    possible_note = text.strip()
-    if possible_note:
+    # 方法1：去除干扰词后匹配
+    clean_text = text
+    remove_words = ["帮我", "分析", "监听", "地址", "今日", "本周", "本月", "收支", "情况", "的", "一下"]
+    for word in remove_words:
+        clean_text = clean_text.replace(word, "")
+    clean_text = clean_text.strip()
+    print(f"[DEBUG] 清理后文本: {clean_text}")
+
+    if clean_text:
         for addr in addresses:
             note = addr.get('note', '')
-            if possible_note.lower() in note.lower() or note.lower() in possible_note.lower():
+            print(f"[DEBUG] 检查备注: {note}")
+            if note and (clean_text == note or clean_text in note or note in clean_text):
+                print(f"[DEBUG] 匹配到备注: {note}, 地址: {addr['address']}")
                 return addr['address']
 
-    # 如果都没找到，提示用户
+    # 方法2：使用正则提取中文备注名
+    patterns = [
+        r'([\u4e00-\u9fa5]{2,})的?地址',
+        r'([\u4e00-\u9fa5]{2,})监听地址',
+        r'分析([\u4e00-\u9fa5]{2,})',
+        r'([\u4e00-\u9fa5]{2,})的?收支',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            possible_note = match.group(1)
+            print(f"[DEBUG] 正则匹配到备注: {possible_note}")
+            for addr in addresses:
+                note = addr.get('note', '')
+                if note and (possible_note == note or possible_note in note or note in possible_note):
+                    print(f"[DEBUG] 匹配到地址: {addr['address']}")
+                    return addr['address']
+
+    # 方法3：如果只有一个监控地址，直接返回
+    if len(addresses) == 1:
+        print(f"[DEBUG] 只有一个监控地址，直接返回: {addresses[0]['address']}")
+        return addresses[0]['address']
+
+    # 方法4：列出所有可用的备注名称
+    notes = [a.get('note', '无备注') for a in addresses if a.get('note')]
+    print(f"[DEBUG] 可用的备注名称: {notes}")
+
+    print(f"[DEBUG] 未找到匹配的地址")
     return None
 
 async def input_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -371,7 +408,7 @@ async def input_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     module = context.user_data.get("active_module")
     print(f"[DEBUG] 4. 检查其他模块: active_module = {module}")
 
-    # 检查是否在互转查询的 ConversationHandler 状态中
+    # 检查是否在互转查询的 ConversationHandler 状态中extract_address_from_text
     if context.user_data.get("transfer_results") is not None:
         print(f"[DEBUG] → 互转查询有结果数据，跳过 AI 回复")
         return
@@ -1114,9 +1151,18 @@ async def input_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             today_start_beijing = int(now_beijing.replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
 
             # 提取地址或备注名称
+            print(f"[DEBUG] ADDRESS_INCOME_TODAY 原始文本: {text}")
             address = await extract_address_from_text(text)
+            print(f"[DEBUG] 提取到的地址: {address}")
+
             if not address:
-                await update.message.reply_text("❌ 请提供要分析的监控地址或备注名称")
+                # 列出当前监控地址帮助用户
+                addresses = get_monitored_addresses()
+                if addresses:
+                    addr_list = "\n".join([f"• {a['address'][:8]}...{a['address'][-6:]} ({a.get('note', '无备注')})" for a in addresses[:5]])
+                    await update.message.reply_text(f"❌ 未找到指定的监控地址\n\n当前监控地址：\n{addr_list}\n\n请使用备注名称（如：爱德华）或完整地址")
+                else:
+                    await update.message.reply_text("❌ 暂无监控地址，请先添加")
                 return
 
             # 获取交易记录
@@ -1162,39 +1208,52 @@ async def input_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             from handlers.monitor import get_trc20_transactions, get_address_balance
             from db import get_monitored_addresses
             from datetime import datetime, timezone, timedelta
+            import asyncio
 
             # 使用北京时间
             beijing_tz = timezone(timedelta(hours=8))
             now_beijing = datetime.now(beijing_tz)
-            # 本周一（北京时间）
             week_start_beijing = (now_beijing - timedelta(days=now_beijing.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
             week_start_ts = int(week_start_beijing.timestamp() * 1000)
 
-            # 提取地址或备注名称
+            # 提取地址
             address = await extract_address_from_text(text)
             if not address:
-                await update.message.reply_text("❌ 请提供要分析的监控地址或备注名称")
+                addresses = get_monitored_addresses()
+                if addresses:
+                    addr_list = "\n".join([f"• {a['address'][:8]}...{a['address'][-6:]} ({a.get('note', '无备注')})" for a in addresses[:5]])
+                    await update.message.reply_text(f"❌ 未找到指定的监控地址\n\n当前监控地址：\n{addr_list}\n\n请使用备注名称或完整地址")
+                else:
+                    await update.message.reply_text("❌ 暂无监控地址，请先添加")
                 return
 
-            # 获取交易记录
-            txs = await get_trc20_transactions(address, week_start_ts)
+            # 分页获取所有交易记录
+            all_txs = []
+            page = 0
+            limit = 200
+            while True:
+                txs = await get_trc20_transactions(address, week_start_ts, limit=limit, offset=page * limit)
+                if not txs:
+                    break
+                all_txs.extend(txs)
+                if len(txs) < limit:
+                    break
+                page += 1
+                await asyncio.sleep(0.1)
 
             received = 0.0
             sent = 0.0
-            for tx in txs:
+            for tx in all_txs:
                 to_addr = tx.get("to", "")
                 raw_amount = tx.get("value", 0)
                 amount = int(raw_amount) / 1_000_000 if raw_amount else 0
-
                 if to_addr == address:
                     received += amount
                 else:
                     sent += amount
 
-            # 获取当前余额
             balance = await get_address_balance(address)
 
-            # 获取备注
             addresses = get_monitored_addresses()
             note = ""
             for a in addresses:
@@ -1209,49 +1268,62 @@ async def input_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             result += f"• 收到：{received:.2f} USDT\n"
             result += f"• 转出：{sent:.2f} USDT\n"
             result += f"• 净收入：{received - sent:.2f} USDT\n"
+            result += f"• 交易笔数：{len(all_txs)} 笔\n"
             result += f"• 当前余额：{balance:.2f} USDT"
 
             await update.message.reply_text(result)
             return
-
         # ========== 19. 监听地址本月收支分析 ==========
         elif intent == "ADDRESS_INCOME_MONTH":
             from handlers.monitor import get_trc20_transactions, get_address_balance
             from db import get_monitored_addresses
             from datetime import datetime, timezone, timedelta
+            import asyncio
 
             # 使用北京时间
             beijing_tz = timezone(timedelta(hours=8))
             now_beijing = datetime.now(beijing_tz)
-            # 本月1日（北京时间）
             month_start_beijing = now_beijing.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
             month_start_ts = int(month_start_beijing.timestamp() * 1000)
 
-            # 提取地址或备注名称
+            # 提取地址
             address = await extract_address_from_text(text)
             if not address:
-                await update.message.reply_text("❌ 请提供要分析的监控地址或备注名称")
+                addresses = get_monitored_addresses()
+                if addresses:
+                    addr_list = "\n".join([f"• {a['address'][:8]}...{a['address'][-6:]} ({a.get('note', '无备注')})" for a in addresses[:5]])
+                    await update.message.reply_text(f"❌ 未找到指定的监控地址\n\n当前监控地址：\n{addr_list}\n\n请使用备注名称或完整地址")
+                else:
+                    await update.message.reply_text("❌ 暂无监控地址，请先添加")
                 return
 
-            # 获取交易记录
-            txs = await get_trc20_transactions(address, month_start_ts)
+            # 分页获取所有交易记录
+            all_txs = []
+            page = 0
+            limit = 200
+            while True:
+                txs = await get_trc20_transactions(address, month_start_ts, limit=limit, offset=page * limit)
+                if not txs:
+                    break
+                all_txs.extend(txs)
+                if len(txs) < limit:
+                    break
+                page += 1
+                await asyncio.sleep(0.1)
 
             received = 0.0
             sent = 0.0
-            for tx in txs:
+            for tx in all_txs:
                 to_addr = tx.get("to", "")
                 raw_amount = tx.get("value", 0)
                 amount = int(raw_amount) / 1_000_000 if raw_amount else 0
-
                 if to_addr == address:
                     received += amount
                 else:
                     sent += amount
 
-            # 获取当前余额
             balance = await get_address_balance(address)
 
-            # 获取备注
             addresses = get_monitored_addresses()
             note = ""
             for a in addresses:
@@ -1266,11 +1338,11 @@ async def input_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             result += f"• 收到：{received:.2f} USDT\n"
             result += f"• 转出：{sent:.2f} USDT\n"
             result += f"• 净收入：{received - sent:.2f} USDT\n"
+            result += f"• 交易笔数：{len(all_txs)} 笔\n"
             result += f"• 当前余额：{balance:.2f} USDT"
 
             await update.message.reply_text(result)
             return
-
         # ========== 其他意图，继续 AI 对话 ==========
         else:
             print(f"[DEBUG] 意图为 OTHER，继续 AI 对话")
