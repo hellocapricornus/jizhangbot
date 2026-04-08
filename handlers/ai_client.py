@@ -1,10 +1,9 @@
-# handlers/ai_client.py - 多 API 自动切换客户端
+# handlers/ai_client.py - 完整正确版
 
 import aiohttp
 import asyncio
 from typing import List, Dict, Optional
 
-# 直接从 config.py 导入 API Key
 from config import (
     DEEPSEEK_API_KEY,
     SILICONFLOW_API_KEY,
@@ -16,34 +15,33 @@ API_CONFIGS = [
     {
         "name": "DeepSeek",
         "url": "https://api.deepseek.com/v1/chat/completions",
-        "api_key": DEEPSEEK_API_KEY,  # 直接从 config 读取
+        "api_key": DEEPSEEK_API_KEY,
         "model": "deepseek-chat",
-        "free_quota": 5000000  # 500万 tokens
+        "free_quota": 5000000
     },
     {
         "name": "SiliconFlow",
         "url": "https://api.siliconflow.cn/v1/chat/completions",
         "api_key": SILICONFLOW_API_KEY,
         "model": "Qwen/Qwen2-7B-Instruct",
-        "free_quota": 20000000  # 2000万 tokens
+        "free_quota": 20000000
     },
     {
         "name": "阿里云通义",
         "url": "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation",
         "api_key": DASHSCOPE_API_KEY,
         "model": "qwen-turbo",
-        "free_quota": 5000000  # 500万 tokens/月
+        "free_quota": 5000000
     },
     {
         "name": "智谱AI",
         "url": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
         "api_key": ZHIPU_API_KEY,
         "model": "glm-4-flash",
-        "free_quota": 5000000  # 500万 tokens
+        "free_quota": 5000000
     }
 ]
 
-# 过滤掉没有配置 Key 的
 API_CONFIGS = [c for c in API_CONFIGS if c["api_key"]]
 
 class AIClient:
@@ -55,32 +53,46 @@ class AIClient:
         self.failed_keys = set()
 
     async def chat(self, prompt: str, system_prompt: str = "你是一个智能助手，回答问题要简洁、准确、友好。") -> str:
-        """发送对话请求，自动切换 API"""
+        """普通对话"""
         errors = []
-
-        for i, config in enumerate(self.configs):
+        for config in self.configs:
             if not config.get("api_key"):
                 continue
-
             if config["name"] in self.failed_keys:
                 continue
-
             try:
                 result = await self._call_api(config, prompt, system_prompt)
                 return result
             except Exception as e:
                 error_msg = str(e)
                 errors.append(f"{config['name']}: {error_msg[:50]}")
-
-                # 如果是余额不足或配额问题，标记失败并切换
                 if "insufficient" in error_msg.lower() or "quota" in error_msg.lower() or "balance" in error_msg.lower():
                     self.failed_keys.add(config["name"])
-                    print(f"⚠️ {config['name']} 配额不足，已自动切换到下一个")
-
                 continue
-
-        # 所有 API 都失败
         return f"❌ 所有 AI 服务暂时不可用，请稍后再试。\n错误: {', '.join(errors)}"
+
+    # ai_client.py - 简化 chat_with_data 方法
+
+    async def chat_with_data(self, prompt: str, group_id: str = None, 
+                              user_id: int = None,
+                              system_prompt: str = None) -> str:
+        """支持数据查询的对话（简化版）"""
+
+        # 收集数据
+        from db import get_all_groups_from_db, get_groups_by_category
+        from handlers.accounting import accounting_manager
+
+        groups = get_all_groups_from_db()
+        group_count = len(groups)
+
+        # 构建简洁提示词
+        if system_prompt is None:
+            if group_id:
+                system_prompt = f"""你是记账助手。机器人已加入{group_count}个群。回答要简洁友好。"""
+            else:
+                system_prompt = f"""你是记账助手。机器人已加入{group_count}个群。回答要简洁友好。"""
+
+        return await self.chat(prompt, system_prompt)
 
     async def _call_api(self, config: Dict, prompt: str, system_prompt: str) -> str:
         """调用单个 API"""
@@ -90,11 +102,8 @@ class AIClient:
 
         print(f"🤖 正在使用 {name} API...")
 
-        headers = {
-            "Content-Type": "application/json"
-        }
+        headers = {"Content-Type": "application/json"}
 
-        # 不同 API 的请求格式不同
         if name == "DeepSeek" or name == "SiliconFlow" or name == "智谱AI":
             headers["Authorization"] = f"Bearer {api_key}"
             payload = {
@@ -130,10 +139,7 @@ class AIClient:
                 if resp.status != 200:
                     error_text = await resp.text()
                     raise Exception(f"HTTP {resp.status}: {error_text[:100]}")
-
                 data = await resp.json()
-
-                # 解析不同 API 的响应格式
                 if name == "DeepSeek" or name == "SiliconFlow" or name == "智谱AI":
                     return data["choices"][0]["message"]["content"]
                 elif name == "阿里云通义":
@@ -142,7 +148,6 @@ class AIClient:
                     return str(data)
 
 
-# 全局客户端实例
 ai_client = None
 
 def get_ai_client() -> AIClient:
