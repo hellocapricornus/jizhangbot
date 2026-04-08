@@ -861,19 +861,45 @@ async def get_address_by_note(note: str) -> str:
     return result
 
 
+# handlers/tools.py - 修改 get_address_stats 函数
+
 async def get_address_stats(address: str, period: str = "today") -> str:
-    """地址收支统计"""
+    """获取地址的 USDT 收支统计（分页获取全部记录）"""
     from handlers.monitor import get_trc20_transactions
     from db import get_monitored_addresses as get_addrs
+    import asyncio
 
     start_ts, _ = _get_date_range(period)
     period_name = _get_period_name(period)
 
-    txs = await get_trc20_transactions(address, start_ts)
+    # 分页获取所有交易记录
+    all_txs = []
+    page = 0
+    limit = 200
+
+    print(f"[DEBUG] 开始获取 {period_name} 交易记录，时间戳起点: {start_ts}")
+
+    while True:
+        txs = await get_trc20_transactions(address, start_ts, limit=limit, offset=page * limit)
+        if not txs:
+            print(f"[DEBUG] 第 {page + 1} 页无数据，停止获取")
+            break
+
+        all_txs.extend(txs)
+        print(f"[DEBUG] 第 {page + 1} 页获取到 {len(txs)} 条，累计 {len(all_txs)} 条")
+
+        # 如果返回的数量少于 limit，说明是最后一页
+        if len(txs) < limit:
+            break
+
+        page += 1
+        await asyncio.sleep(0.1)  # 避免请求过快
+
+    print(f"[DEBUG] 共获取 {len(all_txs)} 条交易记录")
 
     received = 0.0
     sent = 0.0
-    for tx in txs:
+    for tx in all_txs:
         to_addr = tx.get("to", "")
         raw_amount = tx.get("value", 0)
         amount = int(raw_amount) / 1_000_000 if raw_amount else 0
@@ -896,10 +922,11 @@ async def get_address_stats(address: str, period: str = "today") -> str:
     short_addr = f"{address[:8]}...{address[-6:]}"
     addr_display = f"{short_addr} ({note})" if note else short_addr
 
-    return (f"💰 地址 {addr_display} {period_name}统计：\n"
+    return (f"💰 地址 {addr_display} {period_name}统计：\n\n"
             f"• 收到：{received:.2f} USDT\n"
             f"• 转出：{sent:.2f} USDT\n"
-            f"• 净收入：{profit:.2f} USDT")
+            f"• 净收入：{profit:.2f} USDT\n"
+            f"• 交易笔数：{len(all_txs)} 笔")
 
 
 async def get_address_balance(address: str) -> str:
