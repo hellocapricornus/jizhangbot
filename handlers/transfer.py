@@ -422,3 +422,19 @@ async def cancel_transfer_from_message(update: Update, context: ContextTypes.DEF
         reply_markup=get_main_menu()
     )
     return ConversationHandler.END
+
+# 导出函数供 tools.py 使用
+__all__ = [
+    'get_trc20_transfers',
+    'extract_counterparties',
+    'start_transfer_query',
+    'process_transfer_query',
+    'start_transfer_analysis',
+    'process_transfer_analysis',
+    'send_transfer_page',
+    'handle_transfer_pagination',
+    'cancel_transfer',
+    'show_transfer_menu',
+    'transfer_back_to_main',
+    'cancel_transfer_from_message',
+]
