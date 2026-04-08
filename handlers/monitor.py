@@ -89,17 +89,18 @@ async def get_monthly_stats(address: str) -> dict:
         "sent": total_sent,
         "net": total_received - total_sent
     }
-    
-async def get_trc20_transactions(address: str, min_timestamp: int = 0):
-    """获取 TRC20 USDT 交易记录"""
+
+async def get_trc20_transactions(address: str, min_timestamp: int = 0, limit: int = 200, offset: int = 0):
+    """获取 TRC20 USDT 交易记录（支持分页）"""
     import aiohttp
     try:
         url = f"{TRONGRID_API}/v1/accounts/{address}/transactions/trc20"
-        headers = {"TRON-PRO-API-KEY": TRONGRID_API_KEY}  # 添加请求头
+        headers = {"TRON-PRO-API-KEY": TRONGRID_API_KEY}
         params = {
             "contract_address": USDT_CONTRACT,
-            "limit": 20,
-            "min_timestamp": min_timestamp if min_timestamp > 0 else 0
+            "limit": limit,
+            "min_timestamp": min_timestamp if min_timestamp > 0 else 0,
+            "offset": offset  # 新增 offset 参数
         }
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers=headers, params=params) as resp:
