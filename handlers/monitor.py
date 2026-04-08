@@ -550,3 +550,11 @@ def get_monitor_conversation_handler():
         per_message=False,
         allow_reentry=True,
     )
+
+__all__ = [
+    'get_address_balance',
+    'get_trc20_transactions',
+    'get_monthly_stats',
+    'check_address_transactions',
+    # ... 其他已有导出
+]
