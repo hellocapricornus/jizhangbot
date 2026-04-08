@@ -327,6 +327,13 @@ def init_db():
         c.execute("ALTER TABLE monitored_addresses ADD COLUMN note TEXT DEFAULT ''")
         print("✅ 已为 monitored_addresses 表添加 note 字段")
 
+    # 数据库迁移：为 groups 表添加 joined_at 字段
+    try:
+        c.execute("SELECT joined_at FROM groups LIMIT 1")
+    except sqlite3.OperationalError:
+        c.execute("ALTER TABLE groups ADD COLUMN joined_at INTEGER DEFAULT 0")
+        print("✅ 已为 groups 表添加 joined_at 字段")
+
     # 新增：交易记录表
     c.execute("""
         CREATE TABLE IF NOT EXISTS address_transactions (
@@ -448,6 +455,8 @@ def mark_tx_notified(tx_id: str):
 
 # ========== 原有函数保持不变 ==========
 
+# db.py - 修复 save_group 函数
+
 def save_group(group_id: str, title: str, category: str = None):
     """保存或更新群组信息（支持自动分类）"""
     import time
@@ -456,22 +465,35 @@ def save_group(group_id: str, title: str, category: str = None):
 
     try:
         if category is None:
-            c.execute("SELECT category FROM groups WHERE group_id = ?", (group_id,))
+            # ✅ 修复：同时查询 category 和 joined_at
+            c.execute("SELECT category, joined_at FROM groups WHERE group_id = ?", (group_id,))
             row = c.fetchone()
-            category = row[0] if row else '未分类'
+            if row:
+                category = row[0] if row[0] else '未分类'
+                joined_at = row[1] if row[1] else 0
+            else:
+                category = '未分类'
+                joined_at = 0
+        else:
+            joined_at = 0
 
-            # 新增：如果分类是"未分类"，尝试自动识别
-            if category == '未分类':
-                country = detect_country_from_group_name(title)  # 直接调用，不需要导入
-                if country:
-                    if ensure_country_category(country):  # 直接调用，不需要导入
-                        category = country
-                        print(f"✅ 自动分类：群组「{title}」已归类到「{country}」")
+        # 如果是新群组（没有 joined_at），设置当前时间
+        if joined_at == 0:
+            joined_at = int(time.time())
 
+        # 如果分类是"未分类"，尝试自动识别
+        if category == '未分类':
+            country = detect_country_from_group_name(title)
+            if country:
+                if ensure_country_category(country):
+                    category = country
+                    print(f"✅ 自动分类：群组「{title}」已归类到「{country}」")
+
+        # ✅ 修复：INSERT 语句需要包含 joined_at 字段
         c.execute("""
-            INSERT OR REPLACE INTO groups (group_id, title, last_seen, category)
-            VALUES (?, ?, ?, ?)
-        """, (group_id, title, int(time.time()), category))
+            INSERT OR REPLACE INTO groups (group_id, title, last_seen, category, joined_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (group_id, title, int(time.time()), category, joined_at))
 
         conn.commit()
         c.execute("SELECT count(*) FROM groups")
@@ -484,7 +506,6 @@ def save_group(group_id: str, title: str, category: str = None):
     finally:
         conn.close()
 
-
 def delete_group_from_db(group_id: str):
     conn = get_db_connection()
     c = conn.cursor()
@@ -494,20 +515,19 @@ def delete_group_from_db(group_id: str):
     print(f"🗑️ [DB] 群组 {group_id} 已删除。剩余群组数：{count}")
     conn.close()
 
-
 def get_all_groups_from_db(category: str = None):
     conn = get_db_connection()
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
 
     if category:
-        c.execute("SELECT group_id, title, last_seen, category FROM groups WHERE category = ?", (category,))
+        c.execute("SELECT group_id, title, last_seen, category, joined_at FROM groups WHERE category = ?", (category,))
     else:
-        c.execute("SELECT group_id, title, last_seen, category FROM groups")
+        c.execute("SELECT group_id, title, last_seen, category, joined_at FROM groups")
 
     rows = c.fetchall()
     conn.close()
-    return [{"id": row["group_id"], "title": row["title"], "last_seen": row["last_seen"], "category": row["category"]} for row in rows]
+    return [{"id": row["group_id"], "title": row["title"], "last_seen": row["last_seen"], "category": row["category"], "joined_at": row["joined_at"]} for row in rows]
 
 
 def update_group_category(group_id: str, category: str):
@@ -580,14 +600,11 @@ def get_groups_by_category():
     conn.close()
     return {row[0]: row[1] for row in rows}
 
-#更新群组分类的函数
 def update_group_category_if_needed(group_id: str, group_name: str):
     """
     根据群组名称自动更新群组分类
     如果群组名称包含国家关键词，则自动分类
     """
-
-    # 获取当前群组信息
     conn = get_db_connection()
     c = conn.cursor()
     c.execute("SELECT category FROM groups WHERE group_id = ?", (group_id,))
@@ -595,13 +612,13 @@ def update_group_category_if_needed(group_id: str, group_name: str):
     conn.close()
 
     if not row:
-        return False  # 改为返回 False
+        return False
 
     current_category = row[0]
 
     # 如果已经分类且不是"未分类"，则不再自动覆盖
     if current_category != '未分类':
-        return False  # ✅ 统一返回 False
+        return False
 
     # 检测国家
     country = detect_country_from_group_name(group_name)
@@ -609,7 +626,6 @@ def update_group_category_if_needed(group_id: str, group_name: str):
     if country:
         # 确保分类存在
         if ensure_country_category(country):
-            # 更新群组分类
             conn = get_db_connection()
             c = conn.cursor()
             c.execute("UPDATE groups SET category = ? WHERE group_id = ?", (country, group_id))
