@@ -513,6 +513,7 @@ async def input_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 - TOTAL_GROUP_COUNT: 询问机器人总共加入了多少个群组
 - GROUP_CATEGORY: 询问群组有哪些国家/分类
 - TODAY_JOINED_GROUPS: 询问今天新加入的群组
+- DAILY_JOINED_GROUPS: 询问本月每天新加入的群组数量（如"本月每天新加入的群组"、"每天加入的群组"）
 
 # 收入统计
 - TODAY_ALL_INCOME: 询问所有群组今天的收入/入款情况
@@ -565,6 +566,7 @@ async def input_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • 总共加入了多少个群组
 • 群组有哪些国家/分类
 • 今天新加入的群组
+• 本月每天新加入的群组
 
 💰 **收入统计**
 • 所有群组今天的收入情况（入款/出款/净收入）
@@ -1080,19 +1082,16 @@ async def input_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # ========== 16. 查询指定群组账单 ==========
         elif intent == "GROUP_BILL":
-            from handlers.accounting import accounting_manager
+            from handlers.accounting import accounting_manager, format_bill_message
             from db import get_all_groups_from_db
             from datetime import datetime, timezone, timedelta
-
-            # 使用北京时间时区
-            beijing_tz = timezone(timedelta(hours=8))
 
             # 提取群组名称
             import re
             group_name_match = re.search(r'[「"\'【]?(.+?)[」"\'】]?群', text)
             if not group_name_match:
                 # 尝试其他匹配方式
-                for word in ["查询", "查看", "的账单", "账单"]:
+                for word in ["查询", "查看", "的账单", "账单", "今天"]:
                     text = text.replace(word, "")
                 group_name = text.strip()
             else:
@@ -1110,33 +1109,14 @@ async def input_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(f"❌ 未找到群组「{group_name}」")
                 return
 
-            # 获取账单
+            # 获取今日账单的详细记录
             stats = accounting_manager.get_today_stats(target_group['id'])
             records = accounting_manager.get_today_records(target_group['id'])
 
-            if stats['income_count'] == 0 and stats['expense_count'] == 0:
-                await update.message.reply_text(f"📭 群组「{target_group['title']}」今日无记账记录")
-                return
+            # 使用 format_bill_message 生成格式化的账单消息
+            message = format_bill_message(stats, records, f"「{target_group['title']}」今日账单")
 
-            result = f"📊 群组「{target_group['title']}」今日账单：\n\n"
-            result += f"💰 入款：{stats['income_total']:.2f}元 = {stats['income_usdt']:.2f} USDT（{stats['income_count']}笔）\n"
-            result += f"📤 出款：{stats['expense_usdt']:.2f} USDT（{stats['expense_count']}笔）\n"
-            result += f"⏳ 待下发：{stats['pending_usdt']:.2f} USDT\n"
-
-            # 显示最近的几笔记录
-            if records:
-                result += f"\n📋 最近记录：\n"
-                for r in records[:5]:
-                    time_str = datetime.fromtimestamp(r['created_at'], tz=beijing_tz).strftime('%H:%M')
-                    if r['type'] == 'income':
-                        result += f"  {time_str} +{r['amount']:.0f}元 = {r['amount_usdt']:.0f}U"
-                    else:
-                        result += f"  {time_str} 下发 {r['amount_usdt']:.0f}U"
-                    if r.get('category'):
-                        result += f" [{r['category']}]"
-                    result += f" {r.get('display_name', '')}\n"
-
-            await update.message.reply_text(result)
+            await update.message.reply_text(message, parse_mode='Markdown')
             return
 
         # ========== 17. 监听地址今日收支分析 ==========
@@ -1343,6 +1323,52 @@ async def input_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             await update.message.reply_text(result)
             return
+
+        # ========== 20. 本月每天新加入的群组 ==========
+        elif intent == "DAILY_JOINED_GROUPS":
+            from db import get_all_groups_from_db
+            from datetime import datetime, timezone, timedelta
+            from collections import defaultdict
+
+            # 使用北京时间
+            beijing_tz = timezone(timedelta(hours=8))
+            now_beijing = datetime.now(beijing_tz)
+
+            # 本月第一天
+            month_start = now_beijing.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+            # 获取所有群组
+            groups = get_all_groups_from_db()
+
+            # 按日期统计
+            daily_count = defaultdict(int)
+            daily_groups = defaultdict(list)
+
+            for group in groups:
+                joined_at = group.get('joined_at', 0)
+                if joined_at >= month_start.timestamp():
+                    date_str = datetime.fromtimestamp(joined_at, tz=beijing_tz).strftime('%Y-%m-%d')
+                    daily_count[date_str] += 1
+                    daily_groups[date_str].append(group['title'])
+
+            if not daily_count:
+                await update.message.reply_text(f"📭 {month_start.strftime('%Y年%m月')} 没有新加入的群组")
+                return
+
+            # 生成结果
+            result = f"📊 {month_start.strftime('%Y年%m月')} 每天新加入群组统计：\n\n"
+
+            for date_str in sorted(daily_count.keys()):
+                count = daily_count[date_str]
+                groups_list = daily_groups[date_str]
+                result += f"📅 {date_str}：{count} 个\n"
+                for g in groups_list:
+                    result += f"   • {g}\n"
+                result += "\n"
+
+            await update.message.reply_text(result)
+            return
+            
         # ========== 其他意图，继续 AI 对话 ==========
         else:
             print(f"[DEBUG] 意图为 OTHER，继续 AI 对话")
