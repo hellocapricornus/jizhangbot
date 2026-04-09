@@ -1634,6 +1634,8 @@ async def periodic_group_verification(app: Application):
 def main():
     # 初始化数据库和操作员
     init_db()
+    from db import fix_joined_at
+    fix_joined_at()
     init_operators_from_db()
 
     # 导入记账模块并初始化
