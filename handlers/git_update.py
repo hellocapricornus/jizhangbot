@@ -28,28 +28,27 @@ def get_git_root():
 
 
 def restart_bot():
-    """重启机器人"""
+    """重启机器人（只杀死当前进程，不影响其他机器人）"""
     try:
         import subprocess
         import os
         import sys
-        import signal
-        
+
         pid = os.getpid()
         print(f"[重启] 正在重启机器人 (PID: {pid})...")
 
         script_path = os.path.join(get_git_root(), "restart.sh")
 
-        # 修改重启脚本，先强制停止旧进程
+        # 修改重启脚本，只杀死当前 PID 的进程
         with open(script_path, 'w') as f:
             f.write(f"""#!/bin/bash
 echo "正在重启机器人..."
 
-# 先停止所有旧进程
-pkill -f "python.*main.py" 2>/dev/null
-echo "已停止旧进程"
+# 只杀死当前这个机器人进程
+kill {pid} 2>/dev/null
+echo "已停止当前进程"
 
-# 等待更长时间确保连接释放
+# 等待端口释放
 sleep 5
 
 # 启动新进程
@@ -62,7 +61,7 @@ echo "机器人已重启"
 
         # 启动新进程
         subprocess.Popen([script_path], start_new_session=True)
-        
+
         # 退出当前进程
         sys.exit(0)
 
