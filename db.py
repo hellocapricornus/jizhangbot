@@ -464,47 +464,68 @@ def save_group(group_id: str, title: str, category: str = None):
     c = conn.cursor()
 
     try:
-        if category is None:
-            # ✅ 修复：同时查询 category 和 joined_at
-            c.execute("SELECT category, joined_at FROM groups WHERE group_id = ?", (group_id,))
-            row = c.fetchone()
-            if row:
-                category = row[0] if row[0] else '未分类'
-                joined_at = row[1] if row[1] else 0
-            else:
-                category = '未分类'
-                joined_at = 0
+        # 先获取现有的 joined_at
+        c.execute("SELECT category, joined_at FROM groups WHERE group_id = ?", (group_id,))
+        row = c.fetchone()
+
+        if row:
+            existing_category = row[0]
+            joined_at = row[1] if row[1] else 0
         else:
+            existing_category = None
             joined_at = 0
+
+        # 确定分类
+        if category is None:
+            final_category = existing_category if existing_category else '未分类'
+        else:
+            final_category = category
 
         # 如果是新群组（没有 joined_at），设置当前时间
         if joined_at == 0:
             joined_at = int(time.time())
 
         # 如果分类是"未分类"，尝试自动识别
-        if category == '未分类':
+        if final_category == '未分类':
             country = detect_country_from_group_name(title)
             if country:
                 if ensure_country_category(country):
-                    category = country
+                    final_category = country
                     print(f"✅ 自动分类：群组「{title}」已归类到「{country}」")
 
-        # ✅ 修复：INSERT 语句需要包含 joined_at 字段
         c.execute("""
             INSERT OR REPLACE INTO groups (group_id, title, last_seen, category, joined_at)
             VALUES (?, ?, ?, ?, ?)
-        """, (group_id, title, int(time.time()), category, joined_at))
+        """, (group_id, title, int(time.time()), final_category, joined_at))
 
         conn.commit()
-        c.execute("SELECT count(*) FROM groups")
-        count = c.fetchone()[0]
-        print(f"💾 [DB] 群组 {title} (分类: {category}) 已保存。当前数据库总群组数：{count}")
+        print(f"💾 [DB] 群组 {title} (分类: {final_category}) 已保存。")
 
     except Exception as e:
         print(f"❌ [DB Error] 保存群组失败: {e}")
         conn.rollback()
     finally:
         conn.close()
+
+# db.py - 添加修复函数
+
+def fix_joined_at():
+    """修复现有群组的 joined_at 字段"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT group_id, last_seen FROM groups WHERE joined_at = 0 OR joined_at IS NULL")
+    rows = c.fetchall()
+
+    count = 0
+    for row in rows:
+        group_id = row[0]
+        last_seen = row[1] if row[1] else int(time.time())
+        c.execute("UPDATE groups SET joined_at = ? WHERE group_id = ?", (last_seen, group_id))
+        count += 1
+
+    conn.commit()
+    conn.close()
+    print(f"✅ 已修复 {count} 个群组的 joined_at")
 
 def delete_group_from_db(group_id: str):
     conn = get_db_connection()
