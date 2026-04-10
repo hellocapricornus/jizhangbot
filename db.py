@@ -286,6 +286,21 @@ def init_db():
         )
     """)
 
+    # 🔥 创建群组记账配置表（添加 per_transaction_fee 字段）
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS group_accounting_config (
+            group_id TEXT PRIMARY KEY,
+            fee_rate REAL DEFAULT 0.0,
+            exchange_rate REAL DEFAULT 1.0,
+            per_transaction_fee REAL DEFAULT 0.0,
+            session_id TEXT,
+            session_start_time INTEGER DEFAULT 0,
+            session_end_time INTEGER DEFAULT 0,
+            is_active INTEGER DEFAULT 1,
+            updated_at INTEGER DEFAULT 0
+        )
+    """)
+
     # 初始化默认分类
     now = int(time.time())
     default_categories = ['未分类']
@@ -298,6 +313,13 @@ def init_db():
     except sqlite3.OperationalError:
         c.execute("ALTER TABLE groups ADD COLUMN category TEXT DEFAULT '未分类'")
         print("✅ 已为 groups 表添加 category 字段")
+
+    # 🔥 数据库迁移：为已存在的 group_accounting_config 表添加 per_transaction_fee 字段
+    try:
+        c.execute("SELECT per_transaction_fee FROM group_accounting_config LIMIT 1")
+    except sqlite3.OperationalError:
+        c.execute("ALTER TABLE group_accounting_config ADD COLUMN per_transaction_fee REAL DEFAULT 0.0")
+        print("✅ 已为 group_accounting_config 表添加 per_transaction_fee 字段")
 
     # ========== 新增：监控地址表 ==========
     c.execute("""
@@ -347,6 +369,56 @@ def init_db():
             notified INTEGER DEFAULT 0
         )
     """)
+
+    # 🔥 新增：记账记录表（确保存在）
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS accounting_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            user_id INTEGER NOT NULL,
+            username TEXT,
+            record_type TEXT NOT NULL,
+            amount REAL NOT NULL,
+            amount_usdt REAL NOT NULL,
+            description TEXT,
+            category TEXT DEFAULT '',
+            rate REAL DEFAULT 0,
+            created_at INTEGER NOT NULL,
+            date TEXT NOT NULL
+        )
+    """)
+
+    # 🔥 新增：群组用户表
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS group_users (
+            group_id TEXT NOT NULL,
+            user_id INTEGER NOT NULL,
+            username TEXT,
+            first_name TEXT,
+            last_name TEXT,
+            last_seen INTEGER NOT NULL,
+            PRIMARY KEY (group_id, user_id)
+        )
+    """)
+
+    # 🔥 新增：历史会话表
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS accounting_sessions (
+            session_id TEXT PRIMARY KEY,
+            group_id TEXT NOT NULL,
+            start_time INTEGER NOT NULL,
+            end_time INTEGER NOT NULL,
+            date TEXT NOT NULL,
+            fee_rate REAL DEFAULT 0.0,
+            exchange_rate REAL DEFAULT 1.0
+        )
+    """)
+
+    # 创建索引
+    c.execute("CREATE INDEX IF NOT EXISTS idx_records_group_id ON accounting_records(group_id)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_records_session_id ON accounting_records(session_id)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_records_date ON accounting_records(date)")
 
     conn.commit()
     conn.close()
