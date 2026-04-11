@@ -5,6 +5,7 @@ import time
 import sqlite3
 import logging
 import aiohttp
+import math
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Tuple, Optional
@@ -210,6 +211,58 @@ def safe_escape_markdown(text: str) -> str:
     for char in escape_chars:
         text = text.replace(char, f'\\{char}')
     return text
+
+class Calculator:
+    """安全计算器类"""
+
+    # 允许的数学函数
+    MATH_FUNCTIONS = {
+        'sqrt': math.sqrt,
+        'sin': math.sin,
+        'cos': math.cos,
+        'tan': math.tan,
+        'asin': math.asin,
+        'acos': math.acos,
+        'atan': math.atan,
+        'log': math.log,
+        'log10': math.log10,
+        'exp': math.exp,
+        'abs': abs,
+        'round': round,
+        'floor': math.floor,
+        'ceil': math.ceil,
+        'pi': math.pi,
+        'e': math.e,
+    }
+
+    @staticmethod
+    def safe_eval(expr: str):
+        """安全计算表达式"""
+        try:
+            # 预处理：替换 ^ 为 **
+            expr = expr.replace('^', '**')
+
+            # 创建安全的命名空间
+            safe_dict = Calculator.MATH_FUNCTIONS.copy()
+            safe_dict['__builtins__'] = {}
+
+            # 计算
+            result = eval(expr, {"__builtins__": {}}, safe_dict)
+
+            return float(result)
+        except:
+            return None
+
+    @staticmethod
+    def format_result(result: float) -> str:
+        """格式化结果"""
+        if result.is_integer():
+            return str(int(result))
+        else:
+            # 保留适当的小数位数
+            s = f"{result:.6f}".rstrip('0').rstrip('.')
+            return s
+
 
 # 🔥 添加上标转换函数
 def superscript_number(n) -> str:
@@ -1062,6 +1115,53 @@ class AccountingManager:
             logger.error(f"清理过期群组失败: {e}")
             return 0
 
+    def remove_last_record(self, group_id: str) -> Tuple[bool, Dict]:
+        """移除当前会话中的最后一条记录
+        返回: (是否成功, 被移除的记录信息)
+        """
+        try:
+            session = self.get_or_create_session(group_id)
+
+            with self._get_conn() as conn:
+                c = conn.cursor()
+
+                # 获取当前会话中的最后一条记录
+                c.execute("""
+                    SELECT id, record_type, amount, amount_usdt, description, category, rate, created_at, username, user_id
+                    FROM accounting_records
+                    WHERE group_id = ? AND session_id = ?
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT 1
+                """, (group_id, session['session_id']))
+
+                row = c.fetchone()
+
+                if not row:
+                    return False, {"error": "没有可以移除的记录"}
+
+                # 保存记录信息用于返回
+                removed_record = {
+                    'id': row[0],
+                    'type': row[1],
+                    'amount': row[2],
+                    'amount_usdt': row[3],
+                    'description': row[4],
+                    'category': row[5],
+                    'rate': row[6],
+                    'created_at': row[7],
+                    'username': row[8],
+                    'user_id': row[9]
+                }
+
+                # 删除记录
+                c.execute("DELETE FROM accounting_records WHERE id = ?", (row[0],))
+                conn.commit()
+
+                return True, removed_record
+        except Exception as e:
+            logger.error(f"移除最后记录失败: {e}")
+            return False, {"error": str(e)}
+
     # ========== USDT 地址查询相关方法 ==========
 
     def record_address_query(self, group_id: str, address: str, chain_type: str, 
@@ -1912,125 +2012,54 @@ async def handle_clear_all_cancel(update: Update, context: ContextTypes.DEFAULT_
     await query.message.edit_text("✅ 已取消清空操作")
     return ConversationHandler.END
 
+async def handle_remove_last_record(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """移除上一笔记账记录"""
+    if not _is_authorized_in_group(update):
+        await update.message.reply_text("❌ 此操作需要管理员权限")
+        return
 
-async def handle_calculator(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理计算器功能"""
     chat = update.effective_chat
-    if chat.type not in ['group', 'supergroup']:
-        return
-
-    text = update.message.text.strip()
-    pattern = r'^(-?\d+(?:\.\d+)?)\s*([+\-*/])\s*(-?\d+(?:\.\d+)?)$'
-    match = re.match(pattern, text)
-
-    if not match:
-        return
-
-    a, op, b = match.groups()
-    a_num = float(a)
-    b_num = float(b)
-
-    try:
-        if op == '+':
-            result = a_num + b_num
-        elif op == '-':
-            result = a_num - b_num
-        elif op == '*':
-            result = a_num * b_num
-        elif op == '/':
-            if b_num == 0:
-                await update.message.reply_text("❌ 除数不能为0")
-                return
-            result = a_num / b_num
-        else:
-            return
-
-        result_str = str(int(result)) if result.is_integer() else f"{result:.2f}"
-        user_mention = f"@{update.effective_user.username}" if update.effective_user.username else update.effective_user.first_name
-        await update.message.reply_text(f"{user_mention} {a_num}{op}{b_num} = {result_str}")
-    except Exception as e:
-        logger.error(f"计算错误: {e}")
-
-
-async def handle_user_info_tracking(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """追踪用户信息变更"""
-    chat = update.effective_chat
-    user = update.effective_user
-
-    if not user or chat.type not in ['group', 'supergroup']:
-        return
-
     group_id = str(chat.id)
-    username = user.username
-    first_name = user.first_name
-    last_name = user.last_name or ""
 
-    has_change, old_name, new_name, change_type = accounting_manager.update_user_info(
-        group_id, user.id, username, first_name, last_name
+    success, result = accounting_manager.remove_last_record(group_id)
+
+    if not success:
+        await update.message.reply_text(f"❌ {result.get('error', '移除失败')}")
+        return
+
+    # 构建移除记录的信息
+    record = result
+    record_type = "入款" if record['type'] == 'income' else "出款"
+
+    if record['type'] == 'income':
+        amount_info = f"{record['amount']:.2f} 元 = {record['amount_usdt']:.2f} USDT"
+        if record.get('category'):
+            amount_info += f" (分类：{record['category']})"
+    else:
+        amount_info = f"{record['amount_usdt']:.2f} USDT"
+
+    # 时间格式化
+    dt = beijing_time(record['created_at'])
+    time_str = dt.strftime('%H:%M:%S')
+
+    # 操作人
+    operator = record.get('username') or f"用户{record.get('user_id', '未知')}"
+
+    await update.message.reply_text(
+        f"✅ 已移除上一笔记账\n\n"
+        f"📝 记录信息：\n"
+        f"  • 类型：{record_type}\n"
+        f"  • 金额：{amount_info}\n"
+        f"  • 时间：{time_str}\n"
+        f"  • 操作人：{operator}\n\n"
+        f"💡 使用「当前账单」查看最新账单"
     )
 
-    if has_change:
-        if change_type:
-            await update.message.reply_text(
-                f"🚨 **用户信息变更提醒**\n\n"
-                f"用户 {old_name}\n"
-                f"已更新{change_type}为：\n"
-                f"{new_name}",
-                parse_mode='Markdown'
-            )
-        else:
-            await update.message.reply_text(
-                f"🚨 **用户信息变更提醒**\n\n"
-                f"用户 {old_name} → {new_name}",
-                parse_mode='Markdown'
-            )
-
-async def welcome_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理新成员加入事件"""
-    # 获取 chat_member 更新
-    chat_member = update.chat_member
-
-    if not chat_member:
-        print("❌ 没有 chat_member 数据")
-        return
-
-    # 获取新旧状态
-    old_status = chat_member.old_chat_member.status if chat_member.old_chat_member else None
-    new_status = chat_member.new_chat_member.status if chat_member.new_chat_member else None
-
-    print(f"[欢迎检测] 群组: {chat_member.chat.title}")
-    print(f"[欢迎检测] 旧状态: {old_status}")
-    print(f"[欢迎检测] 新状态: {new_status}")
-
-    # 检测成员加入（从 left/kicked/restricted 变为 member）
-    if new_status == 'member' and old_status in ['left', 'kicked', 'restricted']:
-        print(f"✅ 检测到新成员加入！")
-
-        user = chat_member.new_chat_member.user
-        chat = chat_member.chat
-
-        # 获取用户信息
-        first_name = user.first_name or ""
-        username = user.username
-
-        # 构建欢迎语
-        if username:
-            welcome_text = f"{first_name} @{username}\n欢迎加入本群"
-        else:
-            welcome_text = f"{first_name}\n欢迎加入本群"
-
-        # 发送欢迎消息
-        try:
-            await context.bot.send_message(chat_id=chat.id, text=welcome_text)
-            print(f"✅ 欢迎消息已发送: {welcome_text}")
-        except Exception as e:
-            print(f"❌ 发送欢迎消息失败: {e}")
-
-    # 检测成员离开（从 member 变为 left/kicked）
-    elif old_status == 'member' and new_status in ['left', 'kicked']:
-        print(f"👋 检测到成员离开")
-        user = chat_member.new_chat_member.user
-        print(f"离开的用户: {user.first_name}")
+    # 可选：显示更新后的账单
+    stats = accounting_manager.get_current_stats(group_id)
+    records = accounting_manager.get_current_records(group_id)
+    message = format_bill_message(stats, records, "当前账单")
+    await update.message.reply_text(message, parse_mode='Markdown')
 
 async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理群组消息中的记账指令"""
@@ -2088,7 +2117,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
     # 处理计算器功能
     await handle_calculator(update, context)
-
+    
     # 处理记账指令（需要权限）
     if not is_authorized(message.from_user.id):
         return
@@ -2102,6 +2131,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 await handle_set_fee(update, context, rate)
         except:
             await message.reply_text("❌ 格式错误：设置手续费 数字（如：设置手续费5）")
+        return
 
     # 设置汇率
     elif text.startswith('设置汇率'):
@@ -2112,6 +2142,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 await handle_set_exchange(update, context, rate)
         except:
             await message.reply_text("❌ 格式错误：设置汇率 数字（如：设置汇率7.2）")
+        return
 
     # 设置单笔费用
     elif text.startswith('设置单笔费用'):
@@ -2136,34 +2167,47 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
         except Exception as e:
             print(f"[DEBUG] 其他异常: {e}")
             await message.reply_text(f"❌ 设置失败：{str(e)[:50]}")
+        return
 
     # 结束账单
     elif text == '结束账单':
         await handle_end_bill(update, context)
+        return
 
     # 今日总
     elif text == '今日总':
         await handle_today_stats(update, context)
+        return
 
     # 总
     elif text == '总':
         await handle_total_stats(update, context)
+        return
 
     # 当前账单
     elif text == '当前账单':
         await handle_current_bill(update, context)
+        return
 
     # 查询账单
     elif text == '查询账单':
         await handle_query_bill(update, context)
+        return
 
     # 清理账单 / 清空账单
     elif text in ['清理账单', '清空账单']:
         await handle_clear_bill(update, context)
+        return
 
     # 清理总账单（所有账单）
     elif text in ['清理总账单', '清空总账单', '清空所有账单']:
         await handle_clear_all_bill(update, context)
+        return
+
+    # 移除上一笔
+    elif text == '移除上一笔' or text == '删除上一笔':
+        await handle_remove_last_record(update, context)
+        return
 
     # +xxx 添加入款（支持备注和临时汇率）
     elif text.startswith('+'):
@@ -2214,6 +2258,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
         except Exception as e:
             logger.error(f"解析入款失败: {e}")
             await message.reply_text("❌ 格式错误：+金额 或 +金额/汇率 或 +金额 备注（如：+1000 或 +1000/10 或 +1000 德国）")
+            return
 
     # -xxx 修正入款（支持备注和临时汇率）
     elif text.startswith('-') and len(text) > 1:
@@ -2264,6 +2309,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
         except Exception as e:
             logger.error(f"解析修正入款失败: {e}")
             await message.reply_text("❌ 格式错误：-金额 或 -金额/汇率 或 -金额 备注（如：-500 或 -500/10 或 -500 德国）")
+            return
 
     # 下发 xxxu 添加出款（正数）
     elif text.startswith('下发') and 'u' in text and not text.startswith('下发-'):
@@ -2276,6 +2322,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 await message.reply_text("❌ 格式错误：下发金额u（如：下发100u）")
         except:
             await message.reply_text("❌ 格式错误：下发金额u（如：下发100u）")
+            return
 
     # 下发- xxxu 修正出款（负数）
     elif text.startswith('下发-') and 'u' in text:
@@ -2288,6 +2335,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 await message.reply_text("❌ 格式错误：下发-金额u（如：下发-50u）")
         except:
             await message.reply_text("❌ 格式错误：下发-金额u（如：下发-50u）")
+            return
 
     # ========== 3. AI 对话（需要管理员或操作员权限） ==========
     bot_username = context.bot.username
@@ -2324,6 +2372,184 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 reply = reply[:4000] + "...\n\n(回复过长已截断)"
             await thinking_msg.edit_text(reply)
         return
+
+async def handle_calculator(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理计算器功能（只识别完整的计算表达式）"""
+    chat = update.effective_chat
+    if chat.type not in ['group', 'supergroup']:
+        return
+
+    text = update.message.text.strip()
+
+    # 🔥 排除记账命令
+    exclude_prefixes = ['设置手续费', '设置汇率', '设置单笔费用', '结束账单', '今日总', '总', 
+                        '当前账单', '查询账单', '清理账单', '清空账单', '清理总账单', 
+                        '清空总账单', '清空所有账单', '下发', '+', '-']
+
+    for prefix in exclude_prefixes:
+        if text.startswith(prefix):
+            return
+
+    # 🔥 只识别完整的计算表达式
+    # 规则：必须以数字或 ( 或函数名开头，以数字或 ) 结尾
+    # 且必须包含运算符
+
+    # 检查是否是有效的计算表达式
+    def is_valid_expression(expr: str) -> bool:
+        # 去除空格
+        expr = expr.replace(' ', '')
+        if not expr:
+            return False
+
+        # 必须以数字、小数点、(、函数名开头
+        valid_starts = ('0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '(', '-', '+', 
+                       'sqrt', 'sin', 'cos', 'tan', 'log', 'abs', 'round', 'floor', 'ceil', 'pi', 'e')
+        if not any(expr.startswith(s) for s in valid_starts):
+            return False
+
+        # 必须以数字、) 结尾
+        if not (expr[-1].isdigit() or expr[-1] == ')'):
+            return False
+
+        # 必须包含运算符（+ - * / % ^）
+        operators = ['+', '-', '*', '/', '%', '^']
+        has_operator = any(op in expr for op in operators)
+        if not has_operator:
+            return False
+
+        return True
+
+    if not is_valid_expression(text):
+        return
+
+    # 简单算式：如 100+200
+    simple_pattern = r'^(-?\d+(?:\.\d+)?)\s*([+\-*/%])\s*(-?\d+(?:\.\d+)?)$'
+    simple_match = re.match(simple_pattern, text)
+
+    if simple_match:
+        # 简单计算直接处理
+        a, op, b = simple_match.groups()
+        a_num = float(a)
+        b_num = float(b)
+
+        try:
+            if op == '+':
+                result = a_num + b_num
+            elif op == '-':
+                result = a_num - b_num
+            elif op == '*':
+                result = a_num * b_num
+            elif op == '/':
+                if b_num == 0:
+                    await update.message.reply_text("❌ 除数不能为0")
+                    return
+                result = a_num / b_num
+            elif op == '%':
+                result = a_num % b_num
+            else:
+                return
+
+            result_str = str(int(result)) if result.is_integer() else f"{result:.2f}"
+            await update.message.reply_text(f"🧮 {a}{op}{b} = {result_str}")
+            return
+        except Exception as e:
+            await update.message.reply_text(f"❌ 计算错误：{str(e)[:50]}")
+            return
+
+    # 复杂计算
+    result = Calculator.safe_eval(text)
+
+    if result is not None:
+        result_str = Calculator.format_result(result)
+        await update.message.reply_text(f"🧮 {text} = {result_str}")
+    else:
+        await update.message.reply_text(
+            "❌ 请输入完整计算格式\n"
+            "支持的运算符：+ - * / % ^ ( )\n"
+            "支持的函数：sqrt, sin, cos, tan, log, abs, round, floor, ceil\n"
+            "支持的常数：pi, e\n"
+        )
+
+
+async def handle_user_info_tracking(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """追踪用户信息变更"""
+    chat = update.effective_chat
+    user = update.effective_user
+
+    if not user or chat.type not in ['group', 'supergroup']:
+        return
+
+    group_id = str(chat.id)
+    username = user.username
+    first_name = user.first_name
+    last_name = user.last_name or ""
+
+    has_change, old_name, new_name, change_type = accounting_manager.update_user_info(
+        group_id, user.id, username, first_name, last_name
+    )
+
+    if has_change:
+        if change_type:
+            await update.message.reply_text(
+                f"🚨🚨 **用户信息变更提醒**\n\n"
+                f"用户 {old_name}\n"
+                f"已更新{change_type}为：\n"
+                f"{new_name}",
+                parse_mode='Markdown'
+            )
+        else:
+            await update.message.reply_text(
+                f"🚨🚨 **用户信息变更提醒**\n\n"
+                f"用户 {old_name} → {new_name}",
+                parse_mode='Markdown'
+            )
+
+async def welcome_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理新成员加入事件"""
+    # 获取 chat_member 更新
+    chat_member = update.chat_member
+
+    if not chat_member:
+        print("❌ 没有 chat_member 数据")
+        return
+
+    # 获取新旧状态
+    old_status = chat_member.old_chat_member.status if chat_member.old_chat_member else None
+    new_status = chat_member.new_chat_member.status if chat_member.new_chat_member else None
+
+    print(f"[欢迎检测] 群组: {chat_member.chat.title}")
+    print(f"[欢迎检测] 旧状态: {old_status}")
+    print(f"[欢迎检测] 新状态: {new_status}")
+
+    # 检测成员加入（从 left/kicked/restricted 变为 member）
+    if new_status == 'member' and old_status in ['left', 'kicked', 'restricted']:
+        print(f"✅ 检测到新成员加入！")
+
+        user = chat_member.new_chat_member.user
+        chat = chat_member.chat
+
+        # 获取用户信息
+        first_name = user.first_name or ""
+        username = user.username
+
+        # 构建欢迎语
+        if username:
+            welcome_text = f"{first_name} @{username}\n欢迎加入本群"
+        else:
+            welcome_text = f"{first_name}\n欢迎加入本群"
+
+        # 发送欢迎消息
+        try:
+            await context.bot.send_message(chat_id=chat.id, text=welcome_text)
+            print(f"✅ 欢迎消息已发送: {welcome_text}")
+        except Exception as e:
+            print(f"❌ 发送欢迎消息失败: {e}")
+
+    # 检测成员离开（从 member 变为 left/kicked）
+    elif old_status == 'member' and new_status in ['left', 'kicked']:
+        print(f"👋 检测到成员离开")
+        user = chat_member.new_chat_member.user
+        print(f"离开的用户: {user.first_name}")
 
 # ==================== 群组成员变化监听器（服务消息方式）====================
 
@@ -2462,37 +2688,40 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📒 **记账功能说明**\n\n"
         "💰 **入款操作**：\n"
         "`+金额` - 添加一笔入款（如：+1000）\n"
-        "`+金额/汇率` - 添加一笔临时汇率入款（如：+1000/5）\n"
-        "`+金额 备注` - 带分类的入款（如：+1000 德国）\n"
-        "`+金额/汇率 备注` - 带分类的临时汇率入款（如：+1000/5 德国）\n"
+        "`+金额/汇率` - 使用临时汇率入款（如：+1000/7.2）\n"
+        "`+金额 备注` - 带分类入款（如：+1000 德国）\n"
+        "`+金额/汇率 备注` - 带分类+临时汇率（如：+1000/7.2 德国）\n"
         "`-金额` - 修正入款（如：-500）\n"
-        "`-金额/汇率` - 修正临时汇率入款（如：-500/5）\n"
-        "`-金额 备注` - 带分类的修正入款（如：-500 德国）\n"
-        "`-金额/汇率 备注` - 带分类的修正临时汇率入款（如：-500/5 德国）\n\n"
+        "`-金额/汇率` - 修正入款+临时汇率（如：-500/7.2）\n"
+        "`-金额 备注` - 修正入款+分类（如：-500 德国）\n"
+        "`-金额/汇率 备注` - 修正+分类+临时汇率（如：-500/7.2 德国）\n\n"
         "💸 **出款操作**：\n"
         "`下发金额u` - 添加出款（如：下发100u）\n"
         "`下发-金额u` - 修正出款（如：下发-50u）\n\n"
         "⚙️ **配置**：\n"
         "`设置手续费 数字` - 设置手续费率（如：设置手续费 5）\n"
-        "`设置汇率 数字` - 设置汇率（如：设置汇率 7.2）\n\n"
+        "`设置汇率 数字` - 设置汇率（如：设置汇率 7.2）\n"
         "`设置单笔费用 数字` - 设置单笔费用（如：设置单笔费用 2）\n\n"
         "📊 **查询**：\n"
         "`今日总` - 查看今日账单\n"
         "`总` - 查看总计账单\n"
-        "`查询账单` - 按日期查询\n"
-        "`当前账单` - 查看当前账单\n\n"
+        "`当前账单` - 查看当前会话账单\n"
+        "`查询账单` - 按日期查询历史账单\n\n"
         "🗑️ **管理**：\n"
-        "`结束账单` - 结束并保存当前账单（费率/汇率重置）\n"
-        "`清理账单` - 清空当前账单\n"
-        "`清理总账单` - 清空所有账单（包括历史记录）\n\n"
+        "`结束账单` - 结束当前会话并保存\n"
+        "`清理账单` - 清空当前会话记录\n"
+        "`清理总账单` - 清空所有历史记录\n"
+        "`移除上一笔` / `删除上一笔` - 撤销最后一笔记账\n\n"
         "🧮 **计算器**：\n"
-        "`数字+数字`、`数字-数字`、`数字*数字`、`数字/数字`\n\n"
-        "⚠️ 注意：所有记账操作需要管理员或操作员权限\n\n"
-        "📌 **备注说明**：\n"
-        "支持国家名称自动识别并显示国旗，如：\n"
-        "`+1000 德国` → 🇩🇪 德国\n"
-        "`+500 us` → 🇺🇸 us\n"
-        "`+300 法国巴黎` → 🇫🇷 法国巴黎"
+        "`数字+数字`、`数字-数字`、`数字*数字`、`数字/数字`\n"
+        "支持复杂表达式：`(100+200)*3`、`sqrt(100)`、`2^3` 等\n\n"
+        "💡 **智能识别**：\n"
+        "• 群内发送 USDT 地址自动查询余额\n"
+        "• 分类备注自动识别国家并显示国旗\n"
+        "• `@机器人 问题` - AI 智能问答\n\n"
+        "⚠️ **权限说明**：\n"
+        "• 记账、配置、AI问答、管理操作需要管理员或操作员权限\n"
+        "• 地址查询、计算器所有人可用"
     )
 
     await query.message.reply_text(message, parse_mode='Markdown')
