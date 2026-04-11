@@ -1,7 +1,6 @@
 # main.py - 修正后的版本
 
 import asyncio
-from handlers import monitor, operator
 from telegram import Update
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
@@ -12,9 +11,8 @@ from config import BOT_TOKEN
 from auth import is_authorized, init_operators_from_db
 from db import init_db, save_group, delete_group_from_db, DB_PATH
 from handlers.start import start
-from handlers import operator, usdt, accounting, broadcast, transfer
+from handlers import monitor,operator, usdt, accounting, broadcast, transfer
 from handlers.git_update import get_git_handlers
-# 合并重复的导入
 from handlers.group_manager import (
     group_manager_menu, show_stats, list_categories, 
     add_category_start, delete_category_start, 
@@ -363,6 +361,8 @@ async def extract_address_from_text(text: str) -> str:
 async def input_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理私聊的文本输入"""
     from datetime import datetime, timedelta
+    import re
+    
     chat = update.effective_chat
     print(f"[DEBUG] ========== input_router 开始 ==========")
     print(f"[DEBUG] 聊天类型: {chat.type}")
@@ -373,6 +373,9 @@ async def input_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user_id = update.effective_user.id
+
+    # ✅ 先定义 text 变量
+    text = update.message.text.strip() if update.message.text else ""
 
     # 1. 检查群组管理状态
     from handlers.group_manager import user_states
@@ -435,9 +438,14 @@ async def input_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print(f"[DEBUG] → 记账模块，忽略")
         return
 
+    # 检查是否是互转查询的地址格式
+    transfer_pattern = r'^T[0-9A-Za-z]{33}\s+T[0-9A-Za-z]{33}$'
+    if re.match(transfer_pattern, text):
+        print(f"[DEBUG] 检测到互转查询地址格式，跳过 AI 回复，交给 ConversationHandler 处理")
+        return
+
     # ========== 4.5 AI 数据分析对话 ==========
     print(f"[DEBUG] 4.5 检查私聊数据查询意图...")
-    text = update.message.text.strip() if update.message.text else ""
 
     if text and not text.startswith('/'):
         # 权限检查
@@ -470,23 +478,14 @@ async def input_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ========== 5. 其他情况（原有 AI 回复作为备用） ==========
     print(f"[DEBUG] 5. 检查 AI 回复权限...")
-    text = update.message.text.strip() if update.message.text else ""
     print(f"[DEBUG] AI 回复文本: {text[:50] if text else '空'}")
 
     if not text or text.startswith('/'):
         print(f"[DEBUG] 文本为空或命令，跳过 AI")
         return
 
-    # 检查是否是互转查询的地址格式
-    import re
-    transfer_pattern = r'^T[0-9A-Za-z]{33}\s+T[0-9A-Za-z]{33}$'
-    if re.match(transfer_pattern, text):
-        print(f"[DEBUG] 检测到互转查询地址格式，跳过 AI 回复，交给 ConversationHandler 处理")
-        return
-
     # ✅ 权限检查：只有管理员和操作员才能使用 AI
     from auth import is_authorized
-    user_id = update.effective_user.id
     if not is_authorized(user_id):
         print(f"[DEBUG] 用户 {user_id} 无权限使用 AI，跳过")
         await update.message.reply_text(
@@ -545,7 +544,6 @@ async def auto_save_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_group(chat_id, title, category)
         # ✅ 新增：自动分类检测（仅当分类为"未分类"时）
         from db import update_group_category_if_needed
-        update_group_category_if_needed(chat_id, title)
 
 # main.py - 添加启动时自动分类函数
 
@@ -923,7 +921,7 @@ def main():
     async def post_init(app: Application):
         """启动后初始化"""
         # 1. 启动验证群组
-        await verify_groups_on_startup(app)
+        #await verify_groups_on_startup(app)
 
         # 2. 启动自动分类（新增）
         await auto_classify_all_groups_on_startup(app)
