@@ -113,7 +113,7 @@ async def process_transfer_query(update: Update, context: ContextTypes.DEFAULT_T
                     unique_matches.append(tx)
 
     if not unique_matches:
-        await update.message.reply_text(f"📭 在最近的交易记录中，未找到 <code>{addr_a}</code> 和 <code>{addr_b}</code> 之间的直接转账。", parse_mode="HTML")
+        await update.message.reply_text(f"📭 未找到直接转账记录。", parse_mode="HTML")
         context.user_data.pop("active_module", None)
         return ConversationHandler.END
 
@@ -123,13 +123,7 @@ async def process_transfer_query(update: Update, context: ContextTypes.DEFAULT_T
     context.user_data["query_type"] = "direct" # 标记当前是直接查询
 
     await send_transfer_page(update, context, 0)
-    
-    # 查询完成，清除状态（让 AI 恢复）
-    context.user_data.pop("active_module", None)
-    context.user_data.pop("transfer_results", None)
-    context.user_data.pop("current_page", None)
-    context.user_data.pop("query_type", None)
-    
+
     return ConversationHandler.END
 
 # --- 功能 2: 转账分析 (共同交易对手) ---
@@ -141,13 +135,16 @@ async def start_transfer_analysis(update: Update, context: ContextTypes.DEFAULT_
         await query.message.reply_text("❌ 无权限使用此功能")
         return ConversationHandler.END
 
-    # 设置模块状态
-    context.user_data["active_module"] = "transfer"
-
     # ✅ 清除旧数据
     context.user_data.pop("transfer_results", None)
     context.user_data.pop("current_page", None)
     context.user_data.pop("query_type", None)
+
+    # ✅ 确保设置 active_module
+    context.user_data["active_module"] = "transfer"
+
+    # ✅ 添加调试
+    print(f"[DEBUG] start_transfer_analysis 设置 active_module = {context.user_data.get('active_module')}")
 
     await query.message.reply_text(
         "🕵️ **转账分析**\n\n将分析是否有第三方地址与这两个地址都产生过交易。\n"
@@ -159,6 +156,9 @@ async def start_transfer_analysis(update: Update, context: ContextTypes.DEFAULT_
     return TRANSFER_ANALYSIS_WAIT_ADDR
 
 async def process_transfer_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # 🔥 立即设置状态
+    context.user_data["active_module"] = "transfer"
+    
     text = update.message.text.strip()
     parts = text.split()
 
@@ -189,7 +189,8 @@ async def process_transfer_analysis(update: Update, context: ContextTypes.DEFAUL
     common_parties = [p for p in common_parties if p != addr_a and p != addr_b]
 
     if not common_parties:
-        await update.message.reply_text(f"📭 在最近的交易记录中，未发现与 <code>{addr_a}</code> 和 <code>{addr_b}</code> 同时有过交易的第三方地址。", parse_mode="HTML")
+        await update.message.reply_text(f"📭 未发现共同交易对手。", parse_mode="HTML")
+        # ✅ 没有结果时，清除状态
         context.user_data.pop("active_module", None)
         return ConversationHandler.END
 
@@ -199,12 +200,6 @@ async def process_transfer_analysis(update: Update, context: ContextTypes.DEFAUL
 
     await send_transfer_page(update, context, 0)
 
-    # 查询完成，清除状态（让 AI 恢复）
-    context.user_data.pop("active_module", None)
-    context.user_data.pop("transfer_results", None)
-    context.user_data.pop("current_page", None)
-    context.user_data.pop("query_type", None)
-    
     return ConversationHandler.END
 
 # --- 通用：发送分页结果 ---
@@ -368,7 +363,6 @@ async def show_transfer_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
     context.user_data.pop("transfer_results", None)
     context.user_data.pop("current_page", None)
     context.user_data.pop("query_type", None)
-    context.user_data.pop("active_module", None)
 
     # 设置模块状态
     context.user_data["active_module"] = "transfer"
