@@ -16,10 +16,15 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("❌ 只有控制人可以管理操作人")
         return
 
+    # ✅ 清除之前可能残留的状态
+    context.user_data.pop("active_module", None)
+    context.user_data.pop("current_action", None)
+
     keyboard = [
         [InlineKeyboardButton("➕ 添加操作人", callback_data="op_add")],
         [InlineKeyboardButton("➖ 删除操作人", callback_data="op_remove")],
         [InlineKeyboardButton("📋 查询操作人", callback_data="op_list")],
+        [InlineKeyboardButton("◀️ 返回主菜单", callback_data="main_menu")],  # 新增
     ]
     await query.message.reply_text(
         "👤 操作人管理：请选择功能",
@@ -80,12 +85,33 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ 已删除操作人：{target_id}")
 
     context.user_data.pop("current_action", None)
-    # 清除 active_module，让 AI 恢复
     context.user_data.pop("active_module", None)
+    # ✅ 操作完成后显示操作人管理菜单（带返回按钮）
+    keyboard = [
+        [InlineKeyboardButton("➕ 添加操作人", callback_data="op_add")],
+        [InlineKeyboardButton("➖ 删除操作人", callback_data="op_remove")],
+        [InlineKeyboardButton("📋 查询操作人", callback_data="op_list")],
+        [InlineKeyboardButton("◀️ 返回主菜单", callback_data="main_menu")],
+    ]
+    await update.message.reply_text(
+        "👤 操作人管理：请选择功能",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
 async def cancel_operator(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """取消操作员管理"""
     context.user_data.pop("current_action", None)
     context.user_data.pop("active_module", None)
     await update.message.reply_text("❌ 已取消操作")
+    # ✅ 取消后也显示操作人管理菜单
+    keyboard = [
+        [InlineKeyboardButton("➕ 添加操作人", callback_data="op_add")],
+        [InlineKeyboardButton("➖ 删除操作人", callback_data="op_remove")],
+        [InlineKeyboardButton("📋 查询操作人", callback_data="op_list")],
+        [InlineKeyboardButton("◀️ 返回主菜单", callback_data="main_menu")],
+    ]
+    await update.message.reply_text(
+        "👤 操作人管理：请选择功能",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
     return ConversationHandler.END
