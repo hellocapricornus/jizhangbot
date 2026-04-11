@@ -620,8 +620,24 @@ def get_all_groups_from_db(category: str = None):
 
     rows = c.fetchall()
     conn.close()
-    return [{"id": row["group_id"], "title": row["title"], "last_seen": row["last_seen"], "category": row["category"], "joined_at": row["joined_at"]} for row in rows]
 
+    # ✅ 处理 joined_at 为空的情况
+    result = []
+    for row in rows:
+        joined_at = row["joined_at"]
+        if joined_at is None or joined_at == 0:
+            # 如果没有加入时间，用 last_seen 代替
+            joined_at = row["last_seen"] if row["last_seen"] else 0
+
+        result.append({
+            "id": row["group_id"], 
+            "title": row["title"], 
+            "last_seen": row["last_seen"], 
+            "category": row["category"], 
+            "joined_at": joined_at
+        })
+
+    return result
 
 def update_group_category(group_id: str, category: str):
     conn = get_db_connection()
