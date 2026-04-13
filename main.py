@@ -940,6 +940,21 @@ def main():
                 first=60
             )
             print("✅ 状态清理任务已启动（每5分钟检查一次）")
+            # 🆕 4. 启动 Google Sheets 定时刷新任务（每30分钟）
+            from handlers.google_sheets import get_sheets_reader
+            async def refresh_sheets_job(context: ContextTypes.DEFAULT_TYPE):
+                reader = get_sheets_reader()
+                if reader:
+                    reader.refresh_cache()
+                else:
+                    print("⚠️ Google Sheets 未连接，跳过刷新")
+
+            job_queue.run_repeating(
+                refresh_sheets_job,
+                interval=1800,  # 30分钟 = 1800秒
+                first=60  # 启动后60秒第一次执行
+            )
+            print("✅ Google Sheets 定时刷新任务已启动（每30分钟一次）")
         else:
             print("⚠️ JobQueue 未启用，无法启动状态清理任务")
 
