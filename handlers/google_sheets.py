@@ -212,4 +212,3 @@ def init_google_sheets(credentials_file: str, spreadsheet_id: str):
 
 def get_sheets_reader():
     return _sheets_reader
-EOF
