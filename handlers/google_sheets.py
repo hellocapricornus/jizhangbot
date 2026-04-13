@@ -1,5 +1,3 @@
-# handlers/google_sheets.py - 使用 google-auth 替代 oauth2client
-
 import gspread
 from google.oauth2.service_account import Credentials
 from typing import List, Dict
@@ -24,7 +22,6 @@ class GoogleSheetsReader:
                 print(f"❌ 凭证文件不存在: {self.credentials_file}")
                 return
 
-            # 使用现代认证方式
             scope = ['https://www.googleapis.com/auth/spreadsheets.readonly']
             creds = Credentials.from_service_account_file(
                 self.credentials_file, 
@@ -188,6 +185,14 @@ class GoogleSheetsReader:
             "comparisons": comparisons
         }
 
+    def refresh_cache(self):
+        """强制刷新缓存，重新从 Google Sheets 读取数据"""
+        self._cached_points = None
+        print("🔄 定时刷新：正在重新加载 Google Sheets 数据...")
+        points = self.get_all_points()
+        print(f"✅ 定时刷新完成，加载了 {len(points)} 条点位数据")
+        return points
+
 
 _sheets_reader = None
 
@@ -207,3 +212,4 @@ def init_google_sheets(credentials_file: str, spreadsheet_id: str):
 
 def get_sheets_reader():
     return _sheets_reader
+EOF
