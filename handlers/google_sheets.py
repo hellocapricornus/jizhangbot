@@ -1,12 +1,12 @@
-# handlers/google_sheets.py
+# handlers/google_sheets.py - 使用 google-auth 替代 oauth2client
 
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
-from typing import List, Dict, Optional
+from google.oauth2.service_account import Credentials
+from typing import List, Dict
 import os
 
 class GoogleSheetsReader:
-    """Google Sheets 点位数据读取器"""
+    """Google Sheets 点位数据读取器（使用现代认证）"""
 
     def __init__(self, credentials_file: str, spreadsheet_id: str, worksheet_name: str = "点位"):
         self.credentials_file = credentials_file
@@ -24,9 +24,11 @@ class GoogleSheetsReader:
                 print(f"❌ 凭证文件不存在: {self.credentials_file}")
                 return
 
+            # 使用现代认证方式
             scope = ['https://www.googleapis.com/auth/spreadsheets.readonly']
-            creds = ServiceAccountCredentials.from_json_keyfile_name(
-                self.credentials_file, scope
+            creds = Credentials.from_service_account_file(
+                self.credentials_file, 
+                scopes=scope
             )
             self.client = gspread.authorize(creds)
             spreadsheet = self.client.open_by_key(self.spreadsheet_id)
@@ -151,19 +153,18 @@ class GoogleSheetsReader:
 
             ranking.append({
                 "rank": i,
-                "公群": point["公群"],
-                "昵称": point["昵称"],
-                "国家": point["国家"],
-                "费率": point["费率"],
-                "汇率": point["汇率"],
-                "合作方": point["合作方"],
-                "料性": point["料性"],
-                "卡/钱包": point["卡/钱包"],
-                "进算拖算": point["进算拖算"],
-                "备注": point["备注"],
+                "公群": point.get("公群", ""),
+                "昵称": point.get("昵称", ""),
+                "国家": point.get("国家", ""),
+                "费率": point.get("费率", 0),
+                "汇率": point.get("汇率", 0),
+                "合作方": point.get("合作方", ""),
+                "料性": point.get("料性", ""),
+                "卡/钱包": point.get("卡/钱包", ""),
+                "进算拖算": point.get("进算拖算", ""),
+                "备注": point.get("备注", ""),
                 "业务员": point.get("业务员", ""),
-                "日期": point.get("日期", ""),   
-                "比值": round(ratio, 4),
+                "日期": point.get("日期", ""),
                 "是否最便宜": is_cheapest
             })
 
