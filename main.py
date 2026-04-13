@@ -362,7 +362,7 @@ async def input_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理私聊的文本输入"""
     from datetime import datetime, timedelta
     import re
-    
+
     chat = update.effective_chat
     print(f"[DEBUG] ========== input_router 开始 ==========")
     print(f"[DEBUG] 聊天类型: {chat.type}")
@@ -760,6 +760,11 @@ def main():
     # 导入记账模块并初始化
     from handlers.accounting import init_accounting, get_conversation_handler, handle_group_message
     init_accounting(DB_PATH)
+    from handlers.google_sheets import init_google_sheets
+    from config import GOOGLE_CREDENTIALS_FILE, GOOGLE_SPREADSHEET_ID
+
+    if GOOGLE_CREDENTIALS_FILE and GOOGLE_SPREADSHEET_ID:
+        init_google_sheets(GOOGLE_CREDENTIALS_FILE, GOOGLE_SPREADSHEET_ID)
 
     # 创建应用
     app = Application.builder().token(BOT_TOKEN).build()
