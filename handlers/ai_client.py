@@ -193,6 +193,65 @@ class AIClient:
 
         return result
 
+    def _format_point_answer(self, question: str, data: Dict) -> str:
+        """格式化点位查询的回答"""
+        if not data.get("success"):
+            return f"❌ {data.get('error', '查询失败')}"
+
+        country = data.get("country", "全部")
+        cheapest = data.get("cheapest")
+        ranking = data.get("ranking", [])
+        comparisons = data.get("comparisons", [])
+
+        if not cheapest:
+            return f"📭 未找到{country}国家的点位数据"
+
+        answer = f"📊 **{country}最便宜点位分析**\n\n"
+
+        answer += f"🏆 **最便宜点位**\n"
+        answer += f"• 昵称：{cheapest.get('昵称', '未知')}\n"
+        answer += f"• 公群：{cheapest.get('公群', '未知')}\n"
+        answer += f"• 国家：{cheapest.get('国家', '未知')}\n"
+        answer += f"• 费率：{cheapest.get('费率', 0)}%\n"
+        answer += f"• 汇率：{cheapest.get('汇率', 0)}\n"
+        if cheapest.get('合作方'):
+            answer += f"• 合作方：{cheapest['合作方']}\n"
+        if cheapest.get('料性'):
+            answer += f"• 料性：{cheapest['料性']}\n"
+        if cheapest.get('卡/钱包'):
+            answer += f"• 卡/钱包：{cheapest['卡/钱包']}\n"
+        if cheapest.get('进算拖算'):
+            answer += f"• 进算拖算：{cheapest['进算拖算']}\n"
+        if cheapest.get('业务员'):
+            answer += f"• 业务员：{cheapest['业务员']}\n"
+        if cheapest.get('日期'):
+            answer += f"• 日期：{cheapest['日期']}\n"
+        answer += "\n"
+
+        if len(ranking) > 1:
+            answer += f"📋 **性价比排行 TOP{len(ranking)}**\n"
+            for item in ranking:
+                if item.get('是否最便宜'):
+                    continue
+                answer += f"• {item.get('昵称', '未知')}：费率{item.get('费率', 0)}%，汇率{item.get('汇率', 0)}，比最便宜{self._format_ratio_diff(item.get('比值', 1))}\n"
+            answer += "\n"
+
+        if comparisons:
+            answer += f"🔍 **对比分析**\n"
+            for comp in comparisons:
+                answer += f"• {comp.get('name', '未知')}：{comp.get('比较结果', '')}\n"
+            answer += "\n"
+
+        answer += f"📊 共找到 {data.get('total_count', 0)} 个点位"
+        return answer
+
+    def _format_ratio_diff(self, ratio: float) -> str:
+        """格式化比值差异"""
+        if ratio < 1:
+            return f"便宜 {(1-ratio)*100:.1f}%"
+        else:
+            return f"贵 {(ratio-1)*100:.1f}%"
+
 
     def _format_address_export(self, data: Dict) -> str:
         """格式化地址导出"""
@@ -260,6 +319,11 @@ class AIClient:
 - chat: 普通对话，不需要数据
 - unknown: 无法识别
 
+🆕 **点位查询（Google Sheets）**：
+- point_cheapest: 查询某个国家最便宜的点位/群组
+- point_list: 查询某个国家的所有点位
+- point_compare: 比较两个点位的价格
+
 返回 JSON 格式：
 {{"type": "数据类型", "params": {{"key": "value"}}}}
 
@@ -273,6 +337,11 @@ class AIClient:
 - "监控地址列表" -> {{"type": "monitored_addresses", "params": {{}}}}
 - "中国分类下有哪些群" -> {{"type": "groups_by_category", "params": {{"category": "中国"}}}}
 - "所有群的分类下分别有哪些群组" -> {{"type": "all_groups_by_category", "params": {{}}}}
+- "德国哪个群组最便宜" -> {{"type": "point_cheapest", "params": {{"country": "德国", "limit": 5}}}}
+- "美国最便宜的点位" -> {{"type": "point_cheapest", "params": {{"country": "美国", "limit": 5}}}}
+- "日本有哪些点位" -> {{"type": "point_list", "params": {{"country": "日本"}}}}
+- "比较德国和美国的点位" -> {{"type": "point_compare", "params": {{"country_a": "德国", "country_b": "美国"}}}}
+- "所有国家最便宜的点位" -> {{"type": "point_cheapest", "params": {{"country": null, "limit": 10}}}}
 - "你好" -> {{"type": "chat", "params": {{}}}}
 
 只返回 JSON，不要其他内容。"""
@@ -295,6 +364,91 @@ class AIClient:
 
         intent_type = intent.get("type", "unknown")
         params = intent.get("params", {})
+
+        # ========== 🆕 点位查询 ==========
+        if intent_type == "point_cheapest":
+            from handlers.google_sheets import get_sheets_reader
+
+            sheets = get_sheets_reader()
+            if not sheets:
+                return {"error": "Google Sheets 未连接，请检查配置"}
+
+            country = params.get("country")
+            limit = params.get("limit", 5)
+
+            result = sheets.find_cheapest(country, limit)
+            return result
+
+        elif intent_type == "point_list":
+            from handlers.google_sheets import get_sheets_reader
+
+            sheets = get_sheets_reader()
+            if not sheets:
+                return {"error": "Google Sheets 未连接，请检查配置"}
+
+            country = params.get("country")
+            points = sheets.get_all_points()
+
+            if country:
+                points = sheets.filter_by_country(points, country)
+
+            return {
+                "success": True,
+                "country": country or "全部",
+                "total_count": len(points),
+                "points": [
+                    {
+                        "公群": p["公群"],
+                        "昵称": p["昵称"],
+                        "国家": p["国家"],
+                        "费率": p["费率"],
+                        "汇率": p["汇率"],
+                        "合作方": p["合作方"],
+                        "料性": p["料性"]
+                    }
+                    for p in points[:20]  # 限制返回数量
+                ]
+            }
+
+        elif intent_type == "point_compare":
+            from handlers.google_sheets import get_sheets_reader
+
+            sheets = get_sheets_reader()
+            if not sheets:
+                return {"error": "Google Sheets 未连接，请检查配置"}
+
+            country_a = params.get("country_a")
+            country_b = params.get("country_b")
+
+            points = sheets.get_all_points()
+            points_a = sheets.filter_by_country(points, country_a) if country_a else []
+            points_b = sheets.filter_by_country(points, country_b) if country_b else []
+
+            # 找各自最便宜的
+            cheapest_a = min(points_a, key=lambda x: x["汇率"] + x["费率"]) if points_a else None
+            cheapest_b = min(points_b, key=lambda x: x["汇率"] + x["费率"]) if points_b else None
+
+            ratio = None
+            if cheapest_a and cheapest_b:
+                ratio = sheets.calculate_ratio(cheapest_a, cheapest_b)
+
+            return {
+                "success": True,
+                "country_a": country_a,
+                "country_b": country_b,
+                "cheapest_a": {
+                    "昵称": cheapest_a["昵称"] if cheapest_a else None,
+                    "费率": cheapest_a["费率"] if cheapest_a else None,
+                    "汇率": cheapest_a["汇率"] if cheapest_a else None
+                } if cheapest_a else None,
+                "cheapest_b": {
+                    "昵称": cheapest_b["昵称"] if cheapest_b else None,
+                    "费率": cheapest_b["费率"] if cheapest_b else None,
+                    "汇率": cheapest_b["汇率"] if cheapest_b else None
+                } if cheapest_b else None,
+                "比值": round(ratio, 4) if ratio else None,
+                "结论": f"{country_a}比{country_b}{'便宜' if ratio and ratio < 1 else '贵'}" if ratio else "无法比较"
+            }
 
         # 群组账单
         if intent_type == "group_bill":
@@ -475,6 +629,10 @@ class AIClient:
         # 如果有错误
         if data.get("error"):
             return f"❌ {data['error']}"
+
+        # 🆕 点位查询结果格式化
+        if data.get("success") is not None and "cheapest" in data:
+            return self._format_point_answer(question, data)
 
         analysis_prompt = f"""用户问题：{question}
 
