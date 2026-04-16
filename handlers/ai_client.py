@@ -1,9 +1,12 @@
-# handlers/ai_client.py - 完整正确版（支持数据提供者）
+# handlers/ai_client.py - 完整修复版
 
 import aiohttp
 import asyncio
 import json
+import re
+import time
 from typing import List, Dict, Optional
+from datetime import datetime, timedelta
 
 from config import (
     DEEPSEEK_API_KEY,
@@ -45,6 +48,10 @@ API_CONFIGS = [
 
 API_CONFIGS = [c for c in API_CONFIGS if c["api_key"]]
 
+# 对话上下文缓存
+CONVERSATION_CACHE = {}
+CACHE_TIMEOUT = 300
+
 
 class AIClient:
     """多 API 自动切换客户端"""
@@ -81,58 +88,775 @@ class AIClient:
         """
         from handlers.data_provider import data_provider
 
-        # 🔥 检测是否需要导出详细记录
-        is_export = any(word in prompt for word in ["导出", "详细", "明细", "列出", "所有记录", "每一笔", "详细账单", "原始账单"])
+        if user_id is None:
+            user_id = 0
 
-        # 第一步：让 AI 分析需要什么数据
-        intent = await self._identify_intent(prompt)
+        prompt_lower = prompt.lower()
+
+        # 检测是否是帮助类问题
+        help_keywords = ["你能做什么", "有什么功能", "怎么用", "帮助", "help", "功能列表", "提示词", "可以问什么"]
+        if any(kw in prompt_lower for kw in help_keywords):
+            return self._get_help_message()
+
+        # 检测是否是导出请求
+        export_keywords = ["导出", "详细账单", "原始账单", "完整账单", "所有记录", "每一笔", "导出完整账单"]
+        is_export = any(word in prompt for word in export_keywords)
+
+        question_keywords = ["哪些", "多少", "几个", "什么", "哪个", "谁", "哪几个", "哪些群"]
+        is_question = any(word in prompt for word in question_keywords)
+
+        if is_export and not is_question:
+            cached = CONVERSATION_CACHE.get(user_id)
+            if cached:
+                cache_age = time.time() - cached.get("timestamp", 0)
+                if cache_age < CACHE_TIMEOUT:
+                    last_intent = cached.get("last_intent")
+                    last_data = cached.get("last_data")
+                    if last_data:
+                        print(f"[DEBUG] 使用缓存数据导出 (年龄: {cache_age:.0f}秒)")
+                        return await self._export_raw_bill(prompt, last_data, last_intent)
+                else:
+                    CONVERSATION_CACHE.pop(user_id, None)
+            return "📭 请先查询账单，然后再使用「导出」功能。\n\n例如：先问「测试5群今天收入」，然后说「导出详细账单」"
+
+        # 识别意图
+        intent = await self._identify_intent(prompt, user_id)
 
         print(f"[DEBUG] AI 意图识别结果: {intent}")
-        print(f"[DEBUG] 是否导出模式: {is_export}")
+        print(f"[DEBUG] 用户ID: {user_id}")
 
-        # 如果是不需要数据的普通对话
-        if intent.get("type") == "unknown" or intent.get("type") == "chat":
+        # 普通聊天直接调用 AI
+        if intent.get("type") == "chat":
             return await self.chat(prompt)
 
-        # 第二步：获取数据
+        # 获取数据
         data = await self._fetch_data(intent, data_provider)
 
         if data.get("error"):
+            if data.get("available_groups"):
+                return f"❌ {data['error']}\n\n💡 {data['suggestion']}"
             return f"❌ {data['error']}"
 
-        # 🔥 如果是导出模式，直接返回原始账单格式（不经过 AI 总结）
-        if is_export:
-            return await self._export_raw_bill(prompt, data, intent)
+        # 缓存数据
+        CONVERSATION_CACHE[user_id] = {
+            "last_intent": intent,
+            "last_data": data,
+            "timestamp": time.time()
+        }
+        print(f"[DEBUG] 已缓存用户 {user_id} 的查询数据")
 
-        # 第三步：让 AI 分析数据并回答
-        answer = await self._generate_answer(prompt, data, intent)
+        # 生成回答
+        answer = await self._generate_natural_answer(prompt, intent, data)
+
+        if self._should_suggest_export(data):
+            answer += "\n\n💡 如需查看详细账单，请发送「导出完整账单」"
 
         return answer
 
-    async def _export_raw_bill(self, question: str, data: Dict, intent: Dict) -> str:
-        """导出原始账单（直接使用 data_provider 的格式化函数）"""
+    async def _identify_intent(self, prompt: str, user_id: int = 0) -> Dict:
+        """
+        识别用户意图 - 使用规则匹配
+        """
+        prompt_lower = prompt.lower()
+
+        # ========== 先检测是否是普通聊天 ==========
+        data_keywords = [
+            "收入", "入款", "出款", "下发", "账单", "记账", "收支", "统计", "情况",
+            "群组", "群", "分类", "操作员", "管理员", "监控地址", "地址", "USDT", "usdt",
+            "点位", "最便宜", "性价比", "费率", "汇率", "待下发", "未下发", "pending",
+            "活跃", "交易", "排行", "趋势", "时段", "大额", "汇总", "新加入"
+        ]
+
+        has_data_keyword = any(kw in prompt_lower for kw in data_keywords)
+
+        chat_keywords = ["你好", "谢谢", "感谢", "怎么样", "如何", "什么", "为什么", "谁", "哪里", 
+                         "天气", "新闻", "故事", "笑话", "聊天", "打招呼", "hello", "hi", "hey",
+                         "今天天气", "明天天气", "温度", "下雨", "晴天", "阴天"]
+
+        if not has_data_keyword or any(kw in prompt_lower for kw in chat_keywords):
+            return {"type": "chat", "params": {}}
+
+        # ========== 优先检测地址相关查询 ==========
+        address_keywords = ["地址", "usdt", "USDT", "监控地址", "收支", "月度统计"]
+        has_address_keyword = any(kw in prompt_lower for kw in address_keywords)
+
+        # 提取地址备注名
+        address_note = self._extract_address_note(prompt)
+
+        if has_address_keyword or address_note:
+            # 获取用户添加的监控地址
+            from db import get_monitored_addresses
+            addresses = get_monitored_addresses(user_id=user_id) if user_id else get_monitored_addresses()
+
+            # 尝试匹配备注名
+            matched_address = None
+            matched_note = None
+
+            for addr in addresses:
+                note = addr.get('note', '')
+                if note:
+                    if address_note and (address_note in note or note in address_note):
+                        matched_address = addr['address']
+                        matched_note = note
+                        break
+                    if address_note and address_note == note:
+                        matched_address = addr['address']
+                        matched_note = note
+                        break
+
+            if matched_address:
+                if "月度统计" in prompt_lower:
+                    return {"type": "address_monthly_stats", "params": {"address": matched_address, "note": matched_note}}
+                else:
+                    date_range = self._extract_date_range(prompt)
+                    return {"type": "address_stats", "params": {"address": matched_address, "date": date_range, "note": matched_note}}
+
+            # 尝试直接提取地址
+            address = self._extract_address(prompt)
+            if address:
+                if "月度统计" in prompt_lower:
+                    return {"type": "address_monthly_stats", "params": {"address": address}}
+                else:
+                    date_range = self._extract_date_range(prompt)
+                    return {"type": "address_stats", "params": {"address": address, "date": date_range}}
+
+        # ========== 操作员查询 ==========
+        if any(kw in prompt_lower for kw in ["操作员", "管理员", "授权用户"]):
+            return {"type": "operators", "params": {}}
+
+        # ========== 群组分类查询 ==========
+        if any(kw in prompt_lower for kw in ["有哪些分类", "群组分类", "分类列表"]):
+            return {"type": "group_categories", "params": {}}
+
+        # ========== 新加入群组查询 ==========
+        if "新加入" in prompt_lower or "新加群" in prompt_lower:
+            date = self._extract_date(prompt)
+            if date:
+                return {"type": "joined_groups_by_date", "params": {"date": date}}
+            elif "本周" in prompt_lower:
+                return {"type": "joined_groups_weekly", "params": {}}
+            elif "本月" in prompt_lower:
+                return {"type": "joined_groups_monthly", "params": {}}
+            elif "今天" in prompt_lower or "今日" in prompt_lower:
+                return {"type": "joined_groups_today", "params": {}}
+            elif "昨天" in prompt_lower or "昨日" in prompt_lower:
+                return {"type": "joined_groups_yesterday", "params": {}}
+            else:
+                return {"type": "joined_groups_today", "params": {}}
+
+        # ========== 群组活跃度排行 ==========
+        if any(kw in prompt_lower for kw in ["活跃度排行", "活跃排行", "哪些群使用", "哪些群组使用", "活跃群组排行"]):
+            return {"type": "activity_ranking", "params": {}}
+
+        # ========== 今日有交易的群组 ==========
+        if any(kw in prompt_lower for kw in ["有交易的群", "交易过的群", "活跃群组", "今日活跃群", "哪些群使用了记账"]):
+            return {"type": "active_groups", "params": {}}
+
+        # ========== 今日交易最多的群组 ==========
+        if any(kw in prompt_lower for kw in ["交易最多", "收入最多", "入款最多群", "top群"]):
+            return {"type": "top_group", "params": {}}
+
+        # ========== 用户排行 ==========
+        if any(kw in prompt_lower for kw in ["入款最多的用户", "入款排行", "top用户", "最高入款"]):
+            return {"type": "top_users", "params": {"limit": 10}}
+
+        # ========== 今日使用记账的用户 ==========
+        if any(kw in prompt_lower for kw in ["使用记账的用户", "记账用户", "活跃用户"]):
+            return {"type": "active_users", "params": {}}
+
+        # ========== 时段分布 ==========
+        if any(kw in prompt_lower for kw in ["时段分布", "哪个时段", "小时分布"]):
+            return {"type": "hourly_distribution", "params": {}}
+
+        # ========== 分类入款占比 ==========
+        if any(kw in prompt_lower for kw in ["分类占比", "入款占比", "各分类占比"]):
+            return {"type": "category_percentage", "params": {}}
+
+        # ========== 最近7天趋势 ==========
+        if any(kw in prompt_lower for kw in ["最近7天", "7天趋势", "收入趋势", "走势"]):
+            return {"type": "weekly_trend", "params": {}}
+
+        # ========== 所有群组收入查询 ==========
+        all_groups_keywords = ["所有群", "全部群", "每个群", "各个群", "所有群组", "全部群组", "各个群组"]
+        if any(kw in prompt_lower for kw in all_groups_keywords):
+            date = self._extract_date_range(prompt)
+            return {"type": "today_all_income", "params": {"date": date}}
+
+        # ========== 本月总收入 ==========
+        if any(kw in prompt_lower for kw in ["本月总收入", "本月收入", "这个月收入"]):
+            return {"type": "month_total", "params": {}}
+
+        # ========== 大额交易 ==========
+        if any(kw in prompt_lower for kw in ["大额交易", "大额", "大笔"]):
+            return {"type": "large_transactions", "params": {"threshold": 5000}}
+
+        # ========== 待下发查询 ==========
+        if any(kw in prompt_lower for kw in ["未下发", "待下发", "pending", "待出款", "未出款", "还有多少"]):
+            return {"type": "pending_groups", "params": {}}
+
+        # ========== 群组账单查询 ==========
+        if "群" in prompt_lower and not has_address_keyword:
+            group_name = self._extract_group_name(prompt)
+            if group_name:
+                date_range = self._extract_date_range(prompt)
+                return {"type": "group_bill", "params": {"group_name": group_name, "date": date_range}}
+
+        # ========== 收入对比分析 ==========
+        if "对比" in prompt_lower:
+            group_name = self._extract_group_name(prompt)
+            period = self._extract_compare_period(prompt)
+            if group_name:
+                return {"type": "group_compare", "params": {"group_name": group_name, "period": period}}
+            else:
+                return {"type": "all_compare", "params": {"period": period}}
+
+        # ========== 指定分类下的群组 ==========
+        if "分类下的群组" in prompt_lower or "分类有哪些群" in prompt_lower:
+            category = self._extract_category(prompt)
+            if category:
+                return {"type": "groups_by_category", "params": {"category": category}}
+
+        # ========== 所有分类及群组列表 ==========
+        if any(kw in prompt_lower for kw in ["所有分类及群组", "每个分类下的群组", "分类群组列表"]):
+            return {"type": "all_groups_by_category", "params": {}}
+
+        # ========== 点位查询 ==========
+        country_names = ["中国", "美国", "日本", "韩国", "英国", "法国", "德国", "意大利", 
+                         "西班牙", "葡萄牙", "荷兰", "瑞士", "瑞典", "挪威", "丹麦", "芬兰",
+                         "俄罗斯", "澳大利亚", "新西兰", "加拿大", "巴西", "阿根廷", "墨西哥",
+                         "印度", "泰国", "越南", "新加坡", "马来西亚", "印尼", "菲律宾", "土耳其",
+                         "阿联酋", "沙特", "南非", "埃及", "希腊", "爱尔兰", "波兰", "捷克"]
+
+        if any(kw in prompt_lower for kw in ["点位", "最便宜", "性价比", "费率", "汇率"]):
+            if "最便宜" in prompt_lower:
+                country = self._extract_country(prompt, country_names)
+                return {"type": "point_cheapest", "params": {"country": country, "limit": 5}}
+            elif "比较" in prompt_lower:
+                countries = self._extract_two_countries(prompt, country_names)
+                if countries[0] and countries[1]:
+                    return {"type": "point_compare", "params": {"country_a": countries[0], "country_b": countries[1]}}
+            else:
+                country = self._extract_country(prompt, country_names)
+                if country:
+                    return {"type": "point_list", "params": {"country": country}}
+
+        # ========== 汇总查询 ==========
+        if "汇总" in prompt_lower or "总入款" in prompt_lower:
+            if "今天" in prompt_lower or "今日" in prompt_lower:
+                return {"type": "today_summary", "params": {}}
+
+        # ========== 记账情况查询 ==========
+        if any(kw in prompt_lower for kw in ["记账情况", "记账记录"]):
+            date_range = self._extract_date_range(prompt)
+            return {"type": "today_all_income", "params": {"date": date_range}}
+
+        return {"type": "chat", "params": {}}
+
+    def _extract_address_note(self, prompt: str) -> str:
+        """
+        提取地址备注名
+        支持格式：
+        - "查看三角国际地址今天的收入" -> "三角国际地址"
+        - "三角国际地址昨天收入" -> "三角国际地址"
+        - "查询今天三角国际地址收入" -> "三角国际地址"
+        """
+        # 移除日期关键词
+        date_keywords = ["今天", "昨天", "今日", "昨日", "本周", "上周", "本月", "上月", 
+                         "收入", "查询", "查看", "分析", "统计", "月度统计", "收支"]
+        clean_prompt = prompt
+        for kw in date_keywords:
+            clean_prompt = clean_prompt.replace(kw, "")
+
+        # 移除"地址"后缀
+        clean_prompt = clean_prompt.replace("地址", "")
+        clean_prompt = clean_prompt.strip()
+
+        if clean_prompt and len(clean_prompt) >= 2:
+            return clean_prompt
+
+        pattern = r'([\u4e00-\u9fa5a-zA-Z0-9]+)地址'
+        match = re.search(pattern, prompt)
+        if match:
+            return match.group(1)
+
+        return None
+
+    def _should_suggest_export(self, data: Dict) -> bool:
+        """判断是否应该提示用户可以导出详细账单"""
+        if data.get("income_count", 0) > 5 or data.get("expense_count", 0) > 5:
+            return True
+        if data.get("recent_income") and len(data.get("recent_income", [])) > 5:
+            return True
+        if data.get("groups") and len(data.get("groups", [])) > 10:
+            return True
+        return False
+
+    def _get_help_message(self) -> str:
+        """获取帮助信息 - 优化版，满足所有提问需求"""
+        return """🤖 **智能记账助手 - 功能说明**
+
+💡 **直接输入问题即可，我会自动识别！**
+
+📊 **记账**
+  `xxx群今天收入` - 查看今日收入
+  `xxx群昨天账单` - 查看昨日账单
+  `xxx群本周收入` - 查看本周账单
+  `xxx群本月账单` - 查看本月账单
+  `xxx群4月5日账单` - 查看指定日期账单
+  `xxx群4月3日到今天收入` - 查看日期范围
+
+• **所有群组统计**
+  `所有群今天收入` - 所有群今日收入
+  `所有群昨天收入` - 所有群昨日收入
+  `所有群本周收入` - 所有群本周收入
+  `所有群本月收入` - 所有群本月收入
+
+• **收入对比分析**
+  `分析xxx群昨天和今天收入对比` - 群组对比
+  `分析昨天和今天收入对比` - 全局对比
+  `分析本周和上周收入对比` - 周对比
+  `分析本月和上月收入对比` - 月对比
+
+• **待下发查询**
+  `是否有未下发`、`待下发USDT` - 查看待下发金额
+
+• **导出详细账单**
+  先查询账单，再说`导出详细账单` - 查看每笔交易明细
+
+💰 **地址监控**（支持备注名）
+  `查看XXX地址今天的收入` - 用备注名查询
+  `XXX地址昨天收入` - 用备注名查询
+  `查询今天XXX地址收入` - 用备注名查询
+  `查看XXX地址月度统计` - 月度统计
+
+• **通过地址查询**
+  `查询今天Txxxx...地址收入` - 用完整地址查询
+  `分析本周Txxxx...地址` - 周期统计
+
+👥 **操作员管理**
+• `操作员有哪些` - 查看操作员列表（含昵称、用户名、ID）
+
+📁 **群组管理**
+• `有哪些分类` - 查看所有群组分类
+• `今天新加入了哪些群组` - 今日新群组
+• `昨天新加入了哪些群组` - 昨日新群组
+• `本周新加入了哪些群组` - 本周新群组（含每天详情）
+• `本月新加入了哪些群组` - 本月新群组（含每天详情）
+• `4月5日新加入了哪些群组` - 指定日期
+• `群组活跃度排行` - 按交易笔数排行
+• `今天哪些群使用了记账功能` - 今日活跃群组
+• `今日交易最多的群组` - 收入最高群组
+• `查询中国分类下的群组` - 按分类查群组
+• `所有分类及群组列表` - 完整分类列表
+
+📈 **数据分析**
+• `今日入款最多的用户` - 用户排行
+• `今日使用记账的用户` - 活跃用户
+• `最近7天趋势` - 收入走势图
+• `查询时段分布` - 各时段收入
+• `各分类入款占比` - 分类统计
+• `本月总收入` - 本月汇总
+• `查询大额交易` - 大额提醒
+• `今天总入款和待下发` - 今日汇总
+
+🌍 **点位查询（Google Sheets）**
+• `德国最便宜的点位` - 最便宜点位
+• `美国有哪些点位` - 国家所有点位
+• `比较德国和美国点位` - 两国对比
+
+💡 **提示**：模糊匹配 | 5分钟上下文记忆 | 先查询后导出"""
+
+    def _extract_date(self, prompt: str) -> str:
+        """提取日期，如 4月5日"""
+        patterns = [
+            r'(\d{1,2})月(\d{1,2})日',
+            r'(\d{1,2})-(\d{1,2})',
+            r'(\d{1,2})/(\d{1,2})',
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, prompt)
+            if match:
+                month = int(match.group(1))
+                day = int(match.group(2))
+                now = datetime.now()
+                year = now.year
+                if month > now.month:
+                    year = now.year - 1
+                return f"{year}-{month:02d}-{day:02d}"
+        return None
+
+    def _extract_date_range(self, prompt: str) -> str:
+        """提取日期范围"""
+        prompt_lower = prompt.lower()
+
+        range_pattern = r'(\d{1,2})月(\d{1,2})日到今天'
+        match = re.search(range_pattern, prompt)
+        if match:
+            month = int(match.group(1))
+            day = int(match.group(2))
+            now = datetime.now()
+            year = now.year
+            if month > now.month:
+                year = now.year - 1
+            start_date = f"{year}-{month:02d}-{day:02d}"
+            end_date = now.strftime('%Y-%m-%d')
+            return f"{start_date}_to_{end_date}"
+
+        date = self._extract_date(prompt)
+        if date:
+            return date
+
+        if any(kw in prompt_lower for kw in ["今天", "今日"]):
+            return "today"
+        if any(kw in prompt_lower for kw in ["昨天", "昨日"]):
+            return "yesterday"
+        if "本周" in prompt_lower:
+            return "week"
+        if "本月" in prompt_lower:
+            return "month"
+        if "最近两天" in prompt_lower:
+            return "last2days"
+
+        return "today"
+
+    def _extract_compare_period(self, prompt: str) -> str:
+        """提取对比周期"""
+        prompt_lower = prompt.lower()
+
+        if "昨天和今天" in prompt_lower or "今日和昨日" in prompt_lower:
+            return "today_vs_yesterday"
+        if "本周和上周" in prompt_lower:
+            return "week_vs_lastweek"
+        if "本月和上一月" in prompt_lower or "本月和上月" in prompt_lower:
+            return "month_vs_lastmonth"
+
+        date = self._extract_date(prompt)
+        if date:
+            return f"date_{date}"
+
+        return "today_vs_yesterday"
+
+    def _extract_group_name(self, prompt: str) -> str:
+        """提取群组名称"""
+        date_keywords = ["今天", "昨天", "今日", "昨日", "本周", "上周", "本月", "上月", 
+                         "收入", "账单", "情况", "统计", "查询", "分析", "对比"]
+        clean_prompt = prompt
+        for kw in date_keywords:
+            clean_prompt = clean_prompt.replace(kw, "")
+
+        pattern1 = r'([^\s]+)群(?:组)?'
+        match = re.search(pattern1, clean_prompt)
+        if match:
+            name = match.group(1).strip()
+            if name and len(name) >= 2:
+                return name
+
+        pattern2 = r'([A-Za-z0-9]+\s+[^\s]+/[^\s]+)'
+        match = re.search(pattern2, clean_prompt)
+        if match:
+            return match.group(1).strip()
+
+        pattern3 = r'([A-Za-z0-9]+[\u4e00-\u9fa5]*)'
+        match = re.search(pattern3, clean_prompt)
+        if match:
+            name = match.group(1).strip()
+            if any(c.isdigit() for c in name) and len(name) >= 3:
+                return name
+
+        pattern4 = r'([\u4e00-\u9fa5]{2,8})'
+        match = re.search(pattern4, clean_prompt)
+        if match:
+            name = match.group(1).strip()
+            if name not in ["收入", "入款", "出款", "下发", "账单", "记账"]:
+                return name
+
+        return None
+
+    def _extract_category(self, prompt: str) -> str:
+        """提取分类名称"""
+        categories = ["中国", "美国", "日本", "韩国", "英国", "法国", "德国", "意大利", "未分类"]
+        for cat in categories:
+            if cat in prompt:
+                return cat
+        return None
+
+    def _extract_country(self, prompt: str, country_names: list) -> str:
+        """提取国家名称"""
+        for country in country_names:
+            if country in prompt:
+                return country
+        return None
+
+    def _extract_two_countries(self, prompt: str, country_names: list) -> tuple:
+        """提取两个国家"""
+        found = []
+        for country in country_names:
+            if country in prompt:
+                found.append(country)
+                if len(found) >= 2:
+                    break
+        return (found[0] if len(found) > 0 else None, found[1] if len(found) > 1 else None)
+
+    def _extract_address(self, prompt: str) -> str:
+        """提取TRC20地址"""
+        pattern = r'T[0-9A-Za-z]{33}'
+        match = re.search(pattern, prompt)
+        if match:
+            return match.group()
+        return None
+
+    async def _fetch_data(self, intent: Dict, data_provider) -> Dict:
+        """根据意图获取数据"""
+        intent_type = intent.get("type", "unknown")
+        params = intent.get("params", {})
+
+        # 操作员
+        if intent_type == "operators":
+            return data_provider.get_operators()
+
+        # 群组分类
+        if intent_type == "group_categories":
+            return data_provider.get_group_categories()
+
+        # 新加入群组
+        if intent_type == "joined_groups_today":
+            return data_provider.get_today_joined_groups()
+        if intent_type == "joined_groups_yesterday":
+            return data_provider.get_yesterday_joined_groups()
+        if intent_type == "joined_groups_weekly":
+            return data_provider.get_weekly_joined_groups()
+        if intent_type == "joined_groups_monthly":
+            return data_provider.get_monthly_joined_groups()
+        if intent_type == "joined_groups_by_date":
+            return data_provider.get_joined_groups_by_date(params.get("date"))
+
+        # 活跃度
+        if intent_type == "activity_ranking":
+            return data_provider.get_group_activity_ranking()
+        if intent_type == "active_groups":
+            return data_provider.get_today_active_groups()
+        if intent_type == "top_group":
+            return data_provider.get_today_top_group()
+
+        # 用户相关
+        if intent_type == "top_users":
+            return data_provider.get_today_top_users(params.get("limit", 10))
+        if intent_type == "active_users":
+            return data_provider.get_today_active_users()
+
+        # 数据分析
+        if intent_type == "hourly_distribution":
+            return data_provider.get_hourly_distribution()
+        if intent_type == "category_percentage":
+            return data_provider.get_category_income_percentage()
+        if intent_type == "weekly_trend":
+            return data_provider.get_weekly_trend()
+        if intent_type == "month_total":
+            return data_provider.get_month_total_income()
+        if intent_type == "large_transactions":
+            return data_provider.get_large_transactions(params.get("threshold", 5000))
+        if intent_type == "pending_groups":
+            return data_provider.get_pending_usdt_groups()
+        if intent_type == "today_summary":
+            return data_provider.get_today_summary()
+
+        # 所有群组收入
+        if intent_type == "today_all_income":
+            date = params.get("date", "today")
+            if date == "yesterday":
+                result = data_provider.get_yesterday_all_income()
+            elif date == "week":
+                result = data_provider.get_week_all_income()
+            elif date == "month":
+                result = data_provider.get_month_all_income()
+            else:
+                result = data_provider.get_today_all_income()
+
+            # 🔥 如果返回结果中有 summary，直接使用
+            if result.get("summary"):
+                return result
+            return result
+
+        # 待下发
+        if intent_type == "pending_groups":
+            result = data_provider.get_pending_usdt_groups()
+            # 🔥 如果返回结果中有 summary，直接使用
+            if result.get("summary"):
+                return result
+            return result
+
+        # 群组账单
+        if intent_type == "group_bill":
+            group_name = params.get("group_name", "")
+            date = params.get("date", "today")
+            if not group_name:
+                return {"error": "请指定群组名称"}
+            if date == "today":
+                return data_provider.get_group_today_bill(group_name)
+            elif date == "yesterday":
+                return data_provider.get_group_yesterday_bill(group_name)
+            elif date == "week":
+                return data_provider.get_group_week_bill(group_name)
+            elif date == "month":
+                return data_provider.get_group_month_bill(group_name)
+            elif "_to_" in date:
+                parts = date.split("_to_")
+                return data_provider.get_group_bill_range(group_name, parts[0], parts[1])
+            return data_provider.get_group_bill_by_date(group_name, date)
+
+        # 对比分析
+        if intent_type == "group_compare":
+            return data_provider.get_group_compare(params.get("group_name", ""), params.get("period", "today_vs_yesterday"))
+        if intent_type == "all_compare":
+            return data_provider.get_all_compare(params.get("period", "today_vs_yesterday"))
+
+        # 分类群组
+        if intent_type == "groups_by_category":
+            return data_provider.get_groups_by_category(params.get("category", ""))
+        if intent_type == "all_groups_by_category":
+            return data_provider.get_all_groups_by_category()
+
+        # 地址统计
+        if intent_type == "address_stats":
+            address = params.get("address", "")
+            note = params.get("note", "")
+            date = params.get("date", "today")
+
+            if not address and note:
+                from db import get_monitored_addresses
+                addresses = get_monitored_addresses()
+                for addr in addresses:
+                    if note in addr.get('note', '') or addr.get('note', '') in note:
+                        address = addr['address']
+                        break
+
+            if not address:
+                return {"error": f"未找到备注为「{note}」的监控地址" if note else "请指定地址"}
+
+            return data_provider.get_address_stats(address, date)
+
+        if intent_type == "address_monthly_stats":
+            address = params.get("address", "")
+            note = params.get("note", "")
+
+            if not address and note:
+                from db import get_monitored_addresses
+                addresses = get_monitored_addresses()
+                for addr in addresses:
+                    if note in addr.get('note', '') or addr.get('note', '') in note:
+                        address = addr['address']
+                        break
+
+            if not address:
+                return {"error": f"未找到备注为「{note}」的监控地址" if note else "请指定地址"}
+
+            return data_provider.get_address_monthly_stats(address)
+
+        # 点位查询
+        if intent_type == "point_cheapest":
+            from handlers.google_sheets import get_sheets_reader
+            sheets = get_sheets_reader()
+            if not sheets:
+                return {"error": "Google Sheets 未连接"}
+            return sheets.find_cheapest(params.get("country"), 5)
+
+        if intent_type == "point_list":
+            from handlers.google_sheets import get_sheets_reader
+            sheets = get_sheets_reader()
+            if not sheets:
+                return {"error": "Google Sheets 未连接"}
+            country = params.get("country")
+            points = sheets.get_all_points()
+            if country:
+                points = sheets.filter_by_country(points, country)
+            return {"country": country, "points": points, "count": len(points)}
+
+        if intent_type == "point_compare":
+            from handlers.google_sheets import get_sheets_reader
+            sheets = get_sheets_reader()
+            if not sheets:
+                return {"error": "Google Sheets 未连接"}
+            return sheets.compare_countries(params.get("country_a"), params.get("country_b"))
+
+        return {"error": "无法获取数据"}
+
+    async def _generate_natural_answer(self, question: str, intent: Dict, data: Dict) -> str:
+        """让 AI 用自然语言生成回答"""
+        if data.get("error"):
+            return f"❌ {data['error']}"
+        if data.get("message"):
+            return f"📭 {data['message']}"
+        if data.get("summary"):
+            return data["summary"]
+
+        data_summary = json.dumps(data, ensure_ascii=False, indent=2, default=str)
+        if len(data_summary) > 3000:
+            data_summary = data_summary[:3000] + "..."
 
         intent_type = intent.get("type", "unknown")
 
-        # 群组账单导出 - 使用 data_provider 中已有的格式化函数
+        # 🔥 基础规则：所有金额回答都遵守
+        base_rules = """
+金额格式规则：
+1. 人民币金额：数字后面跟"元"，例如：1000元
+2. USDT金额：数字后面跟"USDT"，例如：138 USDT
+3. 当同时显示两种货币时，格式为：数字元 = 数字 USDT，例如：1000元 = 138 USDT
+4. 不要说"人民币"三个字，不要说"折合"，不要说"美元"
+
+示例：
+- 正确：总收入 1000元 = 138 USDT
+- 正确：已下发 50 USDT
+- 正确：待下发 88 USDT
+- 错误：15013元USDT（不要连在一起）
+- 错误：1000元人民币
+- 错误：折合138美元
+"""
+
+        if intent_type == "operators":
+            system_prompt = "你是记账助手，用简洁的语言列出操作员信息，包括昵称、用户名和ID。" + base_rules
+        elif intent_type == "group_bill":
+            system_prompt = "你是记账助手，用简洁的语言总结群组的账单情况，包括收入、支出和待下发金额。" + base_rules
+        elif intent_type == "today_all_income":
+            system_prompt = "你是记账助手，用简洁的语言总结所有群组的收入情况。" + base_rules
+        elif intent_type == "pending_groups":
+            system_prompt = "你是记账助手，用简洁的语言告诉用户哪些群组有待下发的USDT。" + base_rules
+        elif intent_type == "top_users":
+            system_prompt = "你是记账助手，用简洁的语言列出今日入款最多的用户。" + base_rules
+        elif intent_type == "weekly_trend":
+            system_prompt = "你是记账助手，用简洁的语言分析最近7天的收入趋势。" + base_rules
+        elif intent_type == "point_cheapest":
+            system_prompt = "你是点位分析助手，用简洁的语言介绍最便宜的点位信息。" + base_rules
+        elif intent_type == "address_stats":
+            system_prompt = "你是记账助手，用简洁的语言总结地址的收支情况，包括收到、转出、净收入和余额。"
+        else:
+            system_prompt = "你是记账助手，根据提供的数据，用简洁、准确的语言回答用户的问题。" + base_rules
+
+        prompt = f"""用户问题：{question}
+
+查询到的数据：
+{data_summary}
+
+请根据以上数据，用简洁、自然的语言回答用户的问题。不要输出JSON格式，不要使用Markdown代码块，直接输出回答内容。"""
+
+        return await self.chat(prompt, system_prompt)
+
+    async def _export_raw_bill(self, question: str, data: Dict, intent: Dict) -> str:
+        """导出原始账单"""
+        intent_type = intent.get("type", "unknown")
+
         if intent_type == "group_bill":
             return self._format_group_bill_export(data)
-
-        # 地址统计导出
         elif intent_type == "address_stats":
             return self._format_address_export(data)
-
-        # 其他类型 - 直接返回原始数据
+        elif intent_type == "today_all_income":
+            return self._format_all_income_export(data)
         else:
             return f"📊 查询结果：\n```json\n{json.dumps(data, ensure_ascii=False, indent=2, default=str)}\n```"
 
-
     def _format_group_bill_export(self, data: Dict) -> str:
-        """格式化群组账单导出 - 直接输出原始账单"""
-
+        """格式化群组账单导出"""
         if data.get("error"):
             return f"❌ {data['error']}"
-
         if data.get("message"):
             return f"📭 {data['message']}"
 
@@ -147,7 +871,6 @@ class AIClient:
         result += f"💱 汇率：1 USDT = {exchange_rate} 元\n"
         result += f"📝 单笔费用：{per_transaction_fee} 元\n\n"
 
-        # 入款记录
         income_records = data.get("recent_income", [])
         if income_records:
             result += f"💰 **入款记录（{len(income_records)}笔）**\n"
@@ -163,7 +886,6 @@ class AIClient:
                 result += f"{time_str:<8} {amount_cny:<12.2f} {amount_usdt:<10.2f} {user:<15} {category}\n"
             result += "```\n\n"
 
-        # 出款记录
         expense_records = data.get("recent_expense", [])
         if expense_records:
             result += f"📤 **出款记录（{len(expense_records)}笔）**\n"
@@ -177,7 +899,6 @@ class AIClient:
                 result += f"{time_str:<8} {amount_usdt:<10.2f} {user:<15}\n"
             result += "```\n\n"
 
-        # 分类统计
         categories = data.get("categories", {})
         if categories:
             result += f"📁 **入款分组统计**\n"
@@ -185,7 +906,6 @@ class AIClient:
                 result += f"  • {cat}：{cat_data.get('cny', 0):.2f}元 = {cat_data.get('usdt', 0):.2f} USDT（{cat_data.get('count', 0)}笔）\n"
             result += "\n"
 
-        # 汇总
         result += f"📊 **汇总**\n"
         result += f"  • 总入款：{data.get('income_cny', 0):.2f}元 = {data.get('income_usdt', 0):.2f} USDT（{data.get('income_count', 0)}笔）\n"
         result += f"  • 总出款：{data.get('expense_usdt', 0):.2f} USDT（{data.get('expense_count', 0)}笔）\n"
@@ -193,81 +913,20 @@ class AIClient:
 
         return result
 
-    def _format_point_answer(self, question: str, data: Dict) -> str:
-        """格式化点位查询的回答"""
-        if not data.get("success"):
-            return f"❌ {data.get('error', '查询失败')}"
-
-        country = data.get("country", "全部")
-        cheapest = data.get("cheapest")
-        ranking = data.get("ranking", [])
-        comparisons = data.get("comparisons", [])
-
-        if not cheapest:
-            return f"📭 未找到{country}国家的点位数据"
-
-        answer = f"📊 **{country}最便宜点位分析**\n\n"
-
-        answer += f"🏆 **最便宜点位**\n"
-        answer += f"• 昵称：{cheapest.get('昵称', '未知')}\n"
-        answer += f"• 公群：{cheapest.get('公群', '未知')}\n"
-        answer += f"• 国家：{cheapest.get('国家', '未知')}\n"
-        answer += f"• 费率：{cheapest.get('费率', 0)}%\n"
-        answer += f"• 汇率：{cheapest.get('汇率', 0)}\n"
-        if cheapest.get('合作方'):
-            answer += f"• 合作方：{cheapest['合作方']}\n"
-        if cheapest.get('料性'):
-            answer += f"• 料性：{cheapest['料性']}\n"
-        if cheapest.get('卡/钱包'):
-            answer += f"• 卡/钱包：{cheapest['卡/钱包']}\n"
-        if cheapest.get('进算拖算'):
-            answer += f"• 进算拖算：{cheapest['进算拖算']}\n"
-        if cheapest.get('业务员'):
-            answer += f"• 业务员：{cheapest['业务员']}\n"
-        if cheapest.get('日期'):
-            answer += f"• 日期：{cheapest['日期']}\n"
-        answer += "\n"
-
-        if len(ranking) > 1:
-            answer += f"📋 **性价比排行 TOP{len(ranking)}**\n"
-            for item in ranking:
-                if item.get('是否最便宜'):
-                    continue
-                answer += f"• {item.get('昵称', '未知')}：费率{item.get('费率', 0)}%，汇率{item.get('汇率', 0)}，比最便宜{self._format_ratio_diff(item.get('比值', 1))}\n"
-            answer += "\n"
-
-        if comparisons:
-            answer += f"🔍 **对比分析**\n"
-            for comp in comparisons:
-                answer += f"• {comp.get('name', '未知')}：{comp.get('比较结果', '')}\n"
-            answer += "\n"
-
-        answer += f"📊 共找到 {data.get('total_count', 0)} 个点位"
-        return answer
-
-    def _format_ratio_diff(self, ratio: float) -> str:
-        """格式化比值差异"""
-        if ratio < 1:
-            return f"便宜 {(1-ratio)*100:.1f}%"
-        else:
-            return f"贵 {(ratio-1)*100:.1f}%"
-
-
     def _format_address_export(self, data: Dict) -> str:
         """格式化地址导出"""
-
         if data.get("error"):
             return f"❌ {data['error']}"
 
         address = data.get("address", "未知地址")
         note = data.get("note", "")
-        date = data.get("date", "未知日期")
+        period = data.get("period", "今日")
 
         result = f"💰 **监控地址收支详情**\n\n"
         result += f"📌 地址：`{address}`\n"
         if note:
             result += f"📝 备注：{note}\n"
-        result += f"📅 日期：{date}\n\n"
+        result += f"📅 周期：{period}\n\n"
 
         result += f"📊 **统计**\n"
         result += f"  • 收到：{data.get('received_usdt', 0):.2f} USDT\n"
@@ -278,381 +937,27 @@ class AIClient:
 
         return result
 
-    async def _identify_intent(self, prompt: str) -> Dict:
-        """识别用户意图，确定需要什么数据"""
-
-        intent_prompt = f"""分析用户问题，判断需要查询什么数据。
-
-用户问题：{prompt}
-
-重要规则：
-1. 如果用户提到"备注为XXX"、"备注XXX"、"叫XXX的地址"、"XXX地址"，说明用户想查询监控地址
-2. 此时 type 应该是 "address_stats"
-3. params 中应该用 "address_note" 字段记录备注名称，而不是 "address"
-   例如："查询备注为测试的监控地址" -> {{"type": "address_stats", "params": {{"address_note": "测试", "period": "today"}}}}
-
-可选的数据类型：
-- group_bill: 查询某个群组的账单（需要 group_name，可能指定 date）
-- today_all_income: 查询所有群组今日收入情况
-- group_count: 查询群组数量
-- group_categories: 查询群组分类
-- today_joined: 查询今天新加入的群组
-- monthly_joined: 查询本月每天新加入的群组
-- top_users: 查询今日入款最多的用户
-- active_users: 查询今日使用记账的用户
-- active_groups: 查询今日有交易的群组
-- top_group: 查询今日交易最多的群组
-- activity_ranking: 查询群组活跃度排行
-- pending_groups: 查询有待下发的群组
-- large_transactions: 查询大额交易
-- hourly_distribution: 查询时段分布
-- week_comparison: 查询本周vs上周对比
-- month_total: 查询本月总收入
-- category_percentage: 查询各分类入款占比
-- weekly_trend: 查询最近7天趋势
-- monitored_addresses: 查询监控地址列表
-- address_stats: 查询某个地址的收支统计（用 address_note 记录备注名称，或用 address 记录完整地址）
-- operators: 查询操作员列表
-- group_config: 查询群组配置（费率/汇率）
-- groups_by_category: 查询某个分类下的所有群组名称
-- all_groups_by_category: 获取所有分类及其下的群组列表
-- chat: 普通对话，不需要数据
-- unknown: 无法识别
-
-🆕 **点位查询（Google Sheets）**：
-- point_cheapest: 查询某个国家最便宜的点位/群组
-- point_list: 查询某个国家的所有点位
-- point_compare: 比较两个点位的价格
-
-返回 JSON 格式：
-{{"type": "数据类型", "params": {{"key": "value"}}}}
-
-示例：
-- "测试5群今天收入多少" -> {{"type": "group_bill", "params": {{"group_name": "测试5群", "date": "today"}}}}
-- "测试5群昨天账单" -> {{"type": "group_bill", "params": {{"group_name": "测试5群", "date": "yesterday"}}}}
-- "今天哪个群组收入最多" -> {{"type": "top_group", "params": {{}}}}
-- "最近一周收入趋势" -> {{"type": "weekly_trend", "params": {{}}}}
-- "操作员有哪些" -> {{"type": "operators", "params": {{}}}}
-- "查询备注为测试的监控地址今天的收支情况" -> {{"type": "address_stats", "params": {{"address_note": "测试", "period": "today"}}}}
-- "监控地址列表" -> {{"type": "monitored_addresses", "params": {{}}}}
-- "中国分类下有哪些群" -> {{"type": "groups_by_category", "params": {{"category": "中国"}}}}
-- "所有群的分类下分别有哪些群组" -> {{"type": "all_groups_by_category", "params": {{}}}}
-- "德国哪个群组最便宜" -> {{"type": "point_cheapest", "params": {{"country": "德国", "limit": 5}}}}
-- "美国最便宜的点位" -> {{"type": "point_cheapest", "params": {{"country": "美国", "limit": 5}}}}
-- "日本有哪些点位" -> {{"type": "point_list", "params": {{"country": "日本"}}}}
-- "比较德国和美国的点位" -> {{"type": "point_compare", "params": {{"country_a": "德国", "country_b": "美国"}}}}
-- "所有国家最便宜的点位" -> {{"type": "point_cheapest", "params": {{"country": null, "limit": 10}}}}
-- "你好" -> {{"type": "chat", "params": {{}}}}
-
-只返回 JSON，不要其他内容。"""
-
-        try:
-            response = await self.chat(intent_prompt, "你是一个意图识别助手，只返回 JSON")
-            # 提取 JSON
-            start = response.find('{')
-            end = response.rfind('}') + 1
-            if start != -1 and end != 0:
-                json_str = response[start:end]
-                return json.loads(json_str)
-        except Exception as e:
-            print(f"[DEBUG] 意图识别失败: {e}")
-
-        return {"type": "unknown", "params": {}}
-
-    async def _fetch_data(self, intent: Dict, data_provider) -> Dict:
-        """根据意图获取数据"""
-
-        intent_type = intent.get("type", "unknown")
-        params = intent.get("params", {})
-
-        # ========== 🆕 点位查询 ==========
-        if intent_type == "point_cheapest":
-            from handlers.google_sheets import get_sheets_reader
-
-            sheets = get_sheets_reader()
-            if not sheets:
-                return {"error": "Google Sheets 未连接，请检查配置"}
-
-            country = params.get("country")
-            limit = params.get("limit", 5)
-
-            result = sheets.find_cheapest(country, limit)
-            return result
-
-        elif intent_type == "point_list":
-            from handlers.google_sheets import get_sheets_reader
-
-            sheets = get_sheets_reader()
-            if not sheets:
-                return {"error": "Google Sheets 未连接，请检查配置"}
-
-            country = params.get("country")
-            points = sheets.get_all_points()
-
-            if country:
-                points = sheets.filter_by_country(points, country)
-
-            return {
-                "success": True,
-                "country": country or "全部",
-                "total_count": len(points),
-                "points": [
-                    {
-                        "公群": p["公群"],
-                        "昵称": p["昵称"],
-                        "国家": p["国家"],
-                        "费率": p["费率"],
-                        "汇率": p["汇率"],
-                        "合作方": p["合作方"],
-                        "料性": p["料性"]
-                    }
-                    for p in points[:20]  # 限制返回数量
-                ]
-            }
-
-        elif intent_type == "point_compare":
-            from handlers.google_sheets import get_sheets_reader
-
-            sheets = get_sheets_reader()
-            if not sheets:
-                return {"error": "Google Sheets 未连接，请检查配置"}
-
-            country_a = params.get("country_a")
-            country_b = params.get("country_b")
-
-            points = sheets.get_all_points()
-            points_a = sheets.filter_by_country(points, country_a) if country_a else []
-            points_b = sheets.filter_by_country(points, country_b) if country_b else []
-
-            # 找各自最便宜的
-            cheapest_a = min(points_a, key=lambda x: x["汇率"] + x["费率"]) if points_a else None
-            cheapest_b = min(points_b, key=lambda x: x["汇率"] + x["费率"]) if points_b else None
-
-            ratio = None
-            if cheapest_a and cheapest_b:
-                ratio = sheets.calculate_ratio(cheapest_a, cheapest_b)
-
-            return {
-                "success": True,
-                "country_a": country_a,
-                "country_b": country_b,
-                "cheapest_a": {
-                    "昵称": cheapest_a["昵称"] if cheapest_a else None,
-                    "费率": cheapest_a["费率"] if cheapest_a else None,
-                    "汇率": cheapest_a["汇率"] if cheapest_a else None
-                } if cheapest_a else None,
-                "cheapest_b": {
-                    "昵称": cheapest_b["昵称"] if cheapest_b else None,
-                    "费率": cheapest_b["费率"] if cheapest_b else None,
-                    "汇率": cheapest_b["汇率"] if cheapest_b else None
-                } if cheapest_b else None,
-                "比值": round(ratio, 4) if ratio else None,
-                "结论": f"{country_a}比{country_b}{'便宜' if ratio and ratio < 1 else '贵'}" if ratio else "无法比较"
-            }
-
-        # 群组账单
-        if intent_type == "group_bill":
-            group_name = params.get("group_name", "")
-            date = params.get("date", "today")
-
-            if not group_name:
-                return {"error": "请指定群组名称"}
-
-            if date == "today":
-                return data_provider.get_group_today_bill(group_name)
-            elif date == "yesterday":
-                from datetime import datetime, timedelta
-                from handlers.data_provider import BEIJING_TZ
-                yesterday = (datetime.now(BEIJING_TZ) - timedelta(days=1)).strftime('%Y-%m-%d')
-                return data_provider.get_group_bill_by_date(group_name, yesterday)
-            else:
-                return data_provider.get_group_bill_by_date(group_name, date)
-
-        # 今日所有群组收入
-        elif intent_type == "today_all_income":
-            return data_provider.get_today_all_income()
-
-        # 群组数量
-        elif intent_type == "group_count":
-            return data_provider.get_group_count()
-
-        # 群组分类
-        elif intent_type == "group_categories":
-            return data_provider.get_group_categories()
-
-        # 今日新加入群组
-        elif intent_type == "today_joined":
-            return data_provider.get_today_joined_groups()
-
-        # 本月每天新加入
-        elif intent_type == "monthly_joined":
-            return data_provider.get_monthly_joined_groups()
-
-        # 今日入款最多的用户
-        elif intent_type == "top_users":
-            limit = params.get("limit", 10)
-            return data_provider.get_today_top_users(limit)
-
-        # 今日活跃用户
-        elif intent_type == "active_users":
-            return data_provider.get_today_active_users()
-
-        # 今日活跃群组
-        elif intent_type == "active_groups":
-            return data_provider.get_today_active_groups()
-
-        # 今日交易最多的群组
-        elif intent_type == "top_group":
-            return data_provider.get_today_top_group()
-
-        # 群组活跃度排行
-        elif intent_type == "activity_ranking":
-            return data_provider.get_group_activity_ranking()
-
-        # 待下发群组
-        elif intent_type == "pending_groups":
-            return data_provider.get_pending_usdt_groups()
-
-        # 大额交易
-        elif intent_type == "large_transactions":
-            threshold = params.get("threshold", 5000)
-            return data_provider.get_large_transactions(threshold)
-
-        # 时段分布
-        elif intent_type == "hourly_distribution":
-            return data_provider.get_hourly_distribution()
-
-        # 周对比
-        elif intent_type == "week_comparison":
-            return data_provider.get_week_comparison()
-
-        # 本月总收入
-        elif intent_type == "month_total":
-            return data_provider.get_month_total_income()
-
-        # 分类占比
-        elif intent_type == "category_percentage":
-            return data_provider.get_category_income_percentage()
-
-        # 周趋势
-        elif intent_type == "weekly_trend":
-            return data_provider.get_weekly_trend()
-
-        # 监控地址列表
-        elif intent_type == "monitored_addresses":
-            return data_provider.get_monitored_addresses_list()
-
-        # 地址统计
-        elif intent_type == "address_stats":
-            address = params.get("address", "")
-            address_note = params.get("address_note", "")  # 🔥 新增：支持 address_note
-            period = params.get("period", "today")
-
-            # 🔥 优先使用 address_note
-            if address_note:
-                from db import get_monitored_addresses
-                addresses = get_monitored_addresses()
-                found_addr = None
-                for a in addresses:
-                    note = a.get('note', '')
-                    if note and (address_note == note or address_note in note or note in address_note):
-                        found_addr = a['address']
-                        break
-
-                if found_addr:
-                    address = found_addr
-                    print(f"[DEBUG] 备注「{address_note}」对应地址: {address}")
-                else:
-                    return {"error": f"未找到备注为「{address_note}」的监控地址"}
-
-            # 如果没有 address_note，尝试从 address 字段提取备注
-            if not address and params.get("address"):
-                raw_address = params.get("address", "")
-                if any('\u4e00' <= c <= '\u9fff' for c in raw_address):
-                    import re
-                    note_match = re.search(r'备注[为:：]?\s*["\']?([^"\'，,]+)', raw_address)
-                    if not note_match:
-                        note_match = re.search(r'([^"\'，,]{2,})的?地址', raw_address)
-                    if note_match:
-                        address_note = note_match.group(1).strip()
-                        from db import get_monitored_addresses
-                        addresses = get_monitored_addresses()
-                        for a in addresses:
-                            if a.get('note', '') == address_note:
-                                address = a['address']
-                                break
-                        if not address:
-                            return {"error": f"未找到备注为「{address_note}」的监控地址"}
-
-            if not address:
-                return {"error": "请指定地址或备注名称"}
-
-            # 正常查询
-            if period == "today":
-                return data_provider.get_address_today_stats(address)
-            else:
-                return data_provider.get_address_stats_by_period(address, period)
-
-        # 操作员列表
-        elif intent_type == "operators":
-            return data_provider.get_operators()
-
-        # 群组配置
-        elif intent_type == "group_config":
-            group_name = params.get("group_name", None)
-            return data_provider.get_group_config(group_name)
-
-        # 🔥 新增：查询指定分类下的群组列表
-        elif intent_type == "groups_by_category":
-            category = params.get("category", "")
-            if not category:
-                return {"error": "请指定分类名称"}
-            return data_provider.get_groups_by_category(category)
-
-        elif intent_type == "all_groups_by_category":
-            return data_provider.get_all_groups_by_category()
-
-        # 普通对话
-        elif intent_type == "chat":
-            return {"type": "chat"}
-
-        else:
-            return {"error": f"无法识别的问题类型: {intent_type}"}
-
-    async def _generate_answer(self, question: str, data: Dict, intent: Dict) -> str:
-        """让 AI 根据数据生成回答"""
-
-        # 如果是普通对话
-        if data.get("type") == "chat":
-            return await self.chat(question)
-
-        # 如果有错误
+    def _format_all_income_export(self, data: Dict) -> str:
+        """格式化所有群组收入导出"""
         if data.get("error"):
             return f"❌ {data['error']}"
 
-        # 🆕 点位查询结果格式化
-        if data.get("success") is not None and "cheapest" in data:
-            return self._format_point_answer(question, data)
+        date = data.get("date", "今日")
+        groups = data.get("groups", [])
+        total_income = data.get("total_income_usdt", 0)
 
-        analysis_prompt = f"""用户问题：{question}
+        result = f"📊 **{date}所有群组收入明细**\n\n"
+        result += f"💰 总收入：{total_income:.2f} USDT\n"
+        result += f"📈 活跃群组：{len(groups)} 个\n\n"
+        result += "📋 **详细列表**：\n"
 
-查询到的数据：
-{json.dumps(data, ensure_ascii=False, indent=2, default=str)}
+        for g in groups:
+            result += f"  • {g['name']}：{g['income_usdt']:.2f} USDT ({g['income_count']}笔)\n"
 
-请根据这些数据回答用户的问题。要求：
-1. 用自然、友好的语言回答
-2. 从数据中提取关键信息
-3. 如果数据中包含多个项目，进行对比分析
-4. 回答要简洁明了
-5. 可以适当添加表情符号
-6. 不要输出 JSON 格式
-
-回答："""
-
-        return await self.chat(analysis_prompt, "你是记账助手，根据数据回答用户问题")
+        return result
 
     async def _call_api(self, config: Dict, prompt: str, system_prompt: str) -> str:
-        """调用单个 API"""
+        """调用 API"""
         name = config["name"]
         url = config["url"]
         api_key = config["api_key"]
@@ -670,7 +975,7 @@ class AIClient:
                     {"role": "user", "content": prompt}
                 ],
                 "stream": False,
-                "max_tokens": 2000,  # 增加 token 限制
+                "max_tokens": 2000,
                 "temperature": 0.7
             }
         elif name == "阿里云通义":
@@ -684,7 +989,7 @@ class AIClient:
                     ]
                 },
                 "parameters": {
-                    "max_tokens": 2000,  # 增加 token 限制
+                    "max_tokens": 2000,
                     "temperature": 0.7
                 }
             }
