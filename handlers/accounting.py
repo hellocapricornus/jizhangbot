@@ -658,6 +658,33 @@ class AccountingManager:
         """获取指定日期的所有记录"""
         return self._get_records_by_condition(group_id, date=date_str)
 
+    def get_total_pending_stats(self, group_id: str) -> Dict:
+        """获取群组所有历史账单的待下发总额（用于「是否有未下发」查询）"""
+        try:
+            with self._get_conn() as conn:
+                c = conn.cursor()
+                c.execute("""
+                    SELECT 
+                        SUM(CASE WHEN record_type = 'income' THEN amount_usdt ELSE 0 END) as total_income,
+                        SUM(CASE WHEN record_type = 'expense' THEN amount_usdt ELSE 0 END) as total_expense
+                    FROM accounting_records
+                    WHERE group_id = ?
+                """, (group_id,))
+                row = c.fetchone()
+
+                total_income_usdt = row[0] or 0
+                total_expense_usdt = row[1] or 0
+                pending_usdt = total_income_usdt - total_expense_usdt
+
+                return {
+                    'income_usdt': total_income_usdt,
+                    'expense_usdt': total_expense_usdt,
+                    'pending_usdt': pending_usdt if pending_usdt > 0 else 0
+                }
+        except Exception as e:
+            logger.error(f"获取总待下发统计失败: {e}")
+            return {'income_usdt': 0, 'expense_usdt': 0, 'pending_usdt': 0}
+
     def get_current_stats(self, group_id: str) -> Dict:
         """获取当前会话统计"""
         try:
@@ -2339,38 +2366,46 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
     # ========== 3. AI 对话（需要管理员或操作员权限） ==========
     bot_username = context.bot.username
-    if f"@{bot_username}" in text:
-        question = text.replace(f"@{bot_username}", "").strip()
-        if question:
-            # 权限检查
-            if not is_authorized(message.from_user.id):
-                try:
-                    await context.bot.send_message(
-                        chat_id=message.chat_id,
-                        text="❌ AI 对话功能仅限管理员和操作员使用\n\n如需使用，请联系 @ChinaEdward 申请权限",
-                        reply_to_message_id=message.message_id  # 引用原消息
-                    )
-                except Exception as e:
-                    print(f"[ERROR] 发送权限提示失败: {e}")
-                    # 如果失败，尝试简单回复
-                    await message.reply_text("❌ 无权限使用 AI 对话")
-                return
 
-            # 有权限，继续处理
-            thinking_msg = await message.reply_text("🤔 思考中...")
-            from handlers.ai_client import get_ai_client
-            ai_client = get_ai_client()
-            
-            # 使用工具调用版本
-            reply = await ai_client.chat_with_data(
-                prompt=question,
-                group_id=str(chat.id),
-                user_id=message.from_user.id
-            )
-            
-            if len(reply) > 4000:
-                reply = reply[:4000] + "...\n\n(回复过长已截断)"
-            await thinking_msg.edit_text(reply)
+    # 🔥 优化：只有当消息以 @机器人 开头或包含机器人用户名时才触发 AI
+    is_at_bot = text.startswith(f"@{bot_username}") or f"@{bot_username}" in text
+
+    if is_at_bot:
+        # 移除 @机器人 部分
+        question = text.replace(f"@{bot_username}", "").strip()
+
+        # 如果去掉 @机器人 后没有内容，不处理
+        if not question:
+            return
+
+        # 权限检查
+        if not is_authorized(message.from_user.id):
+            try:
+                await context.bot.send_message(
+                    chat_id=message.chat_id,
+                    text="❌ AI 对话功能仅限管理员和操作员使用\n\n如需使用，请联系 @ChinaEdward 申请权限",
+                    reply_to_message_id=message.message_id
+                )
+            except Exception as e:
+                print(f"[ERROR] 发送权限提示失败: {e}")
+                await message.reply_text("❌ 无权限使用 AI 对话")
+            return
+
+        # 有权限，继续处理
+        thinking_msg = await message.reply_text("🤔 思考中...")
+        from handlers.ai_client import get_ai_client
+        ai_client = get_ai_client()
+
+        # 使用工具调用版本
+        reply = await ai_client.chat_with_data(
+            prompt=question,
+            group_id=str(chat.id),
+            user_id=message.from_user.id
+        )
+
+        if len(reply) > 4000:
+            reply = reply[:4000] + "...\n\n(回复过长已截断)"
+        await thinking_msg.edit_text(reply)
         return
 
 async def handle_calculator(update: Update, context: ContextTypes.DEFAULT_TYPE):
