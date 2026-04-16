@@ -457,6 +457,28 @@ async def input_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
+        # 🔥 判断是否是记账指令（这些不应该走 AI）
+        accounting_keywords = ['+', '-', '下发', '设置手续费', '设置汇率', '设置单笔费用', 
+                               '结束账单', '今日总', '总', '当前账单', '查询账单', 
+                               '清理账单', '清空账单', '清理总账单', '移除上一笔', '删除上一笔']
+        is_accounting_cmd = any(text.startswith(kw) for kw in accounting_keywords)
+
+        if is_accounting_cmd:
+            print(f"[DEBUG] 检测到记账指令，跳过 AI 回复")
+            return
+
+        # 🔥 判断是否是互转查询格式
+        transfer_pattern = r'^T[0-9A-Za-z]{33}\s+T[0-9A-Za-z]{33}$'
+        if re.match(transfer_pattern, text):
+            print(f"[DEBUG] 检测到互转查询地址格式，跳过 AI 回复")
+            return
+
+        # 🔥 判断是否是纯数字计算（如 100+200）
+        calc_pattern = r'^[\d\s\+\-\*\/\%\(\)\.]+$'
+        if re.match(calc_pattern, text) and len(text) < 50:
+            print(f"[DEBUG] 检测到计算表达式，跳过 AI 回复")
+            return
+
         thinking_msg = await update.message.reply_text("🤔 思考中...")
 
         try:
