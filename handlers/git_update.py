@@ -1,7 +1,3 @@
-# 备份原文件
-cp /root/telegram-bot-accounting/handlers/git_update.py /root/telegram-bot-accounting/handlers/git_update.py.bak
-
-# 修改 restart_bot 函数使用 systemctl
 cat > /root/telegram-bot-accounting/handlers/git_update.py << 'EOF'
 import subprocess
 import os
@@ -37,7 +33,6 @@ def restart_bot():
     try:
         print(f"[重启] 正在重启机器人...")
         
-        # 使用 systemctl 重启
         result = subprocess.run(
             ['systemctl', 'restart', 'telegram-bot'],
             capture_output=True,
@@ -50,7 +45,6 @@ def restart_bot():
             sys.exit(0)
         else:
             print(f"[重启] systemctl 失败: {result.stderr}")
-            # 降级方案：手动重启
             subprocess.run(['pkill', '-f', 'python3.*main.py'])
             time.sleep(2)
             subprocess.Popen(
@@ -62,7 +56,6 @@ def restart_bot():
             sys.exit(0)
     except Exception as e:
         print(f"[重启] 重启失败: {e}")
-        # 降级方案
         subprocess.run(['pkill', '-f', 'python3.*main.py'])
         time.sleep(2)
         subprocess.Popen(
@@ -297,9 +290,3 @@ def get_git_handlers():
         CommandHandler("gitbranch", git_branch),
     ]
 EOF
-
-# 重启 bot
-sudo systemctl restart telegram-bot
-
-# 查看状态
-sudo systemctl status telegram-bot
