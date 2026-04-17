@@ -557,7 +557,7 @@ async def bc_execute_batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     for i, group in enumerate(batch):
         gid = group["id"]
-        delay = random.uniform(0.2, 0.5)
+        delay = random.uniform(0.5, 1.5)
         await asyncio.sleep(delay)
 
         try:
@@ -700,10 +700,10 @@ async def execute_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 根据群组数量动态调整
     if total > 500:
-        delay_range = (0.2, 0.5)
+        delay_range = (0.5, 1.0)
         batch_size = 50
     else:
-        delay_range = (0.3, 0.6)
+        delay_range = (0.8, 1.5)
         batch_size = 20
 
     for i, gid in enumerate(target_ids):
