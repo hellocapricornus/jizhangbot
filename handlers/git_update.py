@@ -1,3 +1,7 @@
+# 备份原文件
+cp /root/telegram-bot-accounting/handlers/git_update.py /root/telegram-bot-accounting/handlers/git_update.py.bak
+
+# 修改 restart_bot 函数使用 systemctl
 cat > /root/telegram-bot-accounting/handlers/git_update.py << 'EOF'
 import subprocess
 import os
@@ -10,7 +14,7 @@ from config import OWNER_ID
 
 # 默认的远程仓库和分支
 DEFAULT_REMOTE = "origin"
-DEFAULT_BRANCH = "master"
+DEFAULT_BRANCH = "main"
 
 def get_git_root():
     """获取 git 仓库根目录"""
@@ -29,7 +33,7 @@ def get_git_root():
 
 
 def restart_bot():
-    """重启机器人 - 使用 systemctl restart"""
+    """重启机器人 - 使用 systemctl"""
     try:
         print(f"[重启] 正在重启机器人...")
         
@@ -47,7 +51,7 @@ def restart_bot():
         else:
             print(f"[重启] systemctl 失败: {result.stderr}")
             # 降级方案：手动重启
-            subprocess.run(['pkill', '-f', 'python3 main.py'])
+            subprocess.run(['pkill', '-f', 'python3.*main.py'])
             time.sleep(2)
             subprocess.Popen(
                 ['nohup', 'python3', 'main.py'],
@@ -59,7 +63,7 @@ def restart_bot():
     except Exception as e:
         print(f"[重启] 重启失败: {e}")
         # 降级方案
-        subprocess.run(['pkill', '-f', 'python3 main.py'])
+        subprocess.run(['pkill', '-f', 'python3.*main.py'])
         time.sleep(2)
         subprocess.Popen(
             ['nohup', 'python3', 'main.py'],
@@ -293,3 +297,9 @@ def get_git_handlers():
         CommandHandler("gitbranch", git_branch),
     ]
 EOF
+
+# 重启 bot
+sudo systemctl restart telegram-bot
+
+# 查看状态
+sudo systemctl status telegram-bot
