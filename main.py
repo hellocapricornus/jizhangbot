@@ -362,7 +362,7 @@ async def input_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理私聊的文本输入"""
     from datetime import datetime, timedelta
     import re
-
+    
     chat = update.effective_chat
     print(f"[DEBUG] ========== input_router 开始 ==========")
     print(f"[DEBUG] 聊天类型: {chat.type}")
@@ -455,28 +455,6 @@ async def input_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "❌ AI 对话功能仅限管理员和操作员使用\n\n"
                 "如需使用，请联系 @ChinaEdward 申请权限"
             )
-            return
-
-        # 🔥 判断是否是记账指令（这些不应该走 AI）
-        accounting_keywords = ['+', '-', '下发', '设置手续费', '设置汇率', '设置单笔费用', 
-                               '结束账单', '今日总', '总', '当前账单', '查询账单', 
-                               '清理账单', '清空账单', '清理总账单', '移除上一笔', '删除上一笔']
-        is_accounting_cmd = any(text.startswith(kw) for kw in accounting_keywords)
-
-        if is_accounting_cmd:
-            print(f"[DEBUG] 检测到记账指令，跳过 AI 回复")
-            return
-
-        # 🔥 判断是否是互转查询格式
-        transfer_pattern = r'^T[0-9A-Za-z]{33}\s+T[0-9A-Za-z]{33}$'
-        if re.match(transfer_pattern, text):
-            print(f"[DEBUG] 检测到互转查询地址格式，跳过 AI 回复")
-            return
-
-        # 🔥 判断是否是纯数字计算（如 100+200）
-        calc_pattern = r'^[\d\s\+\-\*\/\%\(\)\.]+$'
-        if re.match(calc_pattern, text) and len(text) < 50:
-            print(f"[DEBUG] 检测到计算表达式，跳过 AI 回复")
             return
 
         thinking_msg = await update.message.reply_text("🤔 思考中...")
@@ -782,11 +760,6 @@ def main():
     # 导入记账模块并初始化
     from handlers.accounting import init_accounting, get_conversation_handler, handle_group_message
     init_accounting(DB_PATH)
-    from handlers.google_sheets import init_google_sheets
-    from config import GOOGLE_CREDENTIALS_FILE, GOOGLE_SPREADSHEET_ID
-
-    if GOOGLE_CREDENTIALS_FILE and GOOGLE_SPREADSHEET_ID:
-        init_google_sheets(GOOGLE_CREDENTIALS_FILE, GOOGLE_SPREADSHEET_ID)
 
     # 创建应用
     app = Application.builder().token(BOT_TOKEN).build()
@@ -962,21 +935,6 @@ def main():
                 first=60
             )
             print("✅ 状态清理任务已启动（每5分钟检查一次）")
-            # 🆕 4. 启动 Google Sheets 定时刷新任务（每30分钟）
-            from handlers.google_sheets import get_sheets_reader
-            async def refresh_sheets_job(context: ContextTypes.DEFAULT_TYPE):
-                reader = get_sheets_reader()
-                if reader:
-                    reader.refresh_cache()
-                else:
-                    print("⚠️ Google Sheets 未连接，跳过刷新")
-
-            job_queue.run_repeating(
-                refresh_sheets_job,
-                interval=1800,  # 30分钟 = 1800秒
-                first=60  # 启动后60秒第一次执行
-            )
-            print("✅ Google Sheets 定时刷新任务已启动（每30分钟一次）")
         else:
             print("⚠️ JobQueue 未启用，无法启动状态清理任务")
 
