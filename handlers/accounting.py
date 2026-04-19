@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 # 常量配置
 MAX_DISPLAY_RECORDS = 8  # 账单显示的最大记录数
+PAGE_SIZE = 10  # 分页每页显示记录数
 DB_TIMEOUT = 10  # 数据库连接超时（秒）
 
 # USDT 合约地址（可根据需要添加更多）
@@ -300,6 +301,7 @@ def format_fee_info(fee_rate: float, exchange_rate: float) -> str:
 ACCOUNTING_DATE_SELECT = 1
 ACCOUNTING_CONFIRM_CLEAR = 2
 ACCOUNTING_CONFIRM_CLEAR_ALL = 3
+ACCOUNTING_VIEW_PAGE = 4
 
 
 class AccountingManager:
@@ -1726,7 +1728,7 @@ async def handle_add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
 
 async def handle_total_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """查看总计账单"""
+    """查看总计账单 - 支持分页"""
     chat = update.effective_chat
     if chat.type not in ['group', 'supergroup']:
         await update.message.reply_text("❌ 此功能仅在群组中可用")
@@ -1740,12 +1742,18 @@ async def handle_total_stats(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("📭 暂无账单记录")
         return
 
-    message = format_bill_message(stats, records, "总计账单")
-    await update.message.reply_text(message, parse_mode='Markdown')
+    # 存储到上下文
+    context.user_data["bill_records"] = records
+    context.user_data["bill_stats"] = stats
+    context.user_data["bill_page"] = 0
+    context.user_data["bill_type"] = "total"
+    context.user_data["bill_title"] = "总计账单"
+
+    await send_bill_page(update, context)
 
 
 async def handle_today_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """查看今日账单"""
+    """查看今日账单 - 支持分页"""
     chat = update.effective_chat
     if chat.type not in ['group', 'supergroup']:
         await update.message.reply_text("❌ 此功能仅在群组中可用")
@@ -1759,12 +1767,18 @@ async def handle_today_stats(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("📭 今日暂无账单记录")
         return
 
-    message = format_bill_message(stats, records, "今日账单")
-    await update.message.reply_text(message, parse_mode='Markdown')
+    # 存储到上下文
+    context.user_data["bill_records"] = records
+    context.user_data["bill_stats"] = stats
+    context.user_data["bill_page"] = 0
+    context.user_data["bill_type"] = "today"
+    context.user_data["bill_title"] = "今日账单"
+
+    await send_bill_page(update, context)
 
 
 async def handle_current_bill(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """查看当前账单"""
+    """查看当前账单 - 支持分页"""
     chat = update.effective_chat
     if chat.type not in ['group', 'supergroup']:
         await update.message.reply_text("❌ 此功能仅在群组中可用")
@@ -1789,10 +1803,15 @@ async def handle_current_bill(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
 
-    message = format_bill_message(stats, records, "当前账单")
-    await update.message.reply_text(message, parse_mode='Markdown')
+    # 存储到上下文
+    context.user_data["bill_records"] = records
+    context.user_data["bill_stats"] = stats
+    context.user_data["bill_page"] = 0
+    context.user_data["bill_type"] = "current"
+    context.user_data["bill_title"] = "当前账单"
 
-
+    await send_bill_page(update, context)
+    
 async def handle_query_bill(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """查询历史账单（按日期）"""
     chat = update.effective_chat
@@ -1823,7 +1842,7 @@ async def handle_query_bill(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_date_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理日期选择"""
+    """处理日期选择 - 支持分页"""
     query = update.callback_query
     await query.answer()
 
@@ -1837,90 +1856,16 @@ async def handle_date_selection(update: Update, context: ContextTypes.DEFAULT_TY
         await query.message.edit_text(f"📭 {date_str} 暂无账单记录")
         return ConversationHandler.END
 
-    message = f"📅 **{date_str} 账单**\n\n"
+    # 存储到上下文
+    context.user_data["bill_records"] = records
+    context.user_data["bill_stats"] = stats
+    context.user_data["bill_date"] = date_str
+    context.user_data["bill_page"] = 0
+    context.user_data["bill_type"] = "date"
+    context.user_data["bill_title"] = f"{date_str} 账单"
 
-    income_records = [r for r in records if r['type'] == 'income']
-    expense_records = [r for r in records if r['type'] == 'expense']
-
-    # 入款记录
-    if income_records:
-        income_records_sorted = sorted(income_records, key=lambda x: x['created_at'], reverse=True)
-        display_income = income_records_sorted[:MAX_DISPLAY_RECORDS]
-        total_income_count = len(income_records)
-
-        message += f"📈 **入款 {total_income_count} 笔**"
-        if total_income_count > MAX_DISPLAY_RECORDS:
-            message += f" (显示最新{MAX_DISPLAY_RECORDS}条)"
-        message += "\n"
-
-        for r in display_income:
-            dt = beijing_time(r['created_at'])
-            time_str = dt.strftime('%H:%M')
-            amount = r['amount']
-            amount_usdt = r['amount_usdt']
-
-            # ✅ 正确 - 使用记录中保存的费率
-            fee_rate = r.get('fee_rate', 0)  # 从记录中获取
-            rate = r.get('rate', 0)
-            fee_info = format_fee_info(fee_rate, rate)
-
-            display_name = r.get('display_name', '未知用户')
-            user_id = r.get('user_id')
-
-            if user_id:
-                mention = f" [{display_name}](tg://user?id={user_id})"
-            else:
-                mention = f" {display_name}"
-
-            amount_str = f"{amount:+.2f}"
-            message += f"\n`{time_str} {amount_str} {fee_info} = {amount_usdt:.2f} USDT`{mention}"
-
-        if total_income_count > MAX_DISPLAY_RECORDS:
-            message += f"\n`... 还有 {total_income_count - MAX_DISPLAY_RECORDS} 条记录`"
-        message += "\n\n"
-    else:
-        message += "📈 **入款 0 笔**\n\n"
-
-    # 出款记录
-    if expense_records:
-        expense_records_sorted = sorted(expense_records, key=lambda x: x['created_at'], reverse=True)
-        display_expense = expense_records_sorted[:MAX_DISPLAY_RECORDS]
-        total_expense_count = len(expense_records)
-
-        message += f"📉 **出款 {total_expense_count} 笔**"
-        if total_expense_count > MAX_DISPLAY_RECORDS:
-            message += f" (显示最新{MAX_DISPLAY_RECORDS}条)"
-        message += "\n"
-
-        for r in display_expense:
-            # 使用 _format_record_line 统一格式化
-            message += f"\n{_format_record_line(r)}"
-
-        if total_expense_count > MAX_DISPLAY_RECORDS:
-            message += f"\n`... 还有 {total_expense_count - MAX_DISPLAY_RECORDS} 条记录`"
-        message += "\n\n"
-    else:
-        message += "📉 **出款 0 笔**\n\n"
-
-    session = accounting_manager.get_or_create_session(group_id)
-    fee_rate = session.get('fee_rate', 0)
-    exchange_rate = session.get('exchange_rate', 1)
-    per_transaction_fee = session.get('per_transaction_fee', 0)
-
-    total_income_cny = stats['income_total']
-    total_income_usdt = stats['income_usdt']
-    total_expense_usdt = stats['expense_usdt']
-    pending_usdt = stats['pending_usdt']
-
-    message += f"💰 **当前费率**：{fee_rate}%\n"
-    message += f"💱 **当前汇率**：{exchange_rate}\n"
-    message += f"📝 **当前单笔费用**：{per_transaction_fee} 元\n\n"
-    message += f"📊 **总入款**：{total_income_cny:.2f} = {total_income_usdt:.2f} USDT\n"
-    message += f"📤 **已下发**：{total_expense_usdt:.2f} USDT\n"
-    message += f"⏳ **待下发**：{pending_usdt:.2f} USDT"
-
-    await query.message.edit_text(message, parse_mode='Markdown')
-    return ConversationHandler.END
+    await send_bill_page(update, context)
+    return ACCOUNTING_VIEW_PAGE
 
 
 async def handle_clear_bill(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2413,6 +2358,214 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
         await thinking_msg.edit_text(reply)
         return
 
+async def send_bill_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """发送分页账单"""
+    records = context.user_data.get("bill_records", [])
+    page = context.user_data.get("bill_page", 0)
+    bill_type = context.user_data.get("bill_type", "")
+
+    page_size = PAGE_SIZE
+    total_pages = (len(records) + page_size - 1) // page_size if records else 1
+    start = page * page_size
+    end = min(start + page_size, len(records))
+    page_records = records[start:end]
+
+    # 分离入款和出款
+    income_records = [r for r in page_records if r['type'] == 'income']
+    expense_records = [r for r in page_records if r['type'] == 'expense']
+
+    # 获取标题
+    title = context.user_data.get("bill_title", "账单")
+    date_str = context.user_data.get("bill_date", "")
+
+    if bill_type == "date":
+        message = f"📅 **{date_str} 账单** (第 {page+1}/{total_pages} 页)\n\n"
+    else:
+        message = f"📊 **{title}** (第 {page+1}/{total_pages} 页)\n\n"
+
+    # ==================== 入款记录（按备注分组） ====================
+    if income_records:
+        # 按备注分组
+        categories = {}
+        no_category_records = []
+
+        for r in income_records:
+            category = r.get('category', '') or ''
+            if category:
+                if category not in categories:
+                    categories[category] = []
+                categories[category].append(r)
+            else:
+                no_category_records.append(r)
+
+        total_income_count = len(income_records)
+        message += f"📈 **入款 {total_income_count} 笔**\n"
+
+        # 先显示无备注的记录
+        if no_category_records:
+            for r in no_category_records:
+                dt = beijing_time(r['created_at'])
+                time_str = dt.strftime('%H:%M')
+                fee_rate = r.get('fee_rate', 0)
+                rate = r.get('rate', 0)
+                fee_info = format_fee_info(fee_rate, rate)
+                display_name = r.get('display_name', '未知用户')
+                user_id = r.get('user_id')
+                mention = f" [{display_name}](tg://user?id={user_id})" if user_id else f" {display_name}"
+                amount_str = f"{r['amount']:+.2f}"
+                message += f"  `{time_str} {amount_str} {fee_info} = {r['amount_usdt']:.2f} USDT`{mention}\n"
+            message += "\n"
+
+        # 再显示有备注的分组
+        for category, group_records in categories.items():
+            display_category = get_category_with_flag(category)
+            message += f"{display_category} ({len(group_records)} 笔)\n"
+            for r in group_records:
+                dt = beijing_time(r['created_at'])
+                time_str = dt.strftime('%H:%M')
+                fee_rate = r.get('fee_rate', 0)
+                rate = r.get('rate', 0)
+                fee_info = format_fee_info(fee_rate, rate)
+                display_name = r.get('display_name', '未知用户')
+                user_id = r.get('user_id')
+                mention = f" [{display_name}](tg://user?id={user_id})" if user_id else f" {display_name}"
+                amount_str = f"{r['amount']:+.2f}"
+                message += f"  `{time_str} {amount_str} {fee_info} = {r['amount_usdt']:.2f} USDT`{mention}\n"
+            # 显示该组小计
+            group_total_cny = sum(r['amount'] for r in group_records)
+            group_total_usdt = sum(r['amount_usdt'] for r in group_records)
+            message += f"  小计：{group_total_cny:.2f} = {group_total_usdt:.2f} USDT\n\n"
+    else:
+        message += "📈 **入款 0 笔**\n\n"
+
+    # ==================== 出款记录 ====================
+    if expense_records:
+        message += f"📉 **出款 {len(expense_records)} 笔**\n"
+        for r in expense_records:
+            dt = beijing_time(r['created_at'])
+            time_str = dt.strftime('%H:%M')
+            display_name = r.get('display_name', '未知用户')
+            user_id = r.get('user_id')
+            mention = f" [{display_name}](tg://user?id={user_id})" if user_id else f" {display_name}"
+            message += f"  `{time_str} -{r['amount_usdt']:.2f} USDT`{mention}\n"
+        message += "\n"
+    else:
+        message += "📉 **出款 0 笔**\n\n"
+
+    # ==================== 入款分组统计 ====================
+    if income_records:
+        categories = {}
+        for r in income_records:
+            category = r.get('category', '') or ''
+            if category:
+                if category not in categories:
+                    categories[category] = {'cny': 0, 'usdt': 0, 'count': 0}
+                categories[category]['cny'] += r['amount']
+                categories[category]['usdt'] += r['amount_usdt']
+                categories[category]['count'] += 1
+
+        if categories:
+            message += f"📊 **入款分组统计**\n"
+            for category, data in categories.items():
+                display_category = get_category_with_flag(category)
+                message += f"{display_category}：{data['cny']:.2f} = {data['usdt']:.2f} USDT ({data['count']}笔)\n"
+            message += "\n"
+
+    # ==================== 统计信息 ====================
+    # 本页统计
+    page_income_usdt = sum(r['amount_usdt'] for r in income_records)
+    page_expense_usdt = sum(r['amount_usdt'] for r in expense_records)
+    message += f"📊 本页：+{page_income_usdt:.2f} USDT / -{page_expense_usdt:.2f} USDT"
+
+    # 获取当前会话的费率和汇率（用于日期查询）
+    # 从第一条记录中获取费率和汇率（如果存在）
+    first_record = records[0] if records else None
+    if first_record:
+        current_fee_rate = first_record.get('fee_rate', 0)
+        current_rate = first_record.get('rate', 1)
+        current_per_fee = 0  # 单笔费用不在记录中，需要从配置获取
+    else:
+        current_fee_rate = 0
+        current_rate = 1
+        current_per_fee = 0
+
+    # 总计统计
+    if bill_type == "date":
+        # 日期查询：显示该日期的总计和费率和汇率
+        total_income_usdt = sum(r['amount_usdt'] for r in records)
+        total_expense_usdt = sum(r['amount_usdt'] for r in records if r['type'] == 'expense')
+        pending_usdt = total_income_usdt - total_expense_usdt
+        message += f"\n\n📊 **当日总计**：+{total_income_usdt:.2f} USDT / -{total_expense_usdt:.2f} USDT"
+        message += f"\n⏳ **当日净收入**：{pending_usdt:.2f} USDT"
+        # 显示费率和汇率（从记录中获取）
+        if current_fee_rate > 0 or current_rate != 1:
+            message += f"\n💰 费率：{current_fee_rate}% | 💱 汇率：{current_rate}"
+    else:
+        # 非日期查询：显示总计统计和费率汇率
+        stats = context.user_data.get("bill_stats", {})
+        if stats:
+            total_income_usdt = stats.get('income_usdt', 0)
+            total_expense_usdt = stats.get('expense_usdt', 0)
+            pending_usdt = stats.get('pending_usdt', 0)
+            fee_rate = stats.get('fee_rate', 0)
+            exchange_rate = stats.get('exchange_rate', 1)
+            per_transaction_fee = stats.get('per_transaction_fee', 0)
+            message += f"\n\n📊 **总计**：+{total_income_usdt:.2f} USDT / -{total_expense_usdt:.2f} USDT"
+            message += f"\n⏳ **待下发**：{pending_usdt:.2f} USDT"
+            message += f"\n💰 费率：{fee_rate}% | 💱 汇率：{exchange_rate} | 📝 单笔费用：{per_transaction_fee}元"
+
+    # 分页按钮
+    keyboard = []
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton("⬅️ 上一页", callback_data="bill_page_prev"))
+    if page < total_pages - 1:
+        nav_buttons.append(InlineKeyboardButton("下一页 ➡️", callback_data="bill_page_next"))
+    if nav_buttons:
+        keyboard.append(nav_buttons)
+    keyboard.append([InlineKeyboardButton("❌ 关闭", callback_data="bill_close")])
+
+    # 编辑或发送消息
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            message,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown",
+            disable_web_page_preview=True
+        )
+    else:
+        await update.message.reply_text(
+            message,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown",
+            disable_web_page_preview=True
+        )
+
+async def handle_bill_pagination(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理账单分页按钮"""
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data
+    if data == "bill_page_prev":
+        current_page = context.user_data.get("bill_page", 0)
+        context.user_data["bill_page"] = max(0, current_page - 1)
+    elif data == "bill_page_next":
+        current_page = context.user_data.get("bill_page", 0)
+        context.user_data["bill_page"] = current_page + 1
+    elif data == "bill_close":
+        # 清除所有账单相关数据
+        context.user_data.pop("bill_records", None)
+        context.user_data.pop("bill_stats", None)
+        context.user_data.pop("bill_date", None)
+        context.user_data.pop("bill_page", None)
+        context.user_data.pop("bill_type", None)
+        context.user_data.pop("bill_title", None)
+        await query.message.delete()
+        return
+
+    await send_bill_page(update, context)
+
 async def handle_calculator(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理计算器功能（只识别完整的计算表达式）"""
     chat = update.effective_chat
@@ -2702,6 +2855,10 @@ def get_conversation_handler():
             ACCOUNTING_CONFIRM_CLEAR_ALL: [
                 CallbackQueryHandler(handle_clear_all_confirm, pattern="^clear_all_confirm$"),
                 CallbackQueryHandler(handle_clear_all_cancel, pattern="^clear_all_cancel$"),
+            ],
+            ACCOUNTING_VIEW_PAGE: [
+                CallbackQueryHandler(handle_bill_pagination, pattern="^bill_page_"),
+                CallbackQueryHandler(lambda u, c: ConversationHandler.END, pattern="^bill_close$"),
             ],
         },
         fallbacks=[],
