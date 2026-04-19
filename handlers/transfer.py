@@ -48,7 +48,7 @@ async def start_transfer_query(update: Update, context: ContextTypes.DEFAULT_TYP
     query = update.callback_query
     await query.answer()
 
-    if not is_authorized(query.from_user.id):
+    if not is_authorized(query.from_user.id, require_full_access=True):
         await query.message.reply_text("❌ 无权限使用此功能")
         return ConversationHandler.END
 
@@ -131,7 +131,7 @@ async def start_transfer_analysis(update: Update, context: ContextTypes.DEFAULT_
     query = update.callback_query
     await query.answer()
 
-    if not is_authorized(query.from_user.id):
+    if not is_authorized(query.from_user.id, require_full_access=True):
         await query.message.reply_text("❌ 无权限使用此功能")
         return ConversationHandler.END
 
@@ -355,7 +355,7 @@ async def show_transfer_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
     query = update.callback_query
     await query.answer()
 
-    if not is_authorized(query.from_user.id):
+    if not is_authorized(query.from_user.id, require_full_access=True):
         await query.message.reply_text("❌ 无权限")
         return
 
