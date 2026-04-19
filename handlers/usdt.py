@@ -2,6 +2,7 @@ import aiohttp
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from datetime import datetime
+from auth import is_authorized
 
 USDT_CONTRACT_ADDR = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
 PAGE_SIZE = 5
@@ -10,6 +11,11 @@ PAGE_SIZE = 5
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+
+    # 完整权限检查（禁止临时操作人）
+    if not is_authorized(query.from_user.id, require_full_access=True):
+        await query.message.reply_text("❌ 只有操作人才能使用此功能")
+        return
 
     # 设置模块标识（关键！）
     context.user_data["active_module"] = "usdt"
@@ -129,6 +135,12 @@ async def send_trx_usdt_page(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    
+    # 完整权限检查（禁止临时操作人）
+    if not is_authorized(query.from_user.id, require_full_access=True):
+        await query.message.reply_text("❌ 只有操作人才能使用此功能")
+        return
+        
     session = context.user_data.get("usdt_session")
 
     # ✅ 添加完成按钮处理
