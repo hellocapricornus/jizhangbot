@@ -120,7 +120,7 @@ async def start_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 完整权限检查（禁止临时操作人）
     if not is_authorized(user_id, require_full_access=True):
         await query.answer("❌ 无权限", show_alert=True)
-        await query.message.reply_text("❌ 此功能仅限管理员或授权操作员使用。")
+        await query.message.reply_text("❌ 管理人/操作员才能使用，如需使用请联系 @ChinaEdward")
         return
 
     # 🔥 设置广播状态标记
