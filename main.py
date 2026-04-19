@@ -277,7 +277,23 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 记账模块允许临时操作人，其他模块需要完整权限
     if data == "accounting":
         if not is_authorized(user_id, require_full_access=False):
-            await query.message.reply_text("❌ 无权限")
+            await query.message.reply_text("❌ 管理人/操作员/临时操作员才能使用，如需使用请联系 @ChinaEdward")
+            return
+    elif data == "monitor_menu":
+        if not is_authorized(user_id, require_full_access=True):
+            await query.message.reply_text("❌ 管理人/操作员才能使用，如需使用请联系 @ChinaEdward")
+            return
+    elif data == "usdt":
+        if not is_authorized(user_id, require_full_access=True):
+            await query.message.reply_text("❌ 管理人/操作员才能使用，如需使用请联系 @ChinaEdward")
+            return
+    elif data == "transfer":
+        if not is_authorized(user_id, require_full_access=True):
+            await query.message.reply_text("❌ 管理人/操作员才能使用，如需使用请联系 @ChinaEdward")
+            return
+    elif data == "group_manager":
+        if not is_authorized(user_id, require_full_access=True):
+            await query.message.reply_text("❌ 管理人/操作员才能使用，如需使用请联系 @ChinaEdward")
             return
     else:
         if not is_authorized(user_id, require_full_access=True):
