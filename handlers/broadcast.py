@@ -117,10 +117,11 @@ async def start_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
 
-    if not is_authorized(user_id):
+    # 完整权限检查（禁止临时操作人）
+    if not is_authorized(user_id, require_full_access=True):
         await query.answer("❌ 无权限", show_alert=True)
         await query.message.reply_text("❌ 此功能仅限管理员或授权操作员使用。")
-        return  # ✅ 添加这行！否则会继续执行
+        return
 
     # 🔥 设置广播状态标记
     context.user_data["in_broadcast"] = True
