@@ -40,7 +40,7 @@ async def group_manager_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     print(f"[DEBUG] group_manager_menu 被调用")
 
-    if not is_authorized(user_id):
+    if not is_authorized(user_id, require_full_access=True):
         await query.answer("❌ 无权限", show_alert=True)
         return
 
