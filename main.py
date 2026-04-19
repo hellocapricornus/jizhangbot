@@ -11,7 +11,8 @@ from config import BOT_TOKEN
 from auth import is_authorized, init_operators_from_db
 from db import init_db, save_group, delete_group_from_db, DB_PATH
 from handlers.start import start
-from handlers import monitor,operator, usdt, accounting, broadcast, transfer
+from handlers import monitor, operator, usdt, accounting, broadcast, transfer
+from auth import cmd_update_operator_info
 from handlers.git_update import get_git_handlers
 from handlers.group_manager import (
     group_manager_menu, show_stats, list_categories, 
@@ -254,16 +255,14 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_clear_all_cancel(update, context)
         return
 
-    # ========== 权限检查 ==========
-    if not is_authorized(user_id):
-        await query.message.reply_text("❌ 管理人/操作员才能使用，如需使用请联系 @ChinaEdward")
-        return
-
+    # ========== 获取 data 变量 ==========
     data = query.data
 
+    # ========== 广播功能特殊处理 ==========
     if data in ["func_broadcast", "broadcast", "bc_start_real"]:
         return None
 
+    # ========== 操作人管理 ==========
     if data == "operator":
         context.user_data["active_module"] = "operator"
         await operator.handle(update, context)
@@ -274,6 +273,18 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await operator.handle_buttons(update, context)
         return
 
+    # ========== 权限检查（放在操作人管理之后，因为操作人管理只有OWNER可用）==========
+    # 记账模块允许临时操作人，其他模块需要完整权限
+    if data == "accounting":
+        if not is_authorized(user_id, require_full_access=False):
+            await query.message.reply_text("❌ 无权限")
+            return
+    else:
+        if not is_authorized(user_id, require_full_access=True):
+            await query.message.reply_text("❌ 管理人/操作员才能使用，如需使用请联系 @ChinaEdward")
+            return
+
+    # ========== 其他功能路由 ==========
     if data == "usdt":
         context.user_data["active_module"] = "usdt"
         await usdt.handle(update, context)
@@ -362,7 +373,7 @@ async def input_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理私聊的文本输入"""
     from datetime import datetime, timedelta
     import re
-    
+
     chat = update.effective_chat
     print(f"[DEBUG] ========== input_router 开始 ==========")
     print(f"[DEBUG] 聊天类型: {chat.type}")
@@ -412,7 +423,7 @@ async def input_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     module = context.user_data.get("active_module")
     print(f"[DEBUG] 4. 检查其他模块: active_module = {module}")
 
-    # 检查是否在互转查询的 ConversationHandler 状态中extract_address_from_text
+    # 检查是否在互转查询的 ConversationHandler 状态中
     if context.user_data.get("transfer_results") is not None:
         print(f"[DEBUG] → 互转查询有结果数据，跳过 AI 回复")
         return
@@ -448,9 +459,9 @@ async def input_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f"[DEBUG] 4.5 检查私聊数据查询意图...")
 
     if text and not text.startswith('/'):
-        # 权限检查
+        # 权限检查（AI对话需要完整权限）
         from auth import is_authorized
-        if not is_authorized(user_id):
+        if not is_authorized(user_id, require_full_access=True):
             await update.message.reply_text(
                 "❌ AI 对话功能仅限管理员和操作员使用\n\n"
                 "如需使用，请联系 @ChinaEdward 申请权限"
@@ -484,9 +495,9 @@ async def input_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print(f"[DEBUG] 文本为空或命令，跳过 AI")
         return
 
-    # ✅ 权限检查：只有管理员和操作员才能使用 AI
+    # ✅ 权限检查：只有管理员和操作员才能使用 AI（完整权限）
     from auth import is_authorized
-    if not is_authorized(user_id):
+    if not is_authorized(user_id, require_full_access=True):
         print(f"[DEBUG] 用户 {user_id} 无权限使用 AI，跳过")
         await update.message.reply_text(
             "❌ AI 对话功能仅限管理员和操作员使用\n\n"
@@ -709,47 +720,6 @@ async def verify_groups_on_startup(app: Application):
 
     print(f"[启动检查] 完成！删除了 {len(groups_to_delete)} 个无效群组")
 
-# main.py - 修改 periodic_group_verification 函数
-
-async def periodic_group_verification(app: Application):
-    """定期验证所有群组（每天执行一次）"""
-    from db import get_all_groups_from_db
-
-    all_groups = get_all_groups_from_db()
-    print(f"[定期检查] 开始验证 {len(all_groups)} 个群组...")
-
-    groups_to_delete = []
-
-    for group in all_groups:
-        group_id = group['id']
-        group_name = group.get('name', '未知群组')
-
-        try:
-            # 尝试发送一个动作来测试连接
-            await app.bot.send_chat_action(chat_id=group_id, action="typing")
-            print(f"[定期检查] 群组 {group_name} 有效")
-        except Exception as e:
-            error_msg = str(e)
-            # 如果是这些错误，说明机器人不在群组中
-            if "chat not found" in error_msg.lower() or "bot was kicked" in error_msg.lower() or "bot is not a member" in error_msg.lower():
-                print(f"[定期检查] 机器人不在群组 {group_name} ({group_id}) 中: {error_msg}")
-                groups_to_delete.append(group_id)
-            else:
-                # 其他错误，可能是临时问题
-                print(f"[定期检查] 群组 {group_name} 可能有问题: {error_msg}")
-                # 尝试通过 get_chat 验证
-                try:
-                    await app.bot.get_chat(group_id)
-                except:
-                    groups_to_delete.append(group_id)
-
-    # 删除无效的群组
-    for group_id in groups_to_delete:
-        print(f"[定期检查] 删除无效群组: {group_id}")
-        delete_group_from_db(group_id)
-
-    print(f"[定期检查] 完成！删除了 {len(groups_to_delete)} 个无效群组")
-
 def main():
     # 初始化数据库和操作员
     init_db()
@@ -764,17 +734,25 @@ def main():
     # 创建应用
     app = Application.builder().token(BOT_TOKEN).build()
 
-    async def cleanup_expired_states_job(context: ContextTypes.DEFAULT_TYPE):
-        """定时清理过期状态"""
-        from handlers.group_manager import cleanup_expired_states
-        await cleanup_expired_states()
+    async def cleanup_expired_states():
+        """清理过期状态（异步函数）"""
+        while True:
+            try:
+                await asyncio.sleep(300)  # 每5分钟执行一次
+                from handlers.group_manager import cleanup_expired_states
+                await cleanup_expired_states()
+                print("✅ 已执行过期状态清理")
+            except Exception as e:
+                print(f"⚠️ 清理过期状态失败: {e}")
 
     # 定义手动清理命令（放在 main 函数内部）
     async def force_clean_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """手动强制清理所有机器人不在的群组"""
         user_id = update.effective_user.id
-        if not is_authorized(user_id):
-            await update.message.reply_text("❌ 只有管理员可以使用此命令")
+        # 只允许控制人，操作员不能使用
+        from config import OWNER_ID
+        if user_id != OWNER_ID:
+            await update.message.reply_text("❌ 只有控制人可以使用此命令")
             return
 
         msg = await update.message.reply_text("🔍 开始强制检查所有群组...")
@@ -817,6 +795,9 @@ def main():
     # 1. 启动命令
     app.add_handler(CommandHandler("start", start))
 
+    # 1.5 添加更新操作人信息命令（新增）
+    app.add_handler(CommandHandler("update_ops", cmd_update_operator_info))
+
     # 添加手动清理命令（新增这一行）
     app.add_handler(CommandHandler("clean", force_clean_groups))
 
@@ -847,6 +828,20 @@ def main():
     # 4. Broadcast 对话处理器
     for handler in broadcast.get_handlers():
         app.add_handler(handler)
+
+    # 4.5 操作员管理对话处理器
+    operator_conv_handler = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(operator.handle_buttons, pattern="^op_"),
+        ],
+        states={
+            operator.ADD_OPERATOR: [MessageHandler(filters.TEXT & ~filters.COMMAND, operator.handle_input)],
+            operator.REMOVE_OPERATOR: [MessageHandler(filters.TEXT & ~filters.COMMAND, operator.handle_input)],
+        },
+        fallbacks=[CommandHandler("cancel", operator.cancel_operator)],
+        per_message=False,
+    )
+    app.add_handler(operator_conv_handler)
 
     # 5. USDT 分页按钮
     app.add_handler(CallbackQueryHandler(usdt.handle_buttons, pattern="^usdt_"))
@@ -902,60 +897,42 @@ def main():
     # 添加取消命令
     app.add_handler(CommandHandler("cancel_monitor", monitor.monitor_cancel))
 
-    # 添加定时任务（每30秒检查一次）
-    async def start_monitor_check():
-        """启动监控定时任务"""
-        job_queue = app.job_queue
-        if job_queue:
-            job_queue.run_repeating(monitor.check_address_transactions, interval=30, first=10)
-            print("✅ USDT 地址监控已启动（每30秒检查一次）")
-
-    # 在 app 启动后添加定时任务（在 app.run_polling() 之前）
-    if app.job_queue:
-        app.job_queue.run_repeating(monitor.check_address_transactions, interval=30, first=10)
-        print("✅ USDT 地址监控已启动（每30秒检查一次）")
-
     # ========== 添加启动验证和定期检查 ==========
 
     # 统一的 post_init 函数
     async def post_init(app: Application):
         """启动后初始化"""
-        # 1. 启动验证群组
-        #await verify_groups_on_startup(app)
-
-        # 2. 启动自动分类（新增）
         await auto_classify_all_groups_on_startup(app)
 
-        # 3. 启动状态清理任务
-        job_queue = app.job_queue
-        if job_queue:
-            job_queue.run_repeating(
-                cleanup_expired_states_job,
-                interval=300,
-                first=60
-            )
-            print("✅ 状态清理任务已启动（每5分钟检查一次）")
-        else:
-            print("⚠️ JobQueue 未启用，无法启动状态清理任务")
+        # 启动状态清理任务
+        asyncio.create_task(cleanup_expired_states())
+        print("✅ 状态清理任务已启动（每5分钟检查一次）")
+
+        # 3. 启动监控检查任务
+        async def monitor_check_loop():
+            """监控检查循环"""
+            await asyncio.sleep(10)
+
+            # 创建一个简单的 context 对象包装 bot
+            class ContextWrapper:
+                def __init__(self, bot):
+                    self.bot = bot
+
+            ctx = ContextWrapper(app.bot)
+
+            while True:
+                try:
+                    await monitor.check_address_transactions(ctx)
+                    await asyncio.sleep(30)
+                except Exception as e:
+                    print(f"⚠️ 监控检查失败: {e}")
+                    await asyncio.sleep(30)
+
+        asyncio.create_task(monitor_check_loop())
+        print("✅ USDT 地址监控已启动（每30秒检查一次）")
 
     # 设置统一的 post_init
     app.post_init = post_init
-
-    # 使用 JobQueue 进行定期检查（每24小时）
-    try:
-        job_queue = app.job_queue
-        if job_queue:
-            # 每24小时执行一次定期检查
-            job_queue.run_repeating(
-                lambda context: periodic_group_verification(app),
-                interval=86400,  # 24小时 = 86400秒
-                first=3600  # 启动后1小时第一次执行
-            )
-            print("✅ 定期群组验证任务已启动（每24小时检查一次）")
-        else:
-            print("⚠️ JobQueue 未启用，无法启动定期群组验证")
-    except Exception as e:
-        print(f"⚠️ 启动定期群组验证失败: {e}")
 
     print("=" * 50)
     print("🤖 机器人启动成功...")
@@ -971,8 +948,7 @@ def main():
     print("📌 功能提示：")
     print("  • 机器人加入群组时会自动记录")
     print("  • 退出群组时会自动清理数据")
-    print("  • 启动时会自动验证所有群组并清理无效记录")
-    print("  • 每24小时自动验证一次群组状态")
+    print("  • 使用 /clean 命令手动清理无效群组")
     print("  • 记账功能仅在群组中可用，支持以下指令：")
     print("    - +金额：添加入款")
     print("    - -金额：修正入款")
