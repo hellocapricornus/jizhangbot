@@ -9,7 +9,7 @@ from telegram.ext import ContextTypes, CallbackQueryHandler, MessageHandler, fil
 from auth import is_authorized, OWNER_ID
 from db import (
     get_monitored_addresses, add_monitored_address, remove_monitored_address,
-    update_address_last_check, add_transaction_record, is_tx_notified, mark_tx_notified
+    update_address_last_check, add_transaction_record, is_tx_notified, mark_tx_notified, get_db_connection
 )
 
 # 状态定义
@@ -116,7 +116,10 @@ async def check_address_transactions(context: ContextTypes.DEFAULT_TYPE):
     """定时检查监控地址的交易"""
     addresses = get_monitored_addresses()
     if not addresses:
+        print("📭 没有监控地址，跳过检查")
         return
+
+    print(f"🔍 开始检查 {len(addresses)} 个监控地址")
 
     current_time = int(time.time())
     bot = context.bot
@@ -127,8 +130,17 @@ async def check_address_transactions(context: ContextTypes.DEFAULT_TYPE):
         added_by = addr_info.get("added_by")
         note = addr_info.get("note", "")
 
+        print(f"  检查地址: {address[:8]}... (备注: {note or '无'})")
+
+        # 如果是第一次检查（last_check=0），只检查最近24小时的交易
+        if last_check == 0:
+            min_timestamp = (current_time - 86400) * 1000  # 24小时前
+            print(f"首次监控地址 {address}，只检查最近24小时的交易")
+        else:
+            min_timestamp = last_check
+
         # 获取新交易（从上次检查时间之后）
-        txs = await get_trc20_transactions(address, last_check)
+        txs = await get_trc20_transactions(address, min_timestamp)
 
         if txs:
             # 更新最后检查时间
@@ -136,7 +148,6 @@ async def check_address_transactions(context: ContextTypes.DEFAULT_TYPE):
 
             # 获取当前余额
             current_balance = await get_address_balance(address)
-
             monthly_stats = await get_monthly_stats(address)
 
             for tx in txs:
@@ -149,6 +160,20 @@ async def check_address_transactions(context: ContextTypes.DEFAULT_TYPE):
 
                 # 检查是否已通知过
                 if is_tx_notified(tx_id):
+                    continue
+
+                # 检查交易记录是否已存在但未通知
+                # 如果不存在，先添加记录
+                conn = get_db_connection()
+                c = conn.cursor()
+                c.execute("SELECT id, notified FROM address_transactions WHERE tx_id = ?", (tx_id,))
+                existing = c.fetchone()
+                conn.close()
+
+                if existing:
+                    # 记录存在但未通知，直接标记为已通知并跳过
+                    if existing[1] == 0:
+                        mark_tx_notified(tx_id)
                     continue
 
                 # 记录交易
@@ -209,7 +234,7 @@ async def monitor_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
 
-    if not is_authorized(user_id):
+    if not is_authorized(user_id, require_full_access=True):
         await query.answer("❌ 无权限", show_alert=True)
         return
 
