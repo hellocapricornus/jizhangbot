@@ -5,6 +5,8 @@ OWNER_ID = 8107909168
 
 # 操作人列表（后续可改成数据库）
 OPERATORS = set()
+# 临时操作人列表（仅记账功能）
+TEMP_OPERATORS = set()
 
 # ========== AI API Key 配置 ==========
 # 注册地址：https://platform.deepseek.com/
