@@ -21,6 +21,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
 
     if user_id != OWNER_ID:
+        await query.answer("❌ 只有控制人可以管理操作人", show_alert=True)
         await query.message.reply_text("❌ 只有控制人可以管理操作人")
         return
 
