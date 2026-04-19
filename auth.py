@@ -1,89 +1,202 @@
-# auth.py - 修复导入问题
-
 import sqlite3
 import os
-from telegram import Update  # 添加这个导入
-from telegram.ext import ContextTypes  # 可选，如果需要的话
+import time
+from typing import Dict, Optional
+from telegram import Update
+from telegram.ext import ContextTypes
 
-OWNER_ID = 8107909168  # 控制人ID
+# 从 config 导入 OWNER_ID
+from config import OWNER_ID
 
-# 确定数据库路径 (必须与 db.py 一致)
 DB_PATH = "bot.db"
 if not os.path.isabs(DB_PATH):
     DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), DB_PATH)
 
-def _get_db_connection():
+# 存储格式：{user_id: {"id": int, "username": str, "first_name": str, "last_name": str}}
+operators: Dict[int, dict] = {}
+temp_operators: Dict[int, dict] = {}
+
+def _get_db_connection() -> sqlite3.Connection:
+    """获取数据库连接"""
     conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
     return conn
 
-def init_operators_from_db():
-    """
-    启动时从数据库加载所有操作员到内存。
-    需要在 main.py 的 init_db() 之后调用，或者直接在 import 时调用。
-    """
+def init_operators_from_db() -> Dict[int, dict]:
+    """启动时从数据库加载所有操作员到内存（自动迁移旧数据）"""
     global operators
     try:
         conn = _get_db_connection()
         c = conn.cursor()
-        # 确保表存在 (防御性编程)
         c.execute("""
             CREATE TABLE IF NOT EXISTS operators (
                 user_id TEXT PRIMARY KEY,
-                name TEXT
+                username TEXT,
+                first_name TEXT,
+                last_name TEXT
             )
         """)
         conn.commit()
-
-        c.execute("SELECT user_id FROM operators")
+        c.execute("PRAGMA table_info(operators)")
+        columns = [col[1] for col in c.fetchall()]
+        if 'username' not in columns:
+            print("🔄 检测到旧数据格式，正在添加新字段...")
+            c.execute("ALTER TABLE operators ADD COLUMN username TEXT")
+            c.execute("ALTER TABLE operators ADD COLUMN first_name TEXT")
+            c.execute("ALTER TABLE operators ADD COLUMN last_name TEXT")
+            conn.commit()
+            print("✅ 数据库结构已更新")
+        c.execute("SELECT user_id, username, first_name, last_name FROM operators")
         rows = c.fetchall()
         conn.close()
-
-        # 转换为整数集合
-        operators = {int(row[0]) for row in rows}
-        print(f"✅ 已从数据库加载 {len(operators)} 名操作员: {operators}")
+        operators = {}
+        for row in rows:
+            user_id = int(row['user_id'])
+            operators[user_id] = {
+                "id": user_id,
+                "username": row['username'],
+                "first_name": row['first_name'],
+                "last_name": row['last_name']
+            }
+        print(f"✅ 已从数据库加载 {len(operators)} 名操作员")
+        for uid, info in operators.items():
+            name = info.get('first_name', '未知')
+            username = f"(@{info['username']})" if info.get('username') else ""
+            print(f"   - {name} {username} (ID: {uid})")
         return operators
     except Exception as e:
         print(f"❌ 加载操作员失败: {e}")
-        operators = set()
+        operators = {}
         return operators
 
-# 初始化内存集合
-operators = set()
-# 尝试立即加载 (如果 main.py 还没 init_db，这里可能会创建空表，没关系)
-init_operators_from_db()
+# ========== 临时操作人相关函数 ==========
 
-def is_authorized(user_id: int) -> bool:
-    """是否是控制人或者操作人"""
-    return user_id == OWNER_ID or user_id in operators
-
-def add_operator(user_id: int):
-    """添加操作员并同步到数据库"""
-    if user_id in operators:
-        return False # 已存在
-
-    operators.add(user_id)
-
-    # 写入数据库
+def init_temp_operators_table():
+    """初始化临时操作人表"""
     try:
         conn = _get_db_connection()
         c = conn.cursor()
-        c.execute("INSERT OR REPLACE INTO operators (user_id) VALUES (?)", (str(user_id),))
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS temp_operators (
+                user_id TEXT PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                last_name TEXT,
+                added_at INTEGER,
+                added_by INTEGER
+            )
+        """)
+        conn.commit()
+        conn.close()
+        print("✅ 临时操作人表初始化完成")
+        return True
+    except Exception as e:
+        print(f"❌ 初始化临时操作人表失败: {e}")
+        return False
+
+def init_temp_operators_from_db():
+    """从数据库加载临时操作人"""
+    global temp_operators
+    try:
+        conn = _get_db_connection()
+        c = conn.cursor()
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS temp_operators (
+                user_id TEXT PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                last_name TEXT,
+                added_at INTEGER,
+                added_by INTEGER
+            )
+        """)
+        conn.commit()
+        c.execute("SELECT user_id, username, first_name, last_name FROM temp_operators")
+        rows = c.fetchall()
+        conn.close()
+        temp_operators = {}
+        for row in rows:
+            user_id = int(row['user_id'])
+            temp_operators[user_id] = {
+                "id": user_id,
+                "username": row['username'],
+                "first_name": row['first_name'],
+                "last_name": row['last_name']
+            }
+        print(f"✅ 已从数据库加载 {len(temp_operators)} 名临时操作人")
+        return temp_operators
+    except Exception as e:
+        print(f"❌ 加载临时操作人失败: {e}")
+        temp_operators = {}
+        return temp_operators
+
+# ========== 初始化调用（放在函数定义之后）==========
+
+# 1. 初始化临时操作人表
+init_temp_operators_table()
+
+# 2. 加载正式操作人
+init_operators_from_db()
+
+# 3. 加载临时操作人
+init_temp_operators_from_db()
+
+def is_authorized(user_id: int) -> bool:
+    """检查用户是否是控制人或者操作人"""
+    return user_id == OWNER_ID or user_id in operators
+
+async def add_operator(user_id: int, context: ContextTypes.DEFAULT_TYPE = None) -> bool:
+    """添加操作员并同步到数据库"""
+    if user_id in operators:
+        return False
+
+    # 尝试获取用户信息
+    username = None
+    first_name = None
+    last_name = None
+
+    if context:
+        try:
+            bot = context.bot
+            user = await bot.get_chat(user_id)
+            username = user.username
+            first_name = user.first_name
+            last_name = user.last_name
+            print(f"📡 获取到用户信息: {first_name} (@{username})")
+        except Exception as e:
+            print(f"⚠️ 无法获取用户 {user_id} 的详细信息: {e}")
+
+    # 保存到内存
+    operators[user_id] = {
+        "id": user_id,
+        "username": username,
+        "first_name": first_name,
+        "last_name": last_name
+    }
+
+    try:
+        conn = _get_db_connection()
+        c = conn.cursor()
+        c.execute(
+            "INSERT OR REPLACE INTO operators (user_id, username, first_name, last_name) VALUES (?, ?, ?, ?)",
+            (str(user_id), username, first_name, last_name)
+        )
         conn.commit()
         conn.close()
         print(f"💾 [DB] 操作员 {user_id} 已持久化保存。")
+        return True
     except Exception as e:
         print(f"❌ [DB Error] 保存操作员失败: {e}")
-        # 如果数据库失败，内存中依然保留，但重启后会丢失
-        operators.discard(user_id)
+        operators.pop(user_id, None)
+        return False
 
-def remove_operator(user_id: int):
+def remove_operator(user_id: int) -> bool:
     """删除操作员并同步到数据库"""
     if user_id not in operators:
-        return
+        return False
 
-    operators.discard(user_id)
+    operators.pop(user_id, None)
 
-    # 从数据库删除
     try:
         conn = _get_db_connection()
         c = conn.cursor()
@@ -91,18 +204,271 @@ def remove_operator(user_id: int):
         conn.commit()
         conn.close()
         print(f"🗑️ [DB] 操作员 {user_id} 已从数据库移除。")
+        return True
     except Exception as e:
         print(f"❌ [DB Error] 删除操作员失败: {e}")
-
-def list_operators():
-    return list(operators)
-
-# 可选：群组管理员检查函数（如果需要的话）
-async def is_group_admin(app, chat_id: int, user_id: int) -> bool:
-    """检查用户是否为群组管理员"""
-    try:
-        member = await app.bot.get_chat_member(chat_id, user_id)
-        return member.status in ['administrator', 'creator']
-    except Exception as e:
-        print(f"检查管理员权限失败: {e}")
         return False
+
+def list_operators() -> Dict[int, dict]:
+    """返回所有操作员字典（包含详细信息）"""
+    return operators
+
+def get_operator_info(user_id: int) -> Optional[dict]:
+    """获取单个操作员信息"""
+    return operators.get(user_id)
+
+def get_operators_list_text() -> str:
+    """生成格式化的操作员列表文本（包含正式操作人和临时操作人）"""
+    from auth import temp_operators
+
+    text = "📋 **操作人列表**\n" + "━" * 20 + "\n\n"
+
+    # 正式操作人
+    text += "👑 **正式操作人**\n"
+    if operators:
+        for user_id, info in operators.items():
+            display_name = []
+            if info.get("first_name"):
+                display_name.append(info["first_name"])
+            if info.get("last_name"):
+                display_name.append(info["last_name"])
+
+            name_str = " ".join(display_name) if display_name else "未设置昵称"
+            username_str = f"(@{info['username']})" if info.get("username") else ""
+
+            text += f"  👤 {name_str} {username_str}\n"
+            text += f"     🆔 ID: `{user_id}`\n"
+    else:
+        text += "  📭 暂无正式操作人\n"
+
+    text += "\n" + "━" * 20 + "\n\n"
+
+    # 临时操作人
+    text += "👥 **临时操作人**（仅记账权限）\n"
+    if temp_operators:
+        for user_id, info in temp_operators.items():
+            display_name = []
+            if info.get("first_name"):
+                display_name.append(info["first_name"])
+            if info.get("last_name"):
+                display_name.append(info["last_name"])
+
+            name_str = " ".join(display_name) if display_name else "未设置昵称"
+            username_str = f"(@{info['username']})" if info.get("username") else ""
+
+            text += f"  👤 {name_str} {username_str}\n"
+            text += f"     🆔 ID: `{user_id}`\n"
+    else:
+        text += "  📭 暂无临时操作人\n"
+
+    return text
+
+async def update_all_operators_info(context: ContextTypes.DEFAULT_TYPE):
+    """更新所有操作员的详细信息（用于补充用户信息）"""
+    if not operators:
+        print("📭 没有操作员需要更新")
+        return 0
+
+    updated_count = 0
+    failed_count = 0
+
+    print(f"🔄 开始更新 {len(operators)} 个操作员的信息...")
+
+    for user_id in list(operators.keys()):
+        try:
+            # 获取用户信息
+            user = await context.bot.get_chat(user_id)
+
+            # 更新内存
+            operators[user_id] = {
+                "id": user_id,
+                "username": user.username,
+                "first_name": user.first_name,
+                "last_name": user.last_name
+            }
+
+            # 更新数据库
+            conn = _get_db_connection()
+            c = conn.cursor()
+            c.execute(
+                "INSERT OR REPLACE INTO operators (user_id, username, first_name, last_name) VALUES (?, ?, ?, ?)",
+                (str(user_id), user.username, user.first_name, user.last_name)
+            )
+            conn.commit()
+            conn.close()
+
+            updated_count += 1
+            print(f"✅ 已更新: {user.first_name} (@{user.username}) - ID: {user_id}")
+
+        except Exception as e:
+            failed_count += 1
+            print(f"❌ 更新失败 ID {user_id}: {e}")
+
+    print(f"📊 更新完成！成功: {updated_count}, 失败: {failed_count}")
+    return updated_count
+
+async def cmd_update_operator_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """命令处理：更新操作人信息（仅控制人可用）"""
+    from config import OWNER_ID
+    user_id = update.effective_user.id
+
+    if user_id != OWNER_ID:
+        await update.message.reply_text("❌ 只有控制人可以使用此命令")
+        return
+
+    await update.message.reply_text("🔄 正在更新操作人信息，请稍候...")
+
+    count = await update_all_operators_info(context)
+
+    if count > 0:
+        await update.message.reply_text(f"✅ 已成功更新 {count} 个操作人的信息")
+        # 显示更新后的列表
+        text = get_operators_list_text()
+        await update.message.reply_text(text, parse_mode="Markdown")
+    else:
+        await update.message.reply_text("⚠️ 没有操作人被更新，或更新失败")
+
+def init_temp_operators_from_db():
+    """从数据库加载临时操作人"""
+    global temp_operators
+    try:
+        conn = _get_db_connection()
+        c = conn.cursor()
+
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS temp_operators (
+                user_id TEXT PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                last_name TEXT,
+                added_at INTEGER,
+                added_by INTEGER
+            )
+        """)
+        conn.commit()
+
+        c.execute("SELECT user_id, username, first_name, last_name FROM temp_operators")
+        rows = c.fetchall()
+        conn.close()
+
+        temp_operators = {}
+        for row in rows:
+            user_id = int(row['user_id'])
+            temp_operators[user_id] = {
+                "id": user_id,
+                "username": row['username'],
+                "first_name": row['first_name'],
+                "last_name": row['last_name']
+            }
+
+        print(f"✅ 已从数据库加载 {len(temp_operators)} 名临时操作人")
+        return temp_operators
+    except Exception as e:
+        print(f"❌ 加载临时操作人失败: {e}")
+        temp_operators = {}
+        return temp_operators
+
+def is_temp_authorized(user_id: int) -> bool:
+    """检查是否是临时操作人（仅记账权限）"""
+    return user_id in temp_operators
+
+def is_authorized(user_id: int, require_full_access: bool = False) -> bool:
+    """检查用户权限
+
+    Args:
+        user_id: 用户ID
+        require_full_access: 是否需要完全访问权限（True=需要完整权限，False=记账权限即可）
+    """
+    # 超级管理员始终有权限
+    if user_id == OWNER_ID:
+        return True
+
+    # 如果需要完整权限，检查是否是操作人
+    if require_full_access:
+        return user_id in operators
+
+    # 否则检查是否是操作人或临时操作人
+    return user_id in operators or user_id in temp_operators
+
+async def add_temp_operator(user_id: int, added_by: int, context: ContextTypes.DEFAULT_TYPE = None) -> bool:
+    """添加临时操作人"""
+    if user_id in temp_operators:
+        return False
+
+    # 尝试获取用户信息
+    username = None
+    first_name = None
+    last_name = None
+
+    if context:
+        try:
+            user = await context.bot.get_chat(user_id)
+            username = user.username
+            first_name = user.first_name
+            last_name = user.last_name
+        except Exception as e:
+            print(f"⚠️ 无法获取用户 {user_id} 的详细信息: {e}")
+
+    temp_operators[user_id] = {
+        "id": user_id,
+        "username": username,
+        "first_name": first_name,
+        "last_name": last_name
+    }
+
+    try:
+        conn = _get_db_connection()
+        c = conn.cursor()
+        c.execute(
+            "INSERT OR REPLACE INTO temp_operators (user_id, username, first_name, last_name, added_at, added_by) VALUES (?, ?, ?, ?, ?, ?)",
+            (str(user_id), username, first_name, last_name, int(time.time()), added_by)
+        )
+        conn.commit()
+        conn.close()
+        print(f"💾 [DB] 临时操作员 {user_id} 已持久化保存。")
+        return True
+    except Exception as e:
+        print(f"❌ [DB Error] 保存临时操作员失败: {e}")
+        temp_operators.pop(user_id, None)
+        return False
+
+def remove_temp_operator(user_id: int) -> bool:
+    """删除临时操作人"""
+    if user_id not in temp_operators:
+        return False
+
+    temp_operators.pop(user_id, None)
+
+    try:
+        conn = _get_db_connection()
+        c = conn.cursor()
+        c.execute("DELETE FROM temp_operators WHERE user_id = ?", (str(user_id),))
+        conn.commit()
+        conn.close()
+        print(f"🗑️ [DB] 临时操作员 {user_id} 已从数据库移除。")
+        return True
+    except Exception as e:
+        print(f"❌ [DB Error] 删除临时操作员失败: {e}")
+        return False
+
+def get_temp_operators_list_text() -> str:
+    """生成临时操作人列表文本"""
+    if not temp_operators:
+        return "📭 当前没有临时操作人"
+
+    text = "👥 临时操作人列表：\n" + "━" * 20 + "\n"
+    for user_id, info in temp_operators.items():
+        display_name = []
+        if info.get("first_name"):
+            display_name.append(info["first_name"])
+        if info.get("last_name"):
+            display_name.append(info["last_name"])
+
+        name_str = " ".join(display_name) if display_name else "未设置昵称"
+        username_str = f"(@{info['username']})" if info.get("username") else ""
+
+        text += f"👤 {name_str} {username_str}\n"
+        text += f"🆔 ID: `{user_id}`\n"
+        text += "━" * 20 + "\n"
+
+    return text
