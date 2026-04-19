@@ -17,10 +17,21 @@ from auth import is_authorized
 # 配置日志
 logger = logging.getLogger(__name__)
 
+# 状态定义
+ACCOUNTING_DATE_SELECT = 1
+ACCOUNTING_CONFIRM_CLEAR = 2
+ACCOUNTING_CONFIRM_CLEAR_ALL = 3
+ACCOUNTING_VIEW_PAGE = 4
+ACCOUNTING_YEAR_SELECT = 5
+ACCOUNTING_MONTH_SELECT = 6
+ACCOUNTING_DATE_SELECT_PAGE = 7
 # 常量配置
 MAX_DISPLAY_RECORDS = 8  # 账单显示的最大记录数
 PAGE_SIZE = 10  # 分页每页显示记录数
 DB_TIMEOUT = 10  # 数据库连接超时（秒）
+
+# 每页显示的天数
+DAYS_PER_PAGE = 10
 
 # USDT 合约地址（可根据需要添加更多）
 USDT_CONTRACTS = {
@@ -297,13 +308,6 @@ def format_fee_info(fee_rate: float, exchange_rate: float) -> str:
     return f"{fee_sup}/{exchange_rate:.2f}"
 
 
-# 状态定义
-ACCOUNTING_DATE_SELECT = 1
-ACCOUNTING_CONFIRM_CLEAR = 2
-ACCOUNTING_CONFIRM_CLEAR_ALL = 3
-ACCOUNTING_VIEW_PAGE = 4
-
-
 class AccountingManager:
     """记账管理器"""
 
@@ -394,9 +398,17 @@ class AccountingManager:
                     end_time INTEGER NOT NULL,
                     date TEXT NOT NULL,
                     fee_rate REAL DEFAULT 0.0,
-                    exchange_rate REAL DEFAULT 1.0
+                    exchange_rate REAL DEFAULT 1.0,
+                    per_transaction_fee REAL DEFAULT 0.0
                 )
             """)
+
+            # 如果表已存在但没有 per_transaction_fee 字段，添加它
+            try:
+                c.execute("SELECT per_transaction_fee FROM accounting_sessions LIMIT 1")
+            except sqlite3.OperationalError:
+                c.execute("ALTER TABLE accounting_sessions ADD COLUMN per_transaction_fee REAL DEFAULT 0")
+                logger.info("✅ 已添加 per_transaction_fee 字段到 accounting_sessions 表")
 
             # 添加用户追踪表
             c.execute("""
@@ -502,7 +514,7 @@ class AccountingManager:
                 now = int(time.time())
 
                 c.execute("""
-                    SELECT session_id, fee_rate, exchange_rate, session_start_time
+                    SELECT session_id, fee_rate, exchange_rate, per_transaction_fee, session_start_time
                     FROM group_accounting_config 
                     WHERE group_id = ? AND is_active = 1
                 """, (group_id,))
@@ -511,7 +523,7 @@ class AccountingManager:
                 if not row:
                     return None
 
-                old_session_id, fee_rate, exchange_rate, start_time = row
+                old_session_id, fee_rate, exchange_rate, per_transaction_fee, start_time = row
 
                 # 获取所有记录，按日期分组
                 c.execute("""
@@ -557,9 +569,9 @@ class AccountingManager:
                     # 插入该日期的会话记录
                     c.execute("""
                         INSERT INTO accounting_sessions 
-                        (session_id, group_id, start_time, end_time, date, fee_rate, exchange_rate)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """, (new_session_id, group_id, day_start, day_end, date_str, fee_rate, exchange_rate))
+                        (session_id, group_id, start_time, end_time, date, fee_rate, exchange_rate, per_transaction_fee)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (new_session_id, group_id, day_start, day_end, date_str, fee_rate, exchange_rate, per_transaction_fee))
 
                 # 更新原会话为已结束（但实际数据已按日期拆分）
                 c.execute("""
@@ -971,7 +983,7 @@ class AccountingManager:
             return []
 
     def get_stats_by_date(self, group_id: str, date_str: str) -> Dict:
-        """获取指定日期的统计"""
+        """获取指定日期的统计（包含费率和汇率）"""
         try:
             with self._get_conn() as conn:
                 c = conn.cursor()
@@ -1000,6 +1012,34 @@ class AccountingManager:
                     expense_usdt = row[2] or 0
                     expense_count = row[3] or 0
 
+            # 🔥 获取该日期的费率和汇率（从第一条入款记录中获取）
+            fee_rate = 0
+            exchange_rate = 1
+            per_transaction_fee = 0
+
+            with self._get_conn() as conn:
+                c = conn.cursor()
+                # 获取该日期的费率和汇率
+                c.execute("""
+                    SELECT rate, fee_rate FROM accounting_records
+                    WHERE group_id = ? AND date = ? AND record_type = 'income'
+                    LIMIT 1
+                """, (group_id, date_str))
+                row = c.fetchone()
+                if row:
+                    exchange_rate = row[0] if row[0] else 1
+                    fee_rate = row[1] if row[1] else 0
+
+                # 🔥 获取该日期的单笔费用（从历史会话中查找）
+                c.execute("""
+                    SELECT per_transaction_fee FROM accounting_sessions
+                    WHERE group_id = ? AND date = ?
+                    LIMIT 1
+                """, (group_id, date_str))
+                row = c.fetchone()
+                if row:
+                    per_transaction_fee = row[0] if row[0] else 0
+
             return {
                 'income_total': income_total,
                 'income_usdt': income_usdt,
@@ -1007,7 +1047,10 @@ class AccountingManager:
                 'expense_total': expense_total,
                 'expense_usdt': expense_usdt,
                 'expense_count': expense_count,
-                'pending_usdt': income_usdt - expense_usdt
+                'pending_usdt': income_usdt - expense_usdt,
+                'fee_rate': fee_rate,
+                'exchange_rate': exchange_rate,
+                'per_transaction_fee': per_transaction_fee  # 🔥 添加单笔费用
             }
         except Exception as e:
             logger.error(f"获取日期统计失败: {e}")
@@ -1018,7 +1061,10 @@ class AccountingManager:
                 'expense_total': 0,
                 'expense_usdt': 0,
                 'expense_count': 0,
-                'pending_usdt': 0
+                'pending_usdt': 0,
+                'fee_rate': 0,
+                'exchange_rate': 1,
+                'per_transaction_fee': 0
             }
 
     def clear_current_session(self, group_id: str) -> bool:
@@ -1813,32 +1859,250 @@ async def handle_current_bill(update: Update, context: ContextTypes.DEFAULT_TYPE
     await send_bill_page(update, context)
     
 async def handle_query_bill(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """查询历史账单（按日期）"""
+    """查询历史账单 - 先选择年份"""
     chat = update.effective_chat
     if chat.type not in ['group', 'supergroup']:
         await update.message.reply_text("❌ 此功能仅在群组中可用")
         return
 
     group_id = str(chat.id)
-    dates = accounting_manager.get_sessions_by_date(group_id)
 
-    if not dates:
+    # 获取所有有记录的年份
+    records = accounting_manager.get_total_records(group_id)
+    years = set()
+    for r in records:
+        if r.get('created_at'):
+            year = datetime.fromtimestamp(r['created_at'], tz=BEIJING_TZ).year
+            years.add(year)
+
+    if not years:
         await update.message.reply_text("📭 暂无历史账单记录")
         return
 
-    keyboard = []
-    for date_info in dates[:10]:
-        date_str = date_info['date']
-        keyboard.append([InlineKeyboardButton(f"📅 {date_str}", callback_data=f"acct_date_{date_str}")])
+    # 按年份倒序排序
+    years = sorted(list(years), reverse=True)
+    context.user_data["bill_years"] = years
+    context.user_data["query_group_id"] = group_id
 
+    # 显示年份选择
+    keyboard = []
+    row = []
+    for i, year in enumerate(years):
+        row.append(InlineKeyboardButton(f"{year}年", callback_data=f"bill_year_{year}"))
+        if len(row) == 3:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
     keyboard.append([InlineKeyboardButton("❌ 取消", callback_data="acct_cancel")])
 
     await update.message.reply_text(
-        "📅 **请选择要查询的日期：**",
+        "📅 **请选择年份：**",
         reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='Markdown'
+        parse_mode="Markdown"
     )
-    return ACCOUNTING_DATE_SELECT
+    return ACCOUNTING_YEAR_SELECT
+
+async def handle_year_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理年份选择"""
+    query = update.callback_query
+    await query.answer()
+
+    year = int(query.data.replace("bill_year_", ""))
+    group_id = context.user_data.get("query_group_id")
+
+    # 获取该年份有记录的月份
+    records = accounting_manager.get_total_records(group_id)
+    months = set()
+    for r in records:
+        if r.get('created_at'):
+            dt = datetime.fromtimestamp(r['created_at'], tz=BEIJING_TZ)
+            if dt.year == year:
+                months.add(dt.month)
+
+    months = sorted(list(months))
+    context.user_data["selected_year"] = year
+    context.user_data["bill_months"] = months
+
+    # 显示月份选择
+    keyboard = []
+    row = []
+    for i, month in enumerate(months):
+        row.append(InlineKeyboardButton(f"{month}月", callback_data=f"bill_month_{month}"))
+        if len(row) == 4:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    keyboard.append([InlineKeyboardButton("◀️ 返回", callback_data="bill_back_to_years")])
+
+    await query.message.edit_text(
+        f"📅 **{year}年 - 请选择月份：**",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+    return ACCOUNTING_MONTH_SELECT
+
+async def handle_month_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理月份选择"""
+    query = update.callback_query
+    await query.answer()
+
+    month = int(query.data.replace("bill_month_", ""))
+    year = context.user_data.get("selected_year")
+    group_id = context.user_data.get("query_group_id")
+
+    # 获取该月份有记录的日期
+    records = accounting_manager.get_total_records(group_id)
+    days = set()
+    for r in records:
+        if r.get('created_at'):
+            dt = datetime.fromtimestamp(r['created_at'], tz=BEIJING_TZ)
+            if dt.year == year and dt.month == month:
+                days.add(dt.day)
+
+    days = sorted(list(days))
+    context.user_data["selected_month"] = month
+    context.user_data["bill_days"] = days
+    context.user_data["bill_days_page"] = 0
+
+    await send_days_page(update, context)
+    return ACCOUNTING_DATE_SELECT_PAGE
+
+async def send_days_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """发送日期选择页面"""
+    days = context.user_data.get("bill_days", [])
+    page = context.user_data.get("bill_days_page", 0)
+    year = context.user_data.get("selected_year")
+    month = context.user_data.get("selected_month")
+
+    if not days:
+        await update.callback_query.message.edit_text(f"📭 {year}年{month}月 没有账单记录")
+        return
+
+    page_size = DAYS_PER_PAGE
+    total_pages = (len(days) + page_size - 1) // page_size
+    start = page * page_size
+    end = min(start + page_size, len(days))
+    page_days = days[start:end]
+
+    # 构建日期按钮
+    keyboard = []
+    row = []
+    for i, day in enumerate(page_days):
+        row.append(InlineKeyboardButton(f"{day}日", callback_data=f"bill_day_{day}"))
+        if len(row) == 5:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+
+    # 分页按钮
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton("⬅️ 上一页", callback_data="bill_days_prev"))
+    if page < total_pages - 1:
+        nav_buttons.append(InlineKeyboardButton("下一页 ➡️", callback_data="bill_days_next"))
+    if nav_buttons:
+        keyboard.append(nav_buttons)
+
+    keyboard.append([InlineKeyboardButton("◀️ 返回月份", callback_data="bill_back_to_months")])
+
+    await update.callback_query.message.edit_text(
+        f"📅 **{year}年{month}月 - 请选择日期：**\n第 {page+1}/{total_pages} 页",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+
+async def handle_day_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理日期选择，显示账单"""
+    query = update.callback_query
+    await query.answer()
+
+    day = int(query.data.replace("bill_day_", ""))
+    year = context.user_data.get("selected_year")
+    month = context.user_data.get("selected_month")
+    group_id = context.user_data.get("query_group_id")
+
+    date_str = f"{year}-{month:02d}-{day:02d}"
+
+    stats = accounting_manager.get_stats_by_date(group_id, date_str)
+    records = accounting_manager.get_records_by_date(group_id, date_str)
+
+    if stats['income_count'] == 0 and stats['expense_count'] == 0:
+        await query.message.edit_text(f"📭 {date_str} 暂无账单记录")
+        return
+
+    # 存储到上下文
+    context.user_data["bill_records"] = records
+    context.user_data["bill_stats"] = stats
+    context.user_data["bill_date"] = date_str
+    context.user_data["bill_page"] = 0
+    context.user_data["bill_type"] = "date"
+    context.user_data["bill_title"] = f"{date_str} 账单"
+
+    await send_bill_page(update, context)
+    return ACCOUNTING_VIEW_PAGE
+
+async def handle_bill_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理账单导航（返回年份/月份/日期分页）"""
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data
+
+    if data == "bill_back_to_years":
+        # 返回年份选择
+        years = context.user_data.get("bill_years", [])
+        keyboard = []
+        row = []
+        for i, year in enumerate(years):
+            row.append(InlineKeyboardButton(f"{year}年", callback_data=f"bill_year_{year}"))
+            if len(row) == 3:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
+        keyboard.append([InlineKeyboardButton("❌ 取消", callback_data="acct_cancel")])
+        await query.message.edit_text(
+            "📅 **请选择年份：**",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+        return ACCOUNTING_YEAR_SELECT
+
+    elif data == "bill_back_to_months":
+        # 返回月份选择
+        months = context.user_data.get("bill_months", [])
+        year = context.user_data.get("selected_year")
+        keyboard = []
+        row = []
+        for i, month in enumerate(months):
+            row.append(InlineKeyboardButton(f"{month}月", callback_data=f"bill_month_{month}"))
+            if len(row) == 4:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
+        keyboard.append([InlineKeyboardButton("◀️ 返回年份", callback_data="bill_back_to_years")])
+        await query.message.edit_text(
+            f"📅 **{year}年 - 请选择月份：**",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+        return ACCOUNTING_MONTH_SELECT
+
+    elif data == "bill_days_prev":
+        page = context.user_data.get("bill_days_page", 0)
+        context.user_data["bill_days_page"] = max(0, page - 1)
+        await send_days_page(update, context)
+        return ACCOUNTING_DATE_SELECT_PAGE
+
+    elif data == "bill_days_next":
+        page = context.user_data.get("bill_days_page", 0)
+        context.user_data["bill_days_page"] = page + 1
+        await send_days_page(update, context)
+        return ACCOUNTING_DATE_SELECT_PAGE
 
 
 async def handle_date_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2478,16 +2742,28 @@ async def send_bill_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message += f"📊 本页：+{page_income_usdt:.2f} USDT / -{page_expense_usdt:.2f} USDT"
 
     # 获取当前会话的费率和汇率（用于日期查询）
-    # 从第一条记录中获取费率和汇率（如果存在）
-    first_record = records[0] if records else None
-    if first_record:
-        current_fee_rate = first_record.get('fee_rate', 0)
-        current_rate = first_record.get('rate', 1)
-        current_per_fee = 0  # 单笔费用不在记录中，需要从配置获取
-    else:
+    # 从入款记录中查找费率和汇率（即使为0也要记录）
+    current_fee_rate = None
+    current_rate = None
+    for r in records:
+        if r['type'] == 'income':
+            # 只要有入款记录，就记录其费率和汇率
+            if current_fee_rate is None and 'fee_rate' in r:
+                current_fee_rate = r.get('fee_rate', 0)
+            if current_rate is None and 'rate' in r:
+                current_rate = r.get('rate', 0)
+            # 如果两个都有了，可以提前退出，但为了获取非零值继续查找
+            # 如果有非零值，优先使用非零值
+            if r.get('fee_rate', 0) != 0:
+                current_fee_rate = r.get('fee_rate', 0)
+            if r.get('rate', 0) != 0:
+                current_rate = r.get('rate', 0)
+
+    # 如果没有找到任何费率/汇率，使用默认值
+    if current_fee_rate is None:
         current_fee_rate = 0
+    if current_rate is None:
         current_rate = 1
-        current_per_fee = 0
 
     # 总计统计
     if bill_type == "date":
@@ -2495,11 +2771,17 @@ async def send_bill_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total_income_usdt = sum(r['amount_usdt'] for r in records)
         total_expense_usdt = sum(r['amount_usdt'] for r in records if r['type'] == 'expense')
         pending_usdt = total_income_usdt - total_expense_usdt
+
+        # 获取该日期的单笔费用（从 stats 中获取，因为 get_stats_by_date 已经返回了）
+        per_transaction_fee = 0
+        stats = context.user_data.get("bill_stats", {})
+        if stats:
+            per_transaction_fee = stats.get('per_transaction_fee', 0)
+
         message += f"\n\n📊 **当日总计**：+{total_income_usdt:.2f} USDT / -{total_expense_usdt:.2f} USDT"
-        message += f"\n⏳ **当日净收入**：{pending_usdt:.2f} USDT"
-        # 显示费率和汇率（从记录中获取）
-        if current_fee_rate > 0 or current_rate != 1:
-            message += f"\n💰 费率：{current_fee_rate}% | 💱 汇率：{current_rate}"
+        message += f"\n⏳ **待下发**：{pending_usdt:.2f} USDT"
+        # 始终显示费率、汇率和单笔费用（不再有条件判断）
+        message += f"\n💰 费率：{current_fee_rate}% | 💱 汇率：{current_rate} | 📝 单笔费用：{per_transaction_fee}元"
     else:
         # 非日期查询：显示总计统计和费率汇率
         stats = context.user_data.get("bill_stats", {})
@@ -2860,12 +3142,26 @@ def get_conversation_handler():
                 CallbackQueryHandler(handle_bill_pagination, pattern="^bill_page_"),
                 CallbackQueryHandler(lambda u, c: ConversationHandler.END, pattern="^bill_close$"),
             ],
+            # 新增的三级选择状态
+            ACCOUNTING_YEAR_SELECT: [
+                CallbackQueryHandler(handle_year_selection, pattern="^bill_year_"),
+                CallbackQueryHandler(lambda u, c: ConversationHandler.END, pattern="^acct_cancel$"),
+            ],
+            ACCOUNTING_MONTH_SELECT: [
+                CallbackQueryHandler(handle_month_selection, pattern="^bill_month_"),
+                CallbackQueryHandler(handle_bill_navigation, pattern="^bill_back_to_years$"),
+            ],
+            ACCOUNTING_DATE_SELECT_PAGE: [
+                CallbackQueryHandler(handle_day_selection, pattern="^bill_day_"),
+                CallbackQueryHandler(handle_bill_navigation, pattern="^bill_days_prev$"),
+                CallbackQueryHandler(handle_bill_navigation, pattern="^bill_days_next$"),
+                CallbackQueryHandler(handle_bill_navigation, pattern="^bill_back_to_months$"),
+            ],
         },
         fallbacks=[],
         per_message=False,
     )
     return conv_handler
-
 
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理记账菜单按钮点击"""
