@@ -2713,13 +2713,18 @@ def get_conversation_handler():
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理记账菜单按钮点击"""
     query = update.callback_query
-    await query.answer()
 
     if not is_authorized(query.from_user.id, require_full_access=False):
-        await query.message.reply_text("❌ 此功能仅限管理员或操作员使用")
+        await query.answer("❌ 无权限", show_alert=True)
+        await query.message.reply_text(
+            "❌ 记账功能仅限管理员/操作员/临时操作员才能使用\n\n"
+            "如需使用，请联系 @ChinaEdward 申请权限"
+        )
         # 清除状态
         context.user_data.pop("active_module", None)
         return
+
+    await query.answer()
 
     # 设置模块标识
     context.user_data["active_module"] = "accounting"
