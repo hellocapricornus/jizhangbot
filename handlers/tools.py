@@ -1,10 +1,31 @@
 # handlers/tools.py - 完整版（修复循环导入）
-
 import re
+import asyncio
 from datetime import datetime, timedelta
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
-from db import get_all_groups_from_db, get_all_categories, get_groups_by_category
+
+# 数据库相关
+from db import (
+    get_all_groups_from_db, 
+    get_all_categories, 
+    get_groups_by_category,
+    get_monitored_addresses
+)
+
+# 监控模块相关
+from handlers.monitor import (
+    get_trc20_transactions,
+    get_address_balance
+)
+
+# 转账模块相关
+from handlers.transfer import get_trc20_transfers, extract_counterparties
+
+# 记账模块相关
+from handlers.accounting import accounting_manager
+
+from handlers.data_provider import run_async
 
 # ========== 工具定义 ==========
 TOOLS = [
