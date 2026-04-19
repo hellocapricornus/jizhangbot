@@ -206,6 +206,27 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_query_bill(update, context)
         return
 
+    # 添加年份/月份/日期选择回调
+    if query.data.startswith("bill_year_"):
+        from handlers.accounting import handle_year_selection
+        await handle_year_selection(update, context)
+        return
+
+    if query.data.startswith("bill_month_"):
+        from handlers.accounting import handle_month_selection
+        await handle_month_selection(update, context)
+        return
+
+    if query.data.startswith("bill_day_"):
+        from handlers.accounting import handle_day_selection
+        await handle_day_selection(update, context)
+        return
+
+    if query.data in ["bill_back_to_years", "bill_back_to_months", "bill_days_prev", "bill_days_next"]:
+        from handlers.accounting import handle_bill_navigation
+        await handle_bill_navigation(update, context)
+        return
+
     if query.data == "acct_clear":
         from handlers.accounting import handle_clear_bill
         class FakeMessage:
