@@ -10,12 +10,14 @@ PAGE_SIZE = 5
 # 点击 USDT 按钮 → 提示输入地址
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
 
     # 完整权限检查（禁止临时操作人）
     if not is_authorized(query.from_user.id, require_full_access=True):
-        await query.message.reply_text("❌ 只有操作人才能使用此功能")
+        await query.answer("❌ 无权限", show_alert=True)
+        await query.message.reply_text("❌ 管理人/操作员才能使用，如需使用请联系 @ChinaEdward")
         return
+
+    await query.answer()
 
     # 设置模块标识（关键！）
     context.user_data["active_module"] = "usdt"
