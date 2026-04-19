@@ -236,6 +236,7 @@ async def monitor_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not is_authorized(user_id, require_full_access=True):
         await query.answer("❌ 无权限", show_alert=True)
+        await query.message.reply_text("❌ 管理人/操作员才能使用，如需使用请联系 @ChinaEdward")
         return
 
     await query.answer()
