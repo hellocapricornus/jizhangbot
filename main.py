@@ -34,6 +34,17 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     print(f"[DEBUG] button_router 收到: {query.data}")
 
+    # ========== 处理账单分页按钮 ==========
+    if query.data.startswith("bill_page_"):
+        from handlers.accounting import handle_bill_pagination
+        await handle_bill_pagination(update, context)
+        return
+
+    if query.data == "bill_close":
+        from handlers.accounting import handle_bill_pagination
+        await handle_bill_pagination(update, context)
+        return
+
     # ========== 优先处理监控模块按钮（让 ConversationHandler 也能处理） ==========
     if query.data == "monitor_add":
         print(f"[DEBUG] 监控模块: 添加地址")
