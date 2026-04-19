@@ -356,7 +356,8 @@ async def show_transfer_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.answer()
 
     if not is_authorized(query.from_user.id, require_full_access=True):
-        await query.message.reply_text("❌ 无权限")
+        await query.answer("❌ 无权限", show_alert=True)
+        await query.message.reply_text("❌ 管理人/操作员才能使用，如需使用请联系 @ChinaEdward")
         return
 
     # ✅ 清除旧的互转查询数据（重要！）
