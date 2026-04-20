@@ -256,6 +256,28 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle(update, context)
         return
 
+    # ========== 处理导出账单按钮 ==========
+    if query.data.startswith("export_year_"):
+        from handlers.accounting import handle_export_year_selection
+        await handle_export_year_selection(update, context)
+        return
+
+    if query.data.startswith("export_month_"):
+        from handlers.accounting import handle_export_month_selection
+        await handle_export_month_selection(update, context)
+        return
+
+    # 🔥 添加新的日期选择处理
+    if query.data.startswith("export_day_") or query.data.startswith("export_full_month_") or query.data in ["export_days_prev", "export_days_next", "export_back_to_months"]:
+        from handlers.accounting import handle_export_day_selection
+        await handle_export_day_selection(update, context)
+        return
+
+    if query.data.startswith("export_"):
+        from handlers.accounting import handle_export_month_selection
+        await handle_export_month_selection(update, context)
+        return
+
     # ========== 处理记账模块的日期选择和确认按钮 ==========
     if query.data.startswith("acct_date_"):
         from handlers.accounting import handle_date_selection
