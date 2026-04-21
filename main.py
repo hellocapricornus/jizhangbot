@@ -713,83 +713,6 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=get_main_menu()
     )
 
-# ========== 群组验证函数 ==========
-async def verify_groups_on_startup(app: Application):
-    """启动时验证所有群组，删除机器人不在的群组（增强版）"""
-    from db import get_all_groups_from_db
-
-    await asyncio.sleep(5)  # 等待机器人完全启动
-
-    all_groups = get_all_groups_from_db()
-    print(f"[启动检查] 开始验证 {len(all_groups)} 个群组...")
-
-    groups_to_delete = []
-
-    for group in all_groups:
-        group_id = group['id']
-        group_name = group.get('name', '未知群组')
-
-        # 使用多种方法验证
-        should_delete = False
-        reason = ""
-
-        # 方法1：尝试发送测试动作
-        try:
-            await app.bot.send_chat_action(chat_id=group_id, action="typing")
-            print(f"[启动检查] 群组 {group_name} 可以发送动作，有效")
-            continue  # 可以发送动作，说明机器人在群组中
-        except Exception as e:
-            error_msg = str(e).lower()
-            if "chat not found" in error_msg:
-                reason = "群组不存在"
-                should_delete = True
-            elif "bot was kicked" in error_msg:
-                reason = "机器人被踢出"
-                should_delete = True
-            elif "bot is not a member" in error_msg:
-                reason = "机器人不是成员"
-                should_delete = True
-            elif "group chat was upgraded" in error_msg:
-                reason = "群组已升级"
-                should_delete = True
-            else:
-                # 其他错误，尝试方法2
-                print(f"[启动检查] 发送动作失败: {e}，尝试获取成员信息")
-
-                # 方法2：获取成员信息
-                try:
-                    bot_member = await app.bot.get_chat_member(group_id, app.bot.id)
-                    if bot_member.status not in ['member', 'administrator']:
-                        reason = f"状态为 {bot_member.status}"
-                        should_delete = True
-                    else:
-                        # 状态正常，可能是网络问题
-                        print(f"[启动检查] 成员状态正常: {bot_member.status}")
-                except Exception as e2:
-                    error_msg2 = str(e2).lower()
-                    if "chat not found" in error_msg2:
-                        reason = "群组不存在"
-                        should_delete = True
-                    elif "bot was kicked" in error_msg2:
-                        reason = "机器人被踢出"
-                        should_delete = True
-                    else:
-                        reason = f"无法访问: {e2}"
-                        should_delete = True
-
-        if should_delete:
-            print(f"[启动检查] 标记删除群组 {group_name} ({group_id}): {reason}")
-            groups_to_delete.append(group_id)
-        else:
-            print(f"[启动检查] 群组 {group_name} 验证通过")
-
-    # 删除无效的群组
-    for group_id in groups_to_delete:
-        print(f"[启动检查] 删除无效群组: {group_id}")
-        delete_group_from_db(group_id)
-
-    print(f"[启动检查] 完成！删除了 {len(groups_to_delete)} 个无效群组")
-
 def main():
     # 初始化数据库和操作员
     init_db()
@@ -835,7 +758,7 @@ def main():
 
         for group in groups:
             group_id = group['id']
-            group_name = group.get('name', '未知')
+            group_name = group.get('title', '未知')
 
             try:
                 # 尝试发送动作
