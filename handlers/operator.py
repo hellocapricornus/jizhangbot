@@ -5,7 +5,8 @@ from telegram.ext import ContextTypes, ConversationHandler
 from auth import (
     add_operator, remove_operator, get_operators_list_text, 
     cmd_update_operator_info, update_all_operators_info,
-    add_temp_operator, remove_temp_operator, get_temp_operators_list_text
+    add_temp_operator, remove_temp_operator, get_temp_operators_list_text,
+    is_authorized  # 直接导入
 )
 from config import OWNER_ID
 
@@ -20,32 +21,56 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
 
-    if user_id != OWNER_ID:
-        await query.answer("❌ 只有控制人可以管理操作人", show_alert=True)
-        await query.message.reply_text("❌ 只有控制人可以管理操作人")
+    if not is_authorized(user_id, require_full_access=True):
+        await query.answer("❌ 只有控制人或操作人可以使用此功能", show_alert=True)
+        await query.message.reply_text("❌ 只有控制人或操作人可以使用此功能")
         return
 
-    # 清除之前可能残留的状态
-    context.user_data.pop("active_module", None)
+    # 清除状态
     context.user_data.pop("current_action", None)
+    context.user_data.pop("active_module", None)
 
-    keyboard = [
-        [InlineKeyboardButton("➕ 添加操作人", callback_data="op_add")],
-        [InlineKeyboardButton("➖ 删除操作人", callback_data="op_remove")],
-        [InlineKeyboardButton("📋 查询操作人", callback_data="op_list")],
-        [InlineKeyboardButton("🔄 更新信息", callback_data="op_update")],
-        [InlineKeyboardButton("👥 临时操作人", callback_data="op_temp_menu")],
-        [InlineKeyboardButton("◀️ 返回主菜单", callback_data="main_menu")],
-    ]
-    await query.message.reply_text(
-        "👤 操作人管理：请选择功能",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    # 根据身份显示不同菜单
+    if user_id == OWNER_ID:
+        # 控制人：完整菜单
+        keyboard = [
+            [InlineKeyboardButton("➕ 添加操作人", callback_data="op_add")],
+            [InlineKeyboardButton("➖ 删除操作人", callback_data="op_remove")],
+            [InlineKeyboardButton("📋 查询操作人", callback_data="op_list")],
+            [InlineKeyboardButton("🔄 更新信息", callback_data="op_update")],
+            [InlineKeyboardButton("👥 临时操作人", callback_data="op_temp_menu")],
+            [InlineKeyboardButton("◀️ 返回主菜单", callback_data="main_menu")],
+        ]
+        await query.message.edit_text(
+            "👤 操作人管理：请选择功能",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    elif is_authorized(user_id, require_full_access=True):
+        # 操作人：只能看到临时操作人菜单
+        keyboard = [
+            [InlineKeyboardButton("👥 临时操作人", callback_data="op_temp_menu")],
+            [InlineKeyboardButton("◀️ 返回主菜单", callback_data="main_menu")],
+        ]
+        await query.message.edit_text(
+            "👤 操作人管理\n\n"
+            "⚠️ 操作人只能管理【临时操作人】\n"
+            "正式操作人管理需要控制人权限\n\n"
+            "请选择功能：",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    else:
+        await query.message.reply_text("❌ 无权限")
 
-# 新增：临时操作人子菜单
+# 临时操作人子菜单
 async def temp_operator_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """临时操作人管理菜单"""
     query = update.callback_query
+    user_id = query.from_user.id
+
+    if not is_authorized(user_id, require_full_access=True):
+        await query.answer("❌ 无权限", show_alert=True)
+        return
+
     await query.answer()
 
     keyboard = [
@@ -67,7 +92,7 @@ async def temp_operator_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
         "请选择操作：",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown"
-    )  # ✅ 这里添加了右括号
+    )
 
 # 子按钮处理
 async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -75,11 +100,17 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     await query.answer()
 
-    if user_id != OWNER_ID:
-        await query.message.reply_text("❌ 无权限")
+    if not is_authorized(user_id, require_full_access=True):
+        await query.message.reply_text("❌ 只有控制人或操作人可以使用此功能")
         return
 
     data = query.data
+
+    # 正式操作人相关的按钮，只有控制人能用
+    if data in ["op_add", "op_remove", "op_list", "op_update"]:
+        if user_id != OWNER_ID:
+            await query.answer("❌ 只有控制人可以管理正式操作人", show_alert=True)
+            return
 
     if data == "op_add":
         context.user_data["current_action"] = ADD_OPERATOR
@@ -92,7 +123,6 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("请输入要删除的用户ID（纯数字）：")
 
     elif data == "op_list":
-        # 使用新的函数生成格式化的文本（会同时显示正式和临时操作人）
         text = get_operators_list_text()
         await query.message.reply_text(text, parse_mode="Markdown")
         context.user_data.pop("active_module", None)
@@ -107,7 +137,7 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await query.message.reply_text("⚠️ 没有操作人被更新，或更新失败")
 
-    # ========== 临时操作人处理 ==========
+    # 临时操作人处理（操作人也可以）
     elif data == "op_temp_menu":
         await temp_operator_menu(update, context)
 
@@ -133,7 +163,9 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if action not in [ADD_OPERATOR, REMOVE_OPERATOR, ADD_TEMP_OPERATOR, REMOVE_TEMP_OPERATOR]:
         return
-    if user_id != OWNER_ID:
+
+    if not is_authorized(user_id, require_full_access=True):
+        await update.message.reply_text("❌ 只有控制人或操作人可以使用此功能")
         return
 
     text = update.message.text.strip()
@@ -165,7 +197,6 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❌ 未找到操作人：{target_id}")
 
     elif action == ADD_TEMP_OPERATOR:
-        # 检查是否已经是正式操作人
         from auth import operators
         if target_id in operators:
             await update.message.reply_text(
@@ -193,19 +224,34 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("current_action", None)
     context.user_data.pop("active_module", None)
 
-    # 显示操作人管理菜单
-    keyboard = [
-        [InlineKeyboardButton("➕ 添加操作人", callback_data="op_add")],
-        [InlineKeyboardButton("➖ 删除操作人", callback_data="op_remove")],
-        [InlineKeyboardButton("📋 查询操作人", callback_data="op_list")],
-        [InlineKeyboardButton("🔄 更新信息", callback_data="op_update")],
-        [InlineKeyboardButton("👥 临时操作人", callback_data="op_temp_menu")],
-        [InlineKeyboardButton("◀️ 返回主菜单", callback_data="main_menu")],
-    ]
-    await update.message.reply_text(
-        "👤 操作人管理：请选择功能",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    # 根据用户身份显示不同菜单
+    if user_id == OWNER_ID:
+        # 控制人：完整菜单
+        keyboard = [
+            [InlineKeyboardButton("➕ 添加操作人", callback_data="op_add")],
+            [InlineKeyboardButton("➖ 删除操作人", callback_data="op_remove")],
+            [InlineKeyboardButton("📋 查询操作人", callback_data="op_list")],
+            [InlineKeyboardButton("🔄 更新信息", callback_data="op_update")],
+            [InlineKeyboardButton("👥 临时操作人", callback_data="op_temp_menu")],
+            [InlineKeyboardButton("◀️ 返回主菜单", callback_data="main_menu")],
+        ]
+        await update.message.reply_text(
+            "👤 操作人管理：请选择功能",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    else:
+        # 操作人：只能看到临时操作人菜单
+        keyboard = [
+            [InlineKeyboardButton("👥 临时操作人", callback_data="op_temp_menu")],
+            [InlineKeyboardButton("◀️ 返回主菜单", callback_data="main_menu")],
+        ]
+        await update.message.reply_text(
+            "👤 操作人管理\n\n"
+            "⚠️ 操作人只能管理【临时操作人】\n"
+            "正式操作人管理需要控制人权限\n\n"
+            "请选择功能：",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
 
 async def cancel_operator(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """取消操作员管理"""
@@ -213,14 +259,23 @@ async def cancel_operator(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("active_module", None)
     await update.message.reply_text("❌ 已取消操作")
 
-    keyboard = [
-        [InlineKeyboardButton("➕ 添加操作人", callback_data="op_add")],
-        [InlineKeyboardButton("➖ 删除操作人", callback_data="op_remove")],
-        [InlineKeyboardButton("📋 查询操作人", callback_data="op_list")],
-        [InlineKeyboardButton("🔄 更新信息", callback_data="op_update")],
-        [InlineKeyboardButton("👥 临时操作人", callback_data="op_temp_menu")],
-        [InlineKeyboardButton("◀️ 返回主菜单", callback_data="main_menu")],
-    ]
+    user_id = update.effective_user.id
+
+    if user_id == OWNER_ID:
+        keyboard = [
+            [InlineKeyboardButton("➕ 添加操作人", callback_data="op_add")],
+            [InlineKeyboardButton("➖ 删除操作人", callback_data="op_remove")],
+            [InlineKeyboardButton("📋 查询操作人", callback_data="op_list")],
+            [InlineKeyboardButton("🔄 更新信息", callback_data="op_update")],
+            [InlineKeyboardButton("👥 临时操作人", callback_data="op_temp_menu")],
+            [InlineKeyboardButton("◀️ 返回主菜单", callback_data="main_menu")],
+        ]
+    else:
+        keyboard = [
+            [InlineKeyboardButton("👥 临时操作人", callback_data="op_temp_menu")],
+            [InlineKeyboardButton("◀️ 返回主菜单", callback_data="main_menu")],
+        ]
+
     await update.message.reply_text(
         "👤 操作人管理：请选择功能",
         reply_markup=InlineKeyboardMarkup(keyboard)
