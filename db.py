@@ -422,6 +422,24 @@ def init_db():
     c.execute("CREATE INDEX IF NOT EXISTS idx_records_session_id ON accounting_records(session_id)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_records_date ON accounting_records(date)")
 
+    # ========== 添加索引优化（支持500个群组）==========
+    print("📊 正在创建数据库索引...")
+
+    # 记账记录表的索引
+    c.execute("CREATE INDEX IF NOT EXISTS idx_records_group_id ON accounting_records(group_id)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_records_date ON accounting_records(date)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_records_group_date ON accounting_records(group_id, date)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_records_created ON accounting_records(created_at)")
+
+    # 群组表的索引
+    c.execute("CREATE INDEX IF NOT EXISTS idx_groups_category ON groups(category)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_groups_last_seen ON groups(last_seen)")
+
+    # 用户表的索引
+    c.execute("CREATE INDEX IF NOT EXISTS idx_users_group_id ON group_users(group_id)")
+
+    print("✅ 数据库索引创建完成")
+
     conn.commit()
     conn.close()
     print(f"✅ 数据库初始化完成: {DB_PATH}")
@@ -458,6 +476,7 @@ def add_monitored_address(address: str, chain_type: str, added_by: int, note: st
             return False
 
         # 允许不同用户添加
+        current_time = int(time.time())
         c.execute("""
             INSERT INTO monitored_addresses (address, chain_type, added_by, added_at, last_check, note)
             VALUES (?, ?, ?, ?, 0, ?)
