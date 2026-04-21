@@ -93,27 +93,47 @@ async def get_monthly_stats(address: str) -> dict:
 async def get_trc20_transactions(address: str, min_timestamp: int = 0, limit: int = 200, offset: int = 0):
     """获取 TRC20 USDT 交易记录（支持分页）"""
     import aiohttp
-    try:
-        url = f"{TRONGRID_API}/v1/accounts/{address}/transactions/trc20"
-        headers = {"TRON-PRO-API-KEY": TRONGRID_API_KEY}
-        params = {
-            "contract_address": USDT_CONTRACT,
-            "limit": limit,
-            "min_timestamp": min_timestamp if min_timestamp > 0 else 0,
-            "offset": offset  # 新增 offset 参数
-        }
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, params=params) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return data.get("data", [])
-    except Exception as e:
-        print(f"查询交易失败: {e}")
+    import asyncio
+
+    # 添加超时和重试机制
+    max_retries = 3
+    retry_delay = 1
+
+    for attempt in range(max_retries):
+        try:
+            url = f"{TRONGRID_API}/v1/accounts/{address}/transactions/trc20"
+            headers = {"TRON-PRO-API-KEY": TRONGRID_API_KEY}
+            params = {
+                "contract_address": USDT_CONTRACT,
+                "limit": limit,
+                "min_timestamp": min_timestamp if min_timestamp > 0 else 0,
+                "offset": offset
+            }
+
+            timeout = aiohttp.ClientTimeout(total=15)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url, headers=headers, params=params) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        return data.get("data", [])
+                    else:
+                        print(f"API返回错误状态码: {resp.status}")
+                        return []
+        except asyncio.CancelledError:
+            print(f"请求被取消: {address}")
+            return []
+        except Exception as e:
+            print(f"查询交易失败 (尝试 {attempt+1}/{max_retries}): {e}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(retry_delay)
+            else:
+                return []
+
     return []
 
 
 async def check_address_transactions(context: ContextTypes.DEFAULT_TYPE):
-    """定时检查监控地址的交易"""
+    """定时检查监控地址的交易 - 优化版"""
     addresses = get_monitored_addresses()
     if not addresses:
         print("📭 没有监控地址，跳过检查")
@@ -127,26 +147,27 @@ async def check_address_transactions(context: ContextTypes.DEFAULT_TYPE):
     for addr_info in addresses:
         address = addr_info["address"]
         last_check = addr_info.get("last_check", 0)
+        added_at = addr_info.get("added_at", 0)
         added_by = addr_info.get("added_by")
         note = addr_info.get("note", "")
 
         print(f"  检查地址: {address[:8]}... (备注: {note or '无'})")
 
-        # 如果是第一次检查（last_check=0），只检查最近24小时的交易
+        # 确定查询起始时间
         if last_check == 0:
-            min_timestamp = (current_time - 86400) * 1000  # 24小时前
-            print(f"首次监控地址 {address}，只检查最近24小时的交易")
+            # 新地址：从添加时间开始检查（不发送历史消息）
+            min_timestamp = added_at * 1000
+            print(f"  新监控地址，从添加时间开始检查")
         else:
-            min_timestamp = last_check
+            min_timestamp = last_check * 1000
 
-        # 获取新交易（从上次检查时间之后）
+        # 获取新交易
         txs = await get_trc20_transactions(address, min_timestamp)
 
         if txs:
-            # 更新最后检查时间
-            update_address_last_check(address, current_time)
+            print(f"  发现 {len(txs)} 笔新交易")
 
-            # 获取当前余额
+            # 获取当前余额和月度统计
             current_balance = await get_address_balance(address)
             monthly_stats = await get_monthly_stats(address)
 
@@ -162,8 +183,14 @@ async def check_address_transactions(context: ContextTypes.DEFAULT_TYPE):
                 if is_tx_notified(tx_id):
                     continue
 
-                # 检查交易记录是否已存在但未通知
-                # 如果不存在，先添加记录
+                # 跳过添加时间之前的历史交易
+                if last_check == 0 and timestamp < added_at:
+                    print(f"    跳过添加前的历史交易: {tx_id[:10]}...")
+                    # 标记为已通知，避免下次再处理
+                    mark_tx_notified(tx_id)
+                    continue
+
+                # 检查交易记录是否已存在
                 conn = get_db_connection()
                 c = conn.cursor()
                 c.execute("SELECT id, notified FROM address_transactions WHERE tx_id = ?", (tx_id,))
@@ -171,7 +198,6 @@ async def check_address_transactions(context: ContextTypes.DEFAULT_TYPE):
                 conn.close()
 
                 if existing:
-                    # 记录存在但未通知，直接标记为已通知并跳过
                     if existing[1] == 0:
                         mark_tx_notified(tx_id)
                     continue
@@ -189,13 +215,12 @@ async def check_address_transactions(context: ContextTypes.DEFAULT_TYPE):
                 beijing_time = utc_time.astimezone(BEIJING_TZ)
                 time_str = beijing_time.strftime('%Y-%m-%d %H:%M:%S')
 
-                # 构建消息（包含备注）
+                # 构建消息
                 message = (
                     f"🔔 **USDT 交易监控提醒**\n\n"
                     f"📌 监控地址：`{address[:8]}...{address[-6:]}`\n"
                 )
 
-                # 如果有备注，显示备注
                 if note:
                     message += f"📝 备注：{note}\n"
                 else:
@@ -218,15 +243,16 @@ async def check_address_transactions(context: ContextTypes.DEFAULT_TYPE):
                     f"• 净收入：**{monthly_stats['net']:.2f} USDT**\n\n"
                 )
 
-                # 只发送给添加该地址的用户
                 try:
                     await bot.send_message(chat_id=added_by, text=message, parse_mode="Markdown")
                     print(f"✅ 已发送监控通知给用户 {added_by} (备注: {note or '无'})")
                 except Exception as e:
                     print(f"发送给用户 {added_by} 失败: {e}")
 
-                # 标记为已通知
                 mark_tx_notified(tx_id)
+
+        # 🔥 只有一处更新 last_check（在处理完交易后）
+        update_address_last_check(address, current_time)
 
 
 async def monitor_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
