@@ -431,11 +431,16 @@ async def bc_prepare_send(update: Update, context: ContextTypes.DEFAULT_TYPE, mo
             f"📝 确认发送配置\n\n"
             f"{mode_text}\n"
             f"🎯 目标数量：{len(target_ids)} 个\n\n"
-            f"👉 请输入要发送的消息内容：\n"
-            f"(支持 Markdown，输入 /cancel_broadcast 取消)\n\n"
-            f"💡 提示：直接输入文字开始群发，或点击下方按钮取消",
+            f"👉 请发送要群发的内容：\n\n"
+            f"支持的类型：\n"
+            f"• 📝 文字消息\n"
+            f"• 🖼️ 图片（可附带说明）\n"
+            f"• 🎬 视频（可附带说明）\n"
+            f"• 📎 文件\n"
+            f"• 🎭 GIF动图\n\n"
+            f"💡 提示：输入 /cancel_broadcast 取消",
             parse_mode=None,
-            reply_markup=cancel_markup  # 添加取消按钮
+            reply_markup=cancel_markup
         )
     except Exception as e:
         logger.error(f"发送提示消息失败: {e}")
@@ -626,127 +631,332 @@ async def bc_next_batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await bc_execute_batch(update, context)
 
 # --- 状态 2: 输入消息 ---
-
 async def receive_message_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    if text == "/cancel_broadcast":
-        # 清理数据
+    """接收消息输入（支持文字、图片、视频、文件）"""
+    message = update.message
+
+    # 调试日志
+    logger.info(f"收到消息输入: text={message.text}, photo={bool(message.photo)}, video={bool(message.video)}")
+
+    # 检查是否是取消命令
+    if message.text and message.text.strip() == "/cancel_broadcast":
         keys = ["bc_all_groups", "bc_selected_ids", "bc_message_content", "bc_temp_target_ids",
                 "bc_selected_category", "bc_batches", "bc_current_batch", "bc_batch_results",
                 "bc_waiting_for_next", "bc_current_page"]
         for k in keys:
             context.user_data.pop(k, None)
         context.user_data.pop("active_module", None)
-
-        # 返回主菜单
         from handlers.menu import get_main_menu
-        await update.message.reply_text(
-            "❌ 已取消，返回主菜单",
-            reply_markup=get_main_menu()
-        )
+        await update.message.reply_text("❌ 已取消，返回主菜单", reply_markup=get_main_menu())
         return ConversationHandler.END
 
-    context.user_data["bc_message_content"] = text
+    # 存储消息内容（支持多种类型）
+    message_data = {}
+
+    # 文字消息
+    if message.text:
+        message_data["type"] = "text"
+        message_data["content"] = message.text
+        logger.info(f"检测到文字消息: {message.text[:50]}")
+    # 图片消息
+    elif message.photo:
+        message_data["type"] = "photo"
+        # 取最大尺寸的图片
+        photo = message.photo[-1]
+        message_data["file_id"] = photo.file_id
+        message_data["caption"] = message.caption or ""
+        logger.info(f"检测到图片消息, file_id: {photo.file_id[:20]}...")
+    # 视频消息
+    elif message.video:
+        message_data["type"] = "video"
+        message_data["file_id"] = message.video.file_id
+        message_data["caption"] = message.caption or ""
+        logger.info(f"检测到视频消息, file_id: {message.video.file_id[:20]}...")
+    # 文档/文件消息
+    elif message.document:
+        message_data["type"] = "document"
+        message_data["file_id"] = message.document.file_id
+        message_data["caption"] = message.caption or ""
+        message_data["filename"] = message.document.file_name
+        logger.info(f"检测到文件消息: {message.document.file_name}")
+    # 动画/GIF消息
+    elif message.animation:
+        message_data["type"] = "animation"
+        message_data["file_id"] = message.animation.file_id
+        message_data["caption"] = message.caption or ""
+        logger.info(f"检测到GIF消息")
+    # 音频消息
+    elif message.audio:
+        message_data["type"] = "audio"
+        message_data["file_id"] = message.audio.file_id
+        message_data["caption"] = message.caption or ""
+        logger.info(f"检测到音频消息")
+    # 贴纸消息
+    elif message.sticker:
+        message_data["type"] = "sticker"
+        message_data["file_id"] = message.sticker.file_id
+        logger.info(f"检测到贴纸消息")
+    else:
+        await update.message.reply_text("❌ 不支持此消息类型，请发送文字、图片、视频或文件")
+        return BC_INPUT_MESSAGE
+
+    # 保存消息数据
+    context.user_data["bc_message_data"] = message_data
     count = len(context.user_data.get("bc_temp_target_ids", []))
 
-    # 添加取消按钮
+    # 显示预览 - 根据不同类型显示实际内容
     keyboard = [
         [InlineKeyboardButton("🚀 确认发送", callback_data="bc_exec_confirm")],
         [InlineKeyboardButton("✏️ 重新输入", callback_data="bc_reinput")],
         [InlineKeyboardButton("❌ 取消群发", callback_data="bc_cancel_and_exit")]
     ]
 
-    preview = text[:60] + "..." if len(text) > 60 else text
+    if message_data["type"] == "text":
+        # 文字消息：显示文字内容
+        preview = message_data["content"][:200] + "..." if len(message_data["content"]) > 200 else message_data["content"]
+        await update.message.reply_text(
+            f"📋 **发送预览**\n\n"
+            f"类型：文字\n\n"
+            f"内容：\n{preview}\n\n"
+            f"🎯 目标数量：{count} 个群\n\n"
+            f"✅ 确认发送吗？",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
 
-    # 🔥 修复：移除 Markdown 解析或使用 HTML
-    await update.message.reply_text(
-        f"📋 发送预览\n\n"
-        f"{preview}\n\n"
-        f"目标数：{count}\n"
-        f"⏱️ 策略：随机间隔 0.5-1.5 秒\n\n"
-        f"💡 提示：输入 /cancel_broadcast 可取消",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode=None  # 不使用 Markdown 解析
-    )
+    elif message_data["type"] == "photo":
+        # 图片消息：发送图片预览 + 说明
+        caption = f"📋 **发送预览**\n\n类型：图片\n"
+        if message_data['caption']:
+            caption += f"说明：{message_data['caption'][:100]}\n"
+        caption += f"\n🎯 目标数量：{count} 个群\n\n✅ 确认发送吗？"
+
+        await update.message.reply_photo(
+            photo=message_data["file_id"],
+            caption=caption,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+
+    elif message_data["type"] == "video":
+        # 视频消息：发送视频预览 + 说明
+        caption = f"📋 **发送预览**\n\n类型：视频\n"
+        if message_data['caption']:
+            caption += f"说明：{message_data['caption'][:100]}\n"
+        caption += f"\n🎯 目标数量：{count} 个群\n\n✅ 确认发送吗？"
+
+        await update.message.reply_video(
+            video=message_data["file_id"],
+            caption=caption,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+
+    elif message_data["type"] == "document":
+        # 文件消息：发送文件预览
+        caption = f"📋 **发送预览**\n\n类型：文件\n文件名：{message_data.get('filename', '未知')}\n"
+        if message_data['caption']:
+            caption += f"说明：{message_data['caption'][:100]}\n"
+        caption += f"\n🎯 目标数量：{count} 个群\n\n✅ 确认发送吗？"
+
+        await update.message.reply_document(
+            document=message_data["file_id"],
+            caption=caption,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+
+    elif message_data["type"] == "animation":
+        # GIF动图：发送GIF预览
+        caption = f"📋 **发送预览**\n\n类型：GIF动图\n"
+        if message_data['caption']:
+            caption += f"说明：{message_data['caption'][:100]}\n"
+        caption += f"\n🎯 目标数量：{count} 个群\n\n✅ 确认发送吗？"
+
+        await update.message.reply_animation(
+            animation=message_data["file_id"],
+            caption=caption,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+
+    elif message_data["type"] == "audio":
+        # 音频消息
+        caption = f"📋 **发送预览**\n\n类型：音频\n"
+        if message_data['caption']:
+            caption += f"说明：{message_data['caption'][:100]}\n"
+        caption += f"\n🎯 目标数量：{count} 个群\n\n✅ 确认发送吗？"
+
+        await update.message.reply_audio(
+            audio=message_data["file_id"],
+            caption=caption,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+
+    elif message_data["type"] == "sticker":
+        # 贴纸消息
+        caption = f"📋 **发送预览**\n\n类型：贴纸\n\n🎯 目标数量：{count} 个群\n\n✅ 确认发送吗？"
+
+        await update.message.reply_sticker(
+            sticker=message_data["file_id"],
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        # 贴纸不能带 caption，单独发送文字确认
+        await update.message.reply_text(
+            caption,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+
     return BC_CONFIRM_SEND
 
 async def bc_reinput(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """重新输入消息"""
     query = update.callback_query
     await query.answer()
-    await query.message.reply_text("👉 **请重新输入消息内容：**")
+    # 清除之前的消息数据
+    context.user_data.pop("bc_message_data", None)
+    await query.message.reply_text(
+        "👉 **请重新发送要群发的内容**\n\n"
+        "支持：\n"
+        "• 文字消息\n"
+        "• 图片\n"
+        "• 视频\n"
+        "• 文件\n"
+        "• GIF动图\n\n"
+        "💡 提示：图片/视频可以附带说明文字"
+    )
     return BC_INPUT_MESSAGE
 
 # --- 状态 3: 执行发送 ---
-
 async def execute_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """执行群发 - 支持多种消息类型"""
     query = update.callback_query
     await query.answer("任务启动...")
 
     target_ids = context.user_data.get("bc_temp_target_ids", [])
-    message_text = context.user_data.get("bc_message_content", "")
+    message_data = context.user_data.get("bc_message_data", {})
 
-    if not target_ids or not message_text:
+    if not target_ids or not message_data:
         await query.message.reply_text("❌ 数据异常，请重新开始。")
         return await end_conversation(update, context)
 
+    total = len(target_ids)
+
+    # 根据群组数量自动调整策略
+    if total > 300:
+        batch_size = 30
+        delay_between = 2
+        delay_in_batch = 0.3
+    elif total > 100:
+        batch_size = 20
+        delay_between = 1
+        delay_in_batch = 0.5
+    else:
+        batch_size = 15
+        delay_between = 0.5
+        delay_in_batch = 0.8
+
     progress_msg = await query.message.reply_text(
         f"🚀 **群发进行中...**\n"
-        f"进度：0 / {len(target_ids)}\n"
-        f"✅ 成功：0 | ❌ 失败：0"
+        f"总群组：{total} 个\n"
+        f"消息类型：{message_data['type']}\n"
+        f"策略：每批{batch_size}个，共{ (total + batch_size - 1) // batch_size }批\n"
+        f"进度：0 / {total}"
     )
 
     success = 0
     failed = 0
-    total = len(target_ids)
 
-    # 根据群组数量动态调整
-    if total > 500:
-        delay_range = (0.5, 1.0)
-        batch_size = 50
-    else:
-        delay_range = (0.8, 1.5)
-        batch_size = 20
-
-    for i, gid in enumerate(target_ids):
-        delay = random.uniform(*delay_range)
-        await asyncio.sleep(delay)
-
+    async def send_one(gid):
+        """发送单条消息"""
         try:
-            await context.bot.send_message(
-                chat_id=gid, 
-                text=message_text, 
-                parse_mode="Markdown"
-            )
-            success += 1
+            msg_type = message_data["type"]
+
+            if msg_type == "text":
+                await context.bot.send_message(
+                    chat_id=gid,
+                    text=message_data["content"],
+                    parse_mode="Markdown"
+                )
+            elif msg_type == "photo":
+                await context.bot.send_photo(
+                    chat_id=gid,
+                    photo=message_data["file_id"],
+                    caption=message_data.get("caption", "")
+                )
+            elif msg_type == "video":
+                await context.bot.send_video(
+                    chat_id=gid,
+                    video=message_data["file_id"],
+                    caption=message_data.get("caption", "")
+                )
+            elif msg_type == "document":
+                await context.bot.send_document(
+                    chat_id=gid,
+                    document=message_data["file_id"],
+                    caption=message_data.get("caption", "")
+                )
+            elif msg_type == "animation":
+                await context.bot.send_animation(
+                    chat_id=gid,
+                    animation=message_data["file_id"],
+                    caption=message_data.get("caption", "")
+                )
+            elif msg_type == "audio":
+                await context.bot.send_audio(
+                    chat_id=gid,
+                    audio=message_data["file_id"],
+                    caption=message_data.get("caption", "")
+                )
+            elif msg_type == "sticker":
+                await context.bot.send_sticker(
+                    chat_id=gid,
+                    sticker=message_data["file_id"]
+                )
+            return True
         except Exception as e:
             logger.error(f"发送失败 {gid}: {e}")
-            failed += 1
+            return False
 
-        if (i + 1) % batch_size == 0 or i == total - 1:
-            try:
-                remaining_seconds = (total - i - 1) * ((delay_range[0] + delay_range[1]) / 2)
-                await progress_msg.edit_text(
-                    f"🚀 **群发进行中...**\n"
-                    f"进度：{i+1} / {total}\n"
-                    f"✅ 成功：{success} | ❌ 失败：{failed}\n"
-                    f"⏱️ 预计剩余：{remaining_seconds:.0f}秒"
-                )
-            except:
-                pass
+    # 分批发送
+    for batch_start in range(0, total, batch_size):
+        batch = target_ids[batch_start:batch_start + batch_size]
+        batch_num = batch_start // batch_size + 1
+        total_batches = (total + batch_size - 1) // batch_size
+
+        # 并发发送这一批
+        results = await asyncio.gather(*[send_one(gid) for gid in batch])
+
+        batch_success = sum(results)
+        batch_failed = len(batch) - batch_success
+        success += batch_success
+        failed += batch_failed
+
+        # 更新进度
+        await progress_msg.edit_text(
+            f"🚀 **群发进行中...**\n"
+            f"批次 {batch_num}/{total_batches}\n"
+            f"进度：{batch_start + len(batch)} / {total}\n"
+            f"✅ 成功：{success} | ❌ 失败：{failed}\n"
+            f"⏱️ 等待 {delay_between} 秒..."
+        )
+
+        # 批次间延迟
+        if batch_start + batch_size < total:
+            await asyncio.sleep(delay_between)
 
     result_text = (
-        f"🎉 **任务完成!**\n\n"
-        f"总计：{total}\n"
+        f"🎉 **群发完成！**\n\n"
+        f"总计：{total} 个群\n"
+        f"消息类型：{message_data['type']}\n"
         f"✅ 成功：{success}\n"
         f"❌ 失败：{failed}\n\n"
-        f"失败原因通常是机器人已被移出该群。"
+        f"💡 失败原因通常是机器人已被移出该群"
     )
 
-    try:
-        await progress_msg.edit_text(result_text)
-    except:
-        await query.message.reply_text(result_text)
-
+    await progress_msg.edit_text(result_text)
     return await end_conversation(update, context)
 
 # --- 辅助函数 ---
@@ -808,10 +1018,20 @@ async def bc_fallback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     """处理未预期的消息，清理并返回主菜单"""
     logger.info(f"广播模块 fallback 被触发")
 
+    # 检查是否正在等待输入消息
+    if context.user_data.get("bc_temp_target_ids") and not context.user_data.get("bc_message_data"):
+        # 如果还在等待输入，不清理，只提示
+        if update.message:
+            await update.message.reply_text(
+                "📝 请发送要群发的内容（文字、图片、视频等）\n"
+                "或输入 /cancel_broadcast 取消"
+            )
+        return ConversationHandler.END
+
     # 清理所有数据
     keys = ["bc_all_groups", "bc_selected_ids", "bc_message_content", "bc_temp_target_ids",
             "bc_selected_category", "bc_batches", "bc_current_batch", "bc_batch_results",
-            "bc_waiting_for_next", "bc_current_page"]
+            "bc_waiting_for_next", "bc_current_page", "bc_message_data"]
     for k in keys:
         context.user_data.pop(k, None)
 
@@ -967,8 +1187,8 @@ def get_handlers():
                     CallbackQueryHandler(bc_cancel_and_exit, pattern="^bc_cancel_and_exit$"),  # 新增
                 ],
                 BC_INPUT_MESSAGE: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, receive_message_input),
-                    CallbackQueryHandler(bc_cancel_and_exit, pattern="^bc_cancel_and_exit$"),  # 新增
+                    MessageHandler(~filters.COMMAND, receive_message_input),  # ← 改成处理所有非命令消息
+                    CallbackQueryHandler(bc_cancel_and_exit, pattern="^bc_cancel_and_exit$"),
                 ],
                 BC_CONFIRM_SEND: [
                     CallbackQueryHandler(execute_broadcast, pattern="^bc_exec_confirm$"),
