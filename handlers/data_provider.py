@@ -1474,6 +1474,7 @@ class DataProvider:
     def get_operators(self) -> Dict:
         """获取操作员列表"""
         ops = list_operators()
+        from auth import temp_operators
 
         # 获取操作员的详细信息（昵称、用户名）
         operator_details = []
@@ -1481,22 +1482,47 @@ class DataProvider:
             details = self._get_user_details(op_id)
             operator_details.append(details)
 
+        # 🔥 获取临时操作人的详细信息（使用相同的 _get_user_details）
+        temp_operator_details = []
+        for temp_id in temp_operators.keys():
+            details = self._get_user_details(temp_id)
+            # 如果临时操作人有备注信息，优先使用
+            temp_info = temp_operators.get(temp_id, {})
+            if temp_info.get('first_name') and not details.get('full_name'):
+                details['full_name'] = temp_info.get('first_name', '')
+                if temp_info.get('username'):
+                    details['display_name'] = f"{temp_info.get('first_name')} (@{temp_info.get('username')})"
+                else:
+                    details['display_name'] = temp_info.get('first_name', str(temp_id))
+            temp_operator_details.append(details)
+
         # 获取超级管理员信息
         owner_details = self._get_user_details(OWNER_ID)
 
-        if not ops:
-            return {
-                "message": f"当前只有超级管理员，没有其他操作员",
-                "owner": owner_details,
-                "operators": [],
-                "operator_count": 0
-            }
+        # 生成可读的文本
+        text = f"👑 **控制人**：{owner_details.get('display_name', OWNER_ID)}\n\n"
+
+        if operator_details:
+            text += "👥 **正式操作人**：\n"
+            for op in operator_details:
+                text += f"  • {op.get('display_name', op.get('user_id'))}\n"
+        else:
+            text += "👥 **正式操作人**：暂无\n"
+
+        if temp_operator_details:
+            text += "\n👤 **临时操作人**（仅记账权限）：\n"
+            for temp in temp_operator_details:
+                text += f"  • {temp.get('display_name', temp.get('user_id'))}\n"
+        else:
+            text += "\n👤 **临时操作人**：暂无\n"
 
         return {
             "owner": owner_details,
             "operators": operator_details,
+            "temp_operators": temp_operator_details,
             "operator_count": len(ops),
-            "all_authorized": [OWNER_ID] + ops
+            "temp_count": len(temp_operators),
+            "summary": text  # 添加 summary 字段供 AI 直接使用
         }
 
     def _get_user_details(self, user_id: int) -> Dict:
@@ -1517,11 +1543,18 @@ class DataProvider:
                     first_name = row[1] or ""
                     last_name = row[2] or ""
                     full_name = f"{first_name} {last_name}".strip()
+
+                    # 🔥 构建显示名称，优先显示用户名
+                    if username:
+                        display_name = f"{first_name} (@{username})" if first_name else f"@{username}"
+                    else:
+                        display_name = full_name if full_name else str(user_id)
+                        
                     return {
                         "user_id": user_id,
                         "username": username,
                         "full_name": full_name,
-                        "display_name": full_name if full_name else (f"@{username}" if username else str(user_id))
+                        "display_name": display_name
                     }
         except:
             pass
