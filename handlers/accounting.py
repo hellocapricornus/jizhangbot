@@ -1264,6 +1264,7 @@ class AccountingManager:
                 actual_rate = 0
                 current_fee_rate = 0
                 current_per_fee = 0
+                logger.info(f"[记账计算] 出款: {amount} USDT")
 
             now = int(time.time())
             date_str = beijing_time(now).strftime('%Y-%m-%d')
@@ -2291,8 +2292,13 @@ async def handle_add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE,
     group_id = str(chat.id)
     username = user.username or user.first_name or str(user.id)
 
-    record_amount = -abs(amount) if is_correction else abs(amount)
-    desc = "修正出款" if is_correction else "出款"
+    # 🔥 修正出款用负数，正常出款用正数
+    if is_correction:
+        record_amount = -abs(amount)  # 修正出款：负数
+        desc = "修正出款"
+    else:
+        record_amount = abs(amount)   # 正常出款：正数
+        desc = "出款"
 
     # 🔥 获取当前消息的ID，用于撤销功能
     message_id = update.message.message_id
@@ -3422,18 +3428,23 @@ async def send_bill_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message += "📈 **入款 0 笔**\n\n"
 
     # ==================== 出款记录 ====================
+    # 出款记录
     if expense_records:
         message += f"📉 **出款 {len(expense_records)} 笔**\n"
         for r in expense_records:
             dt = beijing_time(r['created_at'])
             time_str = dt.strftime('%H:%M')
+            amount_usdt = r['amount_usdt']
             display_name = r.get('display_name', '未知用户')
             user_id = r.get('user_id')
             mention = f" [{display_name}](tg://user?id={user_id})" if user_id else f" {display_name}"
-            message += f"  `{time_str} -{r['amount_usdt']:.2f} USDT`{mention}\n"
+
+            # 根据正负显示
+            if amount_usdt > 0:
+                message += f"  `{time_str} -{amount_usdt:.2f} USDT`{mention}\n"
+            else:
+                message += f"  `{time_str} +{abs(amount_usdt):.2f} USDT (修正)`{mention}\n"
         message += "\n"
-    else:
-        message += "📉 **出款 0 笔**\n\n"
 
     # ==================== 入款分组统计 ====================
     if income_records:
@@ -3486,12 +3497,12 @@ async def send_bill_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 总计统计
     if bill_type == "date":
-        # 日期查询：显示该日期的总计和费率和汇率
-        total_income_usdt = sum(r['amount_usdt'] for r in records)
+        # ✅ 正确：分别计算入款和出款
+        total_income_usdt = sum(r['amount_usdt'] for r in records if r['type'] == 'income')
         total_expense_usdt = sum(r['amount_usdt'] for r in records if r['type'] == 'expense')
         pending_usdt = total_income_usdt - total_expense_usdt
 
-        # 获取该日期的单笔费用（从 stats 中获取，因为 get_stats_by_date 已经返回了）
+        # 获取该日期的单笔费用（从 stats 中获取）
         per_transaction_fee = 0
         stats = context.user_data.get("bill_stats", {})
         if stats:
@@ -3499,7 +3510,6 @@ async def send_bill_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         message += f"\n\n📊 **当日总计**：+{total_income_usdt:.2f} USDT / -{total_expense_usdt:.2f} USDT"
         message += f"\n⏳ **待下发**：{pending_usdt:.2f} USDT"
-        # 始终显示费率、汇率和单笔费用（不再有条件判断）
         message += f"\n💰 费率：{current_fee_rate}% | 💱 汇率：{current_rate} | 📝 单笔费用：{per_transaction_fee}元"
     else:
         # 非日期查询：显示总计统计和费率汇率
@@ -4321,47 +4331,50 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     message = (
         "📒 **记账功能说明**\n\n"
-        "💰 **入款操作**：\n"
-        "`+金额` - 添加一笔入款（如：+1000）\n"
-        "`+金额/汇率` - 使用临时汇率入款（如：+1000/7.2）\n"
-        "`+金额×费率` - 使用临时费率入款（如：+1000×5）\n"  # 用 × 代替 *
-        "`+金额×费率/汇率` - 使用临时费率汇率入款（如：+1000×5/7.2）\n"
-        "`+金额 备注` - 带分类入款（如：+1000 德国）\n"
-        "`+金额/汇率 备注` - 带分类+临时汇率（如：+1000/7.2 德国）\n"
-        "`+金额×费率 备注` - 带分类+临时费率（如：+1000×5 德国）\n"
-        "`+金额×费率/汇率 备注` - 带分类+临时费率汇率（如：+1000×5/7.2 德国）\n"
-        "`-金额` - 修正入款（如：-500）\n"
-        "`-金额/汇率` - 修正入款+临时汇率（如：-500/7.2）\n"
-        "`-金额 备注` - 修正入款+分类（如：-500 德国）\n"
-        "`-金额/汇率 备注` - 修正+分类+临时汇率（如：-500/7.2 德国）\n\n"
-        "💸 **出款操作**：\n"
-        "`下发金额u` - 添加出款（如：下发100u）\n"
-        "`下发-金额u` - 修正出款（如：下发-50u）\n\n"
-        "⚙️ **配置**：\n"
-        "`设置手续费 数字` - 设置手续费率（如：设置手续费 5）\n"
-        "`设置汇率 数字` - 设置汇率（如：设置汇率 7.2）\n"
-        "`设置单笔费用 数字` - 设置单笔费用（如：设置单笔费用 2）\n\n"
-        "📊 **查询**：\n"
-        "`今日总` - 查看今日账单\n"
-        "`总` - 查看总计账单\n"
-        "`当前账单` - 查看当前会话账单\n"
-        "`查询账单` - 按日期查询历史账单\n"
-        "`导出账单` - 导出账单为HTML网页文件\n\n"
-        "🗑️ **管理**：\n"
-        "`结束账单` - 结束当前会话并保存\n"
-        "`清理账单` - 清空当前会话记录\n"
-        "`清理总账单` - 清空所有历史记录\n"
-        "`移除上一笔` / `删除上一笔` - 撤销最后一笔记账\n\n"
-        "🧮 **计算器**：\n"
-        "`数字+数字`、`数字-数字`、`数字*数字`、`数字/数字`\n"
-        "支持复杂表达式：`(100+200)*3`、`sqrt(100)`、`2^3` 等\n\n"
-        "💡 **智能识别**：\n"
-        "• 群内发送 USDT 地址自动查询余额\n"
-        "• 分类备注自动识别国家并显示国旗\n"
-        "• `@机器人 问题` - AI 智能问答\n\n"
-        "⚠️ **权限说明**：\n"
-        "• 记账、配置、AI问答、管理操作需要管理员或操作员权限\n"
-        "• 地址查询、计算器所有人可用"
+
+        # 🔥 添加这个超链接
+        f"➕ **[点击这里添加机器人到你的群组](https://t.me/jizhangtextjibot?startgroup=start)**\n\n"
+
+        "💰 **入款操作**\n"
+        "`+1000` 普通入款\n"
+        "`+1000 德国` 带分类\n"
+        "`+1000/7.2` 临时汇率\n"
+        "`+1000*5` 临时费率\n"
+        "`+1000*5/7.2 德国` 临时费率+汇率+分类\n"
+        "`-500` 修正入款\n\n"
+
+        "💸 **出款操作**\n"
+        "`下发100u` 出款\n"
+        "`下发-50u` 修正出款\n\n"
+
+        "⚙️ **群组配置**\n"
+        "`设置手续费 5` 手续费率\n"
+        "`设置汇率 7.2` 汇率\n"
+        "`设置单笔费用 2` 单笔费用\n\n"
+
+        "📊 **查询账单**\n"
+        "`今日总` / `总` / `当前账单`\n"
+        "`查询账单` 按日期查询\n"
+        "`导出账单` 导出HTML文件\n\n"
+
+        "🗑️ **管理**\n"
+        "`结束账单` 保存并结束\n"
+        "`清理账单` 清空当前\n"
+        "`清理总账单` 清空全部\n"
+        "`移除上一笔` 撤销\n"
+        "`撤销账单` 回复指定入款撤销\n\n"
+
+        "🧮 **计算器**\n"
+        "`100+200` `(10+5)*3` `sqrt(100)` `2^3`\n\n"
+
+        "💡 **智能识别**\n"
+        "• 发送USDT地址自动查余额\n"
+        "• 分类备注自动显示国旗\n"
+        "• `@机器人 问题` AI问答\n\n"
+
+        "⚠️ **权限**\n"
+        "• 记账/配置/AI需操作员权限\n"
+        "• 地址查询/计算器所有人可用"
     )
 
     await query.message.reply_text(message, parse_mode='Markdown')
