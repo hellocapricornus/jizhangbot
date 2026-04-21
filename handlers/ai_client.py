@@ -140,6 +140,8 @@ class AIClient:
         data = await self._fetch_data(intent, data_provider)
 
         if data.get("error"):
+            if data.get("suggestion"):
+                return f"❌ {data['error']}\n\n💡 {data['suggestion']}"
             if data.get("available_groups"):
                 return f"❌ {data['error']}\n\n💡 {data['suggestion']}"
             return f"❌ {data['error']}"
@@ -166,6 +168,9 @@ class AIClient:
         """
         prompt_lower = prompt.lower()
 
+        has_address_keyword = False
+        address_note = None
+
         # ========== 先检测是否是普通聊天 ==========
         data_keywords = [
             "收入", "入款", "出款", "下发", "账单", "记账", "收支", "统计", "情况",
@@ -182,50 +187,6 @@ class AIClient:
 
         if not has_data_keyword or any(kw in prompt_lower for kw in chat_keywords):
             return {"type": "chat", "params": {}}
-
-        # ========== 优先检测地址相关查询 ==========
-        address_keywords = ["地址", "usdt", "USDT", "监控地址", "收支", "月度统计"]
-        has_address_keyword = any(kw in prompt_lower for kw in address_keywords)
-
-        # 提取地址备注名
-        address_note = self._extract_address_note(prompt)
-
-        if has_address_keyword or address_note:
-            # 获取用户添加的监控地址
-            from db import get_monitored_addresses
-            addresses = get_monitored_addresses(user_id=user_id) if user_id else get_monitored_addresses()
-
-            # 尝试匹配备注名
-            matched_address = None
-            matched_note = None
-
-            for addr in addresses:
-                note = addr.get('note', '')
-                if note:
-                    if address_note and (address_note in note or note in address_note):
-                        matched_address = addr['address']
-                        matched_note = note
-                        break
-                    if address_note and address_note == note:
-                        matched_address = addr['address']
-                        matched_note = note
-                        break
-
-            if matched_address:
-                if "月度统计" in prompt_lower:
-                    return {"type": "address_monthly_stats", "params": {"address": matched_address, "note": matched_note}}
-                else:
-                    date_range = self._extract_date_range(prompt)
-                    return {"type": "address_stats", "params": {"address": matched_address, "date": date_range, "note": matched_note}}
-
-            # 尝试直接提取地址
-            address = self._extract_address(prompt)
-            if address:
-                if "月度统计" in prompt_lower:
-                    return {"type": "address_monthly_stats", "params": {"address": address}}
-                else:
-                    date_range = self._extract_date_range(prompt)
-                    return {"type": "address_stats", "params": {"address": address, "date": date_range}}
 
         # ========== 操作员查询 ==========
         if any(kw in prompt_lower for kw in ["操作员", "管理员", "授权用户"]):
@@ -353,32 +314,83 @@ class AIClient:
             date_range = self._extract_date_range(prompt)
             return {"type": "today_all_income", "params": {"date": date_range}}
 
+        # ========== 3. 地址相关查询（放到最后，避免误匹配）==========
+        address_keywords = ["地址", "usdt", "USDT", "监控地址", "收支", "月度统计", "收益"]
+        has_address_keyword = any(kw in prompt_lower for kw in address_keywords)
+        address_note = self._extract_address_note(prompt)
+
+        if has_address_keyword or address_note:
+            from db import get_monitored_addresses
+            my_addresses = get_monitored_addresses(user_id=user_id)
+
+            if not my_addresses:
+                return {"type": "chat", "params": {"hint": "您还没有添加监控地址，请使用「USDT监控」菜单添加"}}
+
+            matched_address = None
+            matched_note = None
+
+            for addr in my_addresses:
+                note = addr.get('note', '')
+                if note and address_note:
+                    if address_note == note or address_note in note or note in address_note:
+                        matched_address = addr['address']
+                        matched_note = note
+                        break
+
+            if not matched_address:
+                address = self._extract_address(prompt)
+                if address:
+                    for addr in my_addresses:
+                        if addr['address'] == address:
+                            matched_address = address
+                            matched_note = addr.get('note', '')
+                            break
+
+            if matched_address:
+                if "月度统计" in prompt_lower or "本月" in prompt_lower or "月收益" in prompt_lower:
+                    return {"type": "address_monthly_stats", "params": {"address": matched_address, "note": matched_note, "user_id": user_id}}
+                else:
+                    date_range = self._extract_date_range(prompt)
+                    return {"type": "address_stats", "params": {"address": matched_address, "date": date_range, "note": matched_note, "user_id": user_id}}
+
+            my_notes = [a.get('note', a['address'][:8]) for a in my_addresses if a.get('note')]
+            if my_notes:
+                return {"type": "chat", "params": {"hint": f"您已添加的监控地址：{', '.join(my_notes)}\n\n请使用正确的备注名查询"}}
+            return {"type": "chat", "params": {"hint": "请使用正确的备注名查询地址收益"}}
+
         return {"type": "chat", "params": {}}
 
     def _extract_address_note(self, prompt: str) -> str:
         """
         提取地址备注名
         支持格式：
-        - "查看三角国际地址今天的收入" -> "三角国际地址"
-        - "三角国际地址昨天收入" -> "三角国际地址"
-        - "查询今天三角国际地址收入" -> "三角国际地址"
+        - "查看三角国际地址今天的收入" -> "三角国际"
+        - "三角国际昨天收入" -> "三角国际"
+        - "查询今天星球地址收入" -> "星球"
+        - "星球本月收益" -> "星球"
         """
         # 移除日期关键词
         date_keywords = ["今天", "昨天", "今日", "昨日", "本周", "上周", "本月", "上月", 
-                         "收入", "查询", "查看", "分析", "统计", "月度统计", "收支"]
+                         "收入", "查询", "查看", "分析", "统计", "月度统计", "收支", "收益", 
+                         "地址", "的", "一下"]
         clean_prompt = prompt
         for kw in date_keywords:
             clean_prompt = clean_prompt.replace(kw, "")
 
-        # 移除"地址"后缀
-        clean_prompt = clean_prompt.replace("地址", "")
         clean_prompt = clean_prompt.strip()
 
         if clean_prompt and len(clean_prompt) >= 2:
             return clean_prompt
 
-        pattern = r'([\u4e00-\u9fa5a-zA-Z0-9]+)地址'
+        # 正则匹配：xxx地址 或 xxx的地址
+        pattern = r'([\u4e00-\u9fa5a-zA-Z0-9]{2,})地址'
         match = re.search(pattern, prompt)
+        if match:
+            return match.group(1)
+
+        # 匹配：xxx本月收益 / xxx月收益
+        pattern2 = r'([\u4e00-\u9fa5a-zA-Z0-9]{2,})月收益'
+        match = re.search(pattern2, prompt)
         if match:
             return match.group(1)
 
@@ -602,7 +614,9 @@ class AIClient:
 
         # 操作员
         if intent_type == "operators":
-            return data_provider.get_operators()
+            result = data_provider.get_operators()
+            # 直接返回，不要做额外处理
+            return result
 
         # 群组分类
         if intent_type == "group_categories":
@@ -719,38 +733,94 @@ class AIClient:
             address = params.get("address", "")
             note = params.get("note", "")
             date = params.get("date", "today")
+            user_id = params.get("user_id", 0)  # 🔥 获取用户ID
 
-            if not address and note:
-                from db import get_monitored_addresses
-                addresses = get_monitored_addresses()
-                for addr in addresses:
-                    if note in addr.get('note', '') or addr.get('note', '') in note:
+            # 🔥 只获取当前用户添加的地址
+            from db import get_monitored_addresses
+            my_addresses = get_monitored_addresses(user_id=user_id)  # 只查自己的
+
+            if not my_addresses:
+                return {"error": "您还没有添加任何监控地址", "suggestion": "请使用「USDT监控」菜单添加地址"}
+
+            # 如果没有指定地址和备注，列出用户自己的地址
+            if not address and not note:
+                notes = [a.get('note', a['address'][:8]) for a in my_addresses]
+                return {
+                    "error": "请指定要查询的地址",
+                    "suggestion": f"您已添加的地址：{', '.join(notes)}\n\n💡 例如：查询 {notes[0]} 今日收入"
+                }
+
+            # 尝试用备注匹配（只在自己的地址中匹配）
+            if note:
+                for addr in my_addresses:
+                    addr_note = addr.get('note', '')
+                    if note == addr_note or note in addr_note or addr_note in note:
                         address = addr['address']
+                        note = addr_note
                         break
 
+            # 如果还没找到地址，尝试直接匹配地址
             if not address:
-                return {"error": f"未找到备注为「{note}」的监控地址" if note else "请指定地址"}
+                # 检查是否是别人添加的地址
+                all_addresses = get_monitored_addresses()  # 获取所有地址（用于检查）
+                is_others = False
+                for addr in all_addresses:
+                    if note and addr.get('note') == note:
+                        if addr['added_by'] != user_id:
+                            is_others = True
+                        break
 
-            return await data_provider.get_address_stats(address, date)
+                if is_others:
+                    return {"error": f"地址「{note}」不在您的监控列表中", "suggestion": "您只能查询自己添加的监控地址\n\n💡 使用「USDT监控」菜单添加地址后即可查询"}
+
+                return {"error": f"未找到备注为「{note}」的监控地址", "suggestion": f"您已添加的地址：{[a.get('note', a['address'][:8]) for a in my_addresses]}"}
+
+            try:
+                return await data_provider.get_address_stats(address, date)
+            except Exception as e:
+                print(f"地址统计查询失败: {e}")
+                return {"error": f"查询失败: {str(e)[:100]}"}
 
         if intent_type == "address_monthly_stats":
             address = params.get("address", "")
             note = params.get("note", "")
+            user_id = params.get("user_id", 0)  # 🔥 获取用户ID
+
+            # 🔥 只获取当前用户添加的地址
+            from db import get_monitored_addresses
+            my_addresses = get_monitored_addresses(user_id=user_id)
+
+            if not my_addresses:
+                return {"error": "您还没有添加任何监控地址", "suggestion": "请使用「USDT监控」菜单添加地址"}
 
             if not address and note:
-                from db import get_monitored_addresses
-                addresses = get_monitored_addresses()
-                for addr in addresses:
-                    if note in addr.get('note', '') or addr.get('note', '') in note:
+                for addr in my_addresses:
+                    addr_note = addr.get('note', '')
+                    if note == addr_note or note in addr_note or addr_note in note:
                         address = addr['address']
+                        note = addr_note
                         break
 
             if not address:
-                return {"error": f"未找到备注为「{note}」的监控地址" if note else "请指定地址"}
+                # 检查是否是别人添加的地址
+                all_addresses = get_monitored_addresses()
+                is_others = False
+                for addr in all_addresses:
+                    if note and addr.get('note') == note:
+                        if addr['added_by'] != user_id:
+                            is_others = True
+                        break
 
-            return await data_provider.get_address_monthly_stats(address)
+                if is_others:
+                    return {"error": f"地址「{note}」不在您的监控列表中", "suggestion": "您只能查询自己添加的监控地址"}
 
-        return {"error": "无法获取数据"}
+                return {"error": f"未找到备注为「{note}」的监控地址", "suggestion": f"您已添加的地址：{[a.get('note', a['address'][:8]) for a in my_addresses]}"}
+
+            try:
+                return await data_provider.get_address_monthly_stats(address)
+            except Exception as e:
+                print(f"地址月度统计查询失败: {e}")
+                return {"error": f"查询失败: {str(e)[:100]}"}
 
     # ========== 🔥 核心改进：让 AI 真正智能回答 ==========
 
