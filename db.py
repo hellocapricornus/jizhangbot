@@ -254,10 +254,12 @@ def get_db_connection():
     """获取数据库连接"""
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row  # 添加这行，使返回结果支持字典访问
+    conn.execute("PRAGMA journal_mode=WAL")
     return conn
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
+    conn.execute("PRAGMA journal_mode=WAL")
     c = conn.cursor()
 
     # 创建 operators 表
@@ -416,6 +418,25 @@ def init_db():
             exchange_rate REAL DEFAULT 1.0
         )
     """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS user_preferences (
+            user_id INTEGER PRIMARY KEY,
+            monitor_notify INTEGER DEFAULT 1,       -- 1=开启，0=关闭
+            broadcast_signature TEXT DEFAULT '',    -- 默认群发附言
+            daily_report_enabled INTEGER DEFAULT 0,    -- 新增
+            daily_report_hour INTEGER DEFAULT 9,        -- 新增
+            updated_at INTEGER DEFAULT 0
+        )
+    """)
+
+    # 迁移：为 user_preferences 添加 daily_report_enabled / daily_report_hour
+    try:
+        c.execute("SELECT daily_report_enabled FROM user_preferences LIMIT 1")
+    except sqlite3.OperationalError:
+        c.execute("ALTER TABLE user_preferences ADD COLUMN daily_report_enabled INTEGER DEFAULT 0")
+        c.execute("ALTER TABLE user_preferences ADD COLUMN daily_report_hour INTEGER DEFAULT 9")
+        print("✅ 已为 user_preferences 表添加每日早报字段")
 
     # 创建索引
     c.execute("CREATE INDEX IF NOT EXISTS idx_records_group_id ON accounting_records(group_id)")
@@ -765,3 +786,38 @@ def update_group_category_if_needed(group_id: str, group_name: str):
             return True
 
     return False
+
+def get_user_preferences(user_id: int) -> dict:
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT monitor_notify, broadcast_signature, daily_report_enabled, daily_report_hour FROM user_preferences WHERE user_id = ?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    if row:
+        return {
+            "monitor_notify": bool(row[0]),
+            "broadcast_signature": row[1] or "",
+            "daily_report_enabled": bool(row[2]),
+            "daily_report_hour": row[3] or 9
+        }
+    return {"monitor_notify": True, "broadcast_signature": "", "daily_report_enabled": False, "daily_report_hour": 9}
+
+def set_user_preference(user_id: int, key: str, value):
+    conn = get_db_connection()
+    c = conn.cursor()
+    now = int(time.time())
+    c.execute("INSERT OR IGNORE INTO user_preferences (user_id, updated_at) VALUES (?, ?)", (user_id, now))
+    if key == "monitor_notify":
+        c.execute("UPDATE user_preferences SET monitor_notify = ?, updated_at = ? WHERE user_id = ?",
+                  (1 if value else 0, now, user_id))
+    elif key == "broadcast_signature":
+        c.execute("UPDATE user_preferences SET broadcast_signature = ?, updated_at = ? WHERE user_id = ?",
+                  (value, now, user_id))
+    elif key == "daily_report_enabled":
+        c.execute("UPDATE user_preferences SET daily_report_enabled = ?, updated_at = ? WHERE user_id = ?",
+                  (1 if value else 0, now, user_id))
+    elif key == "daily_report_hour":
+        c.execute("UPDATE user_preferences SET daily_report_hour = ?, updated_at = ? WHERE user_id = ?",
+                  (int(value), now, user_id))
+    conn.commit()
+    conn.close()
