@@ -11,6 +11,34 @@ USDT_CONTRACT = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"  # Tron USDT 合约地址
 TRANSFER_QUERY_WAIT_ADDR = "transfer_query_wait_addr"
 TRANSFER_ANALYSIS_WAIT_ADDR = "transfer_analysis_wait_addr"
 
+# handlers/transfer.py - 添加键盘版
+
+async def show_transfer_menu_keyboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """互转查询 - 键盘版"""
+    from telegram import ReplyKeyboardMarkup, KeyboardButton
+
+    user_id = update.effective_user.id
+
+    if not is_authorized(user_id, require_full_access=True):
+        await update.message.reply_text("❌ 管理人/操作员才能使用，如需使用请联系 @ChinaEdward")
+        return
+
+    context.user_data.pop("transfer_results", None)
+    context.user_data.pop("current_page", None)
+    context.user_data.pop("query_type", None)
+    context.user_data["active_module"] = "transfer"
+
+    keyboard = [
+        [KeyboardButton("🔍 转账查询"), KeyboardButton("🕸️ 转账分析")],
+        [KeyboardButton("◀️ 返回主菜单")],
+    ]
+
+    await update.message.reply_text(
+        "💱 **互转查询功能**\n请选择操作：",
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
+        parse_mode="Markdown"
+    )
+
 # --- 辅助函数：调用 TronGrid API ---
 def get_trc20_transfers(address, limit=200):
     """获取指定地址的 TRC20 转账记录"""
@@ -331,7 +359,7 @@ async def handle_transfer_pagination(update: Update, context: ContextTypes.DEFAU
         context.user_data.pop("active_module", None)
         await query.message.edit_text("✅ 查询完成，返回主菜单")
         from handlers.menu import get_main_menu
-        await query.message.reply_text("请选择功能：", reply_markup=get_main_menu())
+        await query.message.reply_text("请选择功能：", reply_markup=get_main_menu(user_id))
 
 # --- 取消 ---
 async def cancel_transfer(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -346,7 +374,7 @@ async def cancel_transfer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from handlers.menu import get_main_menu
     await update.message.reply_text(
         "请选择功能：",
-        reply_markup=get_main_menu()
+        reply_markup=get_main_menu(user_id)
     )
     return ConversationHandler.END
 
@@ -396,7 +424,7 @@ async def transfer_back_to_main(update: Update, context: ContextTypes.DEFAULT_TY
     from handlers.menu import get_main_menu
     await query.message.edit_text(
         "✅ 已退出互转查询\n\n请选择功能：",
-        reply_markup=get_main_menu()
+        reply_markup=get_main_menu(user_id)
     )
     return ConversationHandler.END
 
@@ -414,7 +442,7 @@ async def cancel_transfer_from_message(update: Update, context: ContextTypes.DEF
     from handlers.menu import get_main_menu
     await update.message.reply_text(
         "请选择功能：",
-        reply_markup=get_main_menu()
+        reply_markup=get_main_menu(user_id)
     )
     return ConversationHandler.END
 
