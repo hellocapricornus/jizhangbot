@@ -4,12 +4,12 @@ import asyncio
 import re
 import time
 from datetime import datetime, timedelta, timezone
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import ContextTypes, CallbackQueryHandler, MessageHandler, filters, ConversationHandler, CommandHandler
 from auth import is_authorized, OWNER_ID
 from db import (
     get_monitored_addresses, add_monitored_address, remove_monitored_address,
-    update_address_last_check, add_transaction_record, is_tx_notified, mark_tx_notified, get_db_connection
+    update_address_last_check, add_transaction_record, is_tx_notified, mark_tx_notified, get_db_connection, get_user_preferences
 )
 
 # 状态定义
@@ -131,129 +131,150 @@ async def get_trc20_transactions(address: str, min_timestamp: int = 0, limit: in
 
     return []
 
-
 async def check_address_transactions(context: ContextTypes.DEFAULT_TYPE):
-    """定时检查监控地址的交易 - 优化版"""
+    """定时检查监控地址的交易 - 并发版本"""
     addresses = get_monitored_addresses()
     if not addresses:
         print("📭 没有监控地址，跳过检查")
         return
 
     print(f"🔍 开始检查 {len(addresses)} 个监控地址")
-
-    current_time = int(time.time())
     bot = context.bot
 
-    for addr_info in addresses:
-        address = addr_info["address"]
-        last_check = addr_info.get("last_check", 0)
-        added_at = addr_info.get("added_at", 0)
-        added_by = addr_info.get("added_by")
-        note = addr_info.get("note", "")
+    # 控制并发数，避免 API 限流
+    semaphore = asyncio.Semaphore(5)
 
-        print(f"  检查地址: {address[:8]}... (备注: {note or '无'})")
+    async def check_one(addr_info):
+        async with semaphore:
+            await _check_single_address(addr_info, bot)
 
-        # 确定查询起始时间
-        if last_check == 0:
-            # 新地址：从添加时间开始检查（不发送历史消息）
-            min_timestamp = added_at * 1000
-            print(f"  新监控地址，从添加时间开始检查")
-        else:
-            min_timestamp = last_check * 1000
+    # 并发执行所有检查任务
+    await asyncio.gather(*[check_one(addr) for addr in addresses])
 
-        # 获取新交易
-        txs = await get_trc20_transactions(address, min_timestamp)
 
-        if txs:
-            print(f"  发现 {len(txs)} 笔新交易")
+async def _check_single_address(addr_info, bot):
+    """检查单个地址（无论通知开关，都会更新 last_check）"""
+    address = addr_info["address"]
+    last_check = addr_info.get("last_check", 0)
+    added_at = addr_info.get("added_at", 0)
+    note = addr_info.get("note", "")
+    added_by = addr_info.get("added_by")
 
-            # 获取当前余额和月度统计
-            current_balance = await get_address_balance(address)
-            monthly_stats = await get_monthly_stats(address)
+    # 获取用户通知偏好（但不影响检查流程）
+    notify_enabled = True
+    if added_by:
+        prefs = get_user_preferences(added_by)
+        notify_enabled = prefs["monitor_notify"]
 
-            for tx in txs:
-                tx_id = tx.get("transaction_id", "")
-                from_addr = tx.get("from", "")
-                to_addr = tx.get("to", "")
-                raw_amount = tx.get("value", 0)
-                amount = int(raw_amount) / 1_000_000 if raw_amount else 0
-                timestamp = tx.get("block_timestamp", 0) / 1000
+    # 确定查询起始时间
+    if last_check == 0:
+        min_timestamp = added_at * 1000
+        print(f"  新监控地址 {address[:8]}...，从添加时间开始检查")
+    else:
+        min_timestamp = last_check * 1000
 
-                # 检查是否已通知过
-                if is_tx_notified(tx_id):
-                    continue
+    # 获取新交易
+    txs = await get_trc20_transactions(address, min_timestamp)
 
-                # 跳过添加时间之前的历史交易
-                if last_check == 0 and timestamp < added_at:
-                    print(f"    跳过添加前的历史交易: {tx_id[:10]}...")
-                    # 标记为已通知，避免下次再处理
-                    mark_tx_notified(tx_id)
-                    continue
+    if not txs:
+        # 没有新交易，直接更新最后检查时间
+        update_address_last_check(address, int(time.time()))
+        return
 
-                # 检查交易记录是否已存在
-                conn = get_db_connection()
-                c = conn.cursor()
-                c.execute("SELECT id, notified FROM address_transactions WHERE tx_id = ?", (tx_id,))
-                existing = c.fetchone()
-                conn.close()
+    print(f"  地址 {address[:8]}... 发现 {len(txs)} 笔新交易")
 
-                if existing:
-                    if existing[1] == 0:
-                        mark_tx_notified(tx_id)
-                    continue
+    # 获取当前余额和月度统计（仅在需要发送通知时获取，以节省API调用）
+    current_balance = None
+    monthly_stats = None
+    if notify_enabled:
+        current_balance = await get_address_balance(address)
+        monthly_stats = await get_monthly_stats(address)
 
-                # 记录交易
-                add_transaction_record(address, tx_id, from_addr, to_addr, amount, int(timestamp))
+    current_time = int(time.time())
 
-                # 发送通知
-                direction = "收到" if to_addr == address else "转出"
-                short_from = f"{from_addr[:6]}...{from_addr[-6:]}" if len(from_addr) > 12 else from_addr
-                short_to = f"{to_addr[:6]}...{to_addr[-6:]}" if len(to_addr) > 12 else to_addr
+    for tx in txs:
+        tx_id = tx.get("transaction_id", "")
+        from_addr = tx.get("from", "")
+        to_addr = tx.get("to", "")
+        raw_amount = tx.get("value", 0)
+        amount = int(raw_amount) / 1_000_000 if raw_amount else 0
+        timestamp = tx.get("block_timestamp", 0) / 1000
 
-                # 时间转换为北京时间
-                utc_time = datetime.fromtimestamp(timestamp, tz=timezone.utc)
-                beijing_time = utc_time.astimezone(BEIJING_TZ)
-                time_str = beijing_time.strftime('%Y-%m-%d %H:%M:%S')
+        # 检查是否已通知过
+        if is_tx_notified(tx_id):
+            continue
 
-                # 构建消息
-                message = (
-                    f"🔔 **USDT 交易监控提醒**\n\n"
-                    f"📌 监控地址：`{address[:8]}...{address[-6:]}`\n"
-                )
+        # 跳过添加时间之前的历史交易
+        if last_check == 0 and timestamp < added_at:
+            print(f"    跳过添加前的历史交易: {tx_id[:10]}...")
+            mark_tx_notified(tx_id)
+            continue
 
-                if note:
-                    message += f"📝 备注：{note}\n"
-                else:
-                    message += "\n"
+        # 检查交易记录是否已存在
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("SELECT id, notified FROM address_transactions WHERE tx_id = ?", (tx_id,))
+        existing = c.fetchone()
+        conn.close()
 
-                message += f"💎 当前余额：**{current_balance:.2f} USDT**\n\n"
-
-                message += (
-                    f"💰 金额：**{amount:.2f} USDT**\n"
-                    f"🔄 方向：{direction}\n"
-                    f"📤 发送方：`{short_from}`\n"
-                    f"📥 接收方：`{short_to}`\n"
-                    f"⏰ 时间：{time_str}\n\n"
-                )
-
-                message += (
-                    f"📅 **本月统计**\n"
-                    f"• 累计收到：**{monthly_stats['received']:.2f} USDT**\n"
-                    f"• 累计转出：**{monthly_stats['sent']:.2f} USDT**\n"
-                    f"• 净收入：**{monthly_stats['net']:.2f} USDT**\n\n"
-                )
-
-                try:
-                    await bot.send_message(chat_id=added_by, text=message, parse_mode="Markdown")
-                    print(f"✅ 已发送监控通知给用户 {added_by} (备注: {note or '无'})")
-                except Exception as e:
-                    print(f"发送给用户 {added_by} 失败: {e}")
-
+        if existing:
+            if existing[1] == 0:
                 mark_tx_notified(tx_id)
+            continue
 
-        # 🔥 只有一处更新 last_check（在处理完交易后）
-        update_address_last_check(address, current_time)
+        # 记录交易
+        add_transaction_record(address, tx_id, from_addr, to_addr, amount, int(timestamp))
 
+        # 发送通知（仅当用户开启通知时）
+        if notify_enabled:
+            direction = "收到" if to_addr == address else "转出"
+            short_from = f"{from_addr[:6]}...{from_addr[-6:]}" if len(from_addr) > 12 else from_addr
+            short_to = f"{to_addr[:6]}...{to_addr[-6:]}" if len(to_addr) > 12 else to_addr
+
+            # 时间转换为北京时间
+            utc_time = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+            beijing_time = utc_time.astimezone(BEIJING_TZ)
+            time_str = beijing_time.strftime('%Y-%m-%d %H:%M:%S')
+
+            message = (
+                f"🔔 **USDT 交易监控提醒**\n\n"
+                f"📌 监控地址：`{address[:8]}...{address[-6:]}`\n"
+            )
+            if note:
+                message += f"📝 备注：{note}\n"
+            else:
+                message += "\n"
+
+            # 如果余额和统计已获取，则显示；否则临时获取
+            if current_balance is None:
+                current_balance = await get_address_balance(address)
+            if monthly_stats is None:
+                monthly_stats = await get_monthly_stats(address)
+
+            message += f"💎 当前余额：**{current_balance:.2f} USDT**\n\n"
+            message += (
+                f"💰 金额：**{amount:.2f} USDT**\n"
+                f"🔄 方向：{direction}\n"
+                f"📤 发送方：`{short_from}`\n"
+                f"📥 接收方：`{short_to}`\n"
+                f"⏰ 时间：{time_str}\n\n"
+                f"📅 **本月统计**\n"
+                f"• 累计收到：**{monthly_stats['received']:.2f} USDT**\n"
+                f"• 累计转出：**{monthly_stats['sent']:.2f} USDT**\n"
+                f"• 净收入：**{monthly_stats['net']:.2f} USDT**\n\n"
+            )
+
+            try:
+                await bot.send_message(chat_id=added_by, text=message, parse_mode="Markdown")
+                print(f"✅ 已发送监控通知给用户 {added_by} (备注: {note or '无'})")
+            except Exception as e:
+                print(f"发送给用户 {added_by} 失败: {e}")
+
+        # 无论是否发送通知，都标记为已通知，避免下次重复处理
+        mark_tx_notified(tx_id)
+
+    # 更新最后检查时间（无论通知开关与否）
+    update_address_last_check(address, current_time)
 
 async def monitor_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """USDT 地址监控菜单"""
@@ -271,11 +292,14 @@ async def monitor_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = [
         [InlineKeyboardButton("➕ 添加监控地址", callback_data="monitor_add")],
-        [InlineKeyboardButton("📋 查看监控列表", callback_data="monitor_list")],
-        [InlineKeyboardButton("📊 月度统计", callback_data="monitor_stats")],
-        [InlineKeyboardButton("❌ 删除监控地址", callback_data="monitor_remove")],
-        [InlineKeyboardButton("◀️ 返回主菜单", callback_data="main_menu")]
     ]
+    if addresses:
+        keyboard += [
+            [InlineKeyboardButton("📋 查看监控列表", callback_data="monitor_list")],
+            [InlineKeyboardButton("📊 月度统计", callback_data="monitor_stats")],
+            [InlineKeyboardButton("❌ 删除监控地址", callback_data="monitor_remove")],
+        ]
+    keyboard.append([InlineKeyboardButton("◀️ 返回主菜单", callback_data="main_menu")])
 
     if len(addresses) == 0:
         text = (
@@ -302,7 +326,7 @@ async def monitor_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
     
-    if not is_authorized(user_id):
+    if not is_authorized(user_id, require_full_access=True):
         await query.answer("❌ 无权限", show_alert=True)
         return
     
@@ -369,8 +393,7 @@ async def monitor_add_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text == "/cancel_monitor":
         context.user_data.pop("monitor_action", None)
-        await update.message.reply_text("❌ 已取消添加")
-        await monitor_menu_from_message(update, context)
+        await update.message.reply_text("❌ 已取消添加", reply_markup=get_monitor_keyboard_markup(user_id))
         return ConversationHandler.END
 
     # 验证地址格式
@@ -384,7 +407,10 @@ async def monitor_add_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chain_type = "ERC20"
         address = text
     else:
-        await update.message.reply_text("❌ 地址格式不正确，请重新输入：\n\n输入 /cancel_monitor 取消")
+        await update.message.reply_text(
+            "❌ 地址格式不正确，请重新输入：\n\n输入 /cancel_monitor 取消",
+            reply_markup=ReplyKeyboardMarkup([[KeyboardButton("◀️ 返回主菜单")]], resize_keyboard=True)
+        )
         return MONITOR_ADD
 
     # 保存地址信息，等待输入备注
@@ -400,7 +426,8 @@ async def monitor_add_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "例如：币安钱包、个人钱包、测试地址等\n\n"
         "直接发送 /skip 跳过备注\n\n"
         "❌ 输入 /cancel_monitor 取消",
-        parse_mode=None
+        parse_mode=None,
+        reply_markup=ReplyKeyboardMarkup([[KeyboardButton("◀️ 返回主菜单")]], resize_keyboard=True)
     )
     return MONITOR_ADD_NOTE
 
@@ -413,8 +440,7 @@ async def monitor_add_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "/cancel_monitor":
         context.user_data.pop("monitor_action", None)
         context.user_data.pop("monitor_temp", None)
-        await update.message.reply_text("❌ 已取消添加")
-        await monitor_menu_from_message(update, context)
+        await update.message.reply_text("❌ 已取消添加", reply_markup=get_monitor_keyboard_markup(user_id))
         return ConversationHandler.END
 
     if text == "/skip":
@@ -427,33 +453,20 @@ async def monitor_add_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chain_type = temp.get("chain_type", "")
 
     if not address:
-        await update.message.reply_text("❌ 会话已过期，请重新添加")
+        await update.message.reply_text("❌ 会话已过期，请重新添加", reply_markup=get_monitor_keyboard_markup(user_id))
         return ConversationHandler.END
 
     if add_monitored_address(address, chain_type, user_id, note):
+        msg = f"✅ 已添加监控地址\n\n📌 地址：`{address}`\n⛓️ 网络：{chain_type}"
         if note:
-            await update.message.reply_text(
-                f"✅ 已添加监控地址\n\n"
-                f"📌 地址：`{address}`\n"
-                f"⛓️ 网络：{chain_type}\n"
-                f"📝 备注：{note}",
-                parse_mode=None
-            )
-        else:
-            await update.message.reply_text(
-                f"✅ 已添加监控地址\n\n"
-                f"📌 地址：`{address}`\n"
-                f"⛓️ 网络：{chain_type}",
-                parse_mode=None
-            )
+            msg += f"\n📝 备注：{note}"
+        await update.message.reply_text(msg, parse_mode=None, reply_markup=get_monitor_keyboard_markup(user_id))
     else:
-        await update.message.reply_text("❌ 添加失败，地址可能已存在")
+        await update.message.reply_text("❌ 添加失败，地址可能已存在", reply_markup=get_monitor_keyboard_markup(user_id))
 
     context.user_data.pop("monitor_action", None)
     context.user_data.pop("monitor_temp", None)
-    await monitor_menu_from_message(update, context)
     return ConversationHandler.END
-
 
 async def monitor_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """查看监控列表（显示备注）"""
@@ -516,14 +529,12 @@ async def monitor_remove_start(update: Update, context: ContextTypes.DEFAULT_TYP
     )
     return MONITOR_REMOVE
 
-
 async def monitor_remove_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """确认删除监控地址（只能删除自己的）"""
+    """确认删除监控地址"""
     query = update.callback_query
     user_id = query.from_user.id
     address_id = int(query.data.split("_")[2])
 
-    # 先检查这个地址是否是当前用户添加的
     addresses = get_monitored_addresses(user_id=user_id)
     is_owner = any(addr['id'] == address_id for addr in addresses)
 
@@ -533,12 +544,12 @@ async def monitor_remove_confirm(update: Update, context: ContextTypes.DEFAULT_T
 
     if remove_monitored_address(address_id):
         await query.answer("✅ 已删除")
+        # 删除成功后，显示更新后的列表
+        await query.message.edit_text("✅ 已删除监控地址")
     else:
         await query.answer("❌ 删除失败")
 
-    await monitor_menu(update, context)
     return ConversationHandler.END
-
 
 async def monitor_menu_from_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """从消息返回监控菜单"""
@@ -548,11 +559,14 @@ async def monitor_menu_from_message(update: Update, context: ContextTypes.DEFAUL
 
     keyboard = [
         [InlineKeyboardButton("➕ 添加监控地址", callback_data="monitor_add")],
-        [InlineKeyboardButton("📋 查看监控列表", callback_data="monitor_list")],
-        [InlineKeyboardButton("📊 月度统计", callback_data="monitor_stats")],
-        [InlineKeyboardButton("❌ 删除监控地址", callback_data="monitor_remove")],
-        [InlineKeyboardButton("◀️ 返回主菜单", callback_data="main_menu")]
     ]
+    if addresses:
+        keyboard += [
+            [InlineKeyboardButton("📋 查看监控列表", callback_data="monitor_list")],
+            [InlineKeyboardButton("📊 月度统计", callback_data="monitor_stats")],
+            [InlineKeyboardButton("❌ 删除监控地址", callback_data="monitor_remove")],
+        ]
+    keyboard.append([InlineKeyboardButton("◀️ 返回主菜单", callback_data="main_menu")])
 
     if len(addresses) == 0:
         text = (
@@ -574,8 +588,7 @@ async def monitor_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """取消监控操作"""
     context.user_data.pop("monitor_action", None)
     context.user_data.pop("monitor_temp", None)
-    await update.message.reply_text("❌ 已取消监控操作")
-    await monitor_menu_from_message(update, context)
+    await update.message.reply_text("❌ 已取消监控操作", reply_markup=get_monitor_keyboard_markup(user_id))
     return ConversationHandler.END
 
 
@@ -604,10 +617,46 @@ def get_monitor_conversation_handler():
         allow_reentry=True,
     )
 
+def get_monitor_keyboard_markup(user_id: int = None):
+    """返回监控模块的固定键盘，根据地址数量显示"""
+    if user_id is not None:
+        addresses = get_monitored_addresses(user_id=user_id)
+    else:
+        addresses = get_monitored_addresses()
+    keyboard = [[KeyboardButton("➕ 添加监控地址")]]
+    if user_id is None or addresses:
+        keyboard.append([KeyboardButton("📋 监控列表"), KeyboardButton("📊 月度统计")])
+        keyboard.append([KeyboardButton("❌ 删除监控地址")])
+    keyboard.append([KeyboardButton("◀️ 返回主菜单")])
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
 __all__ = [
     'get_address_balance',
     'get_trc20_transactions',
     'get_monthly_stats',
     'check_address_transactions',
-    # ... 其他已有导出
+    'monitor_menu',
+    'monitor_list',
+    'monitor_menu_keyboard',   # 如果之前添加过这个函数
+    'get_monitor_keyboard_markup',  # 新增
+    # ... 其它已有导出
 ]
+
+async def monitor_menu_keyboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """USDT 监控 - 键盘版菜单"""
+    from telegram import ReplyKeyboardMarkup, KeyboardButton
+
+    user_id = update.effective_user.id
+    addresses = get_monitored_addresses(user_id=user_id)
+
+    keyboard = [[KeyboardButton("➕ 添加监控地址")]]
+    if addresses:
+        keyboard.append([KeyboardButton("📋 查看监控列表"), KeyboardButton("📊 月度统计")])
+        keyboard.append([KeyboardButton("❌ 删除监控地址")])
+    keyboard.append([KeyboardButton("◀️ 返回主菜单")])
+
+    if not addresses:
+        text = "🔔 USDT 地址监控\n\n📊 您的监控地址数：0 个\n\n⚠️ 暂无监控地址，请先添加。"
+    else:
+        text = f"🔔 USDT 地址监控\n\n📊 您的监控地址数：{len(addresses)} 个\n\n当您监控的地址有交易时，会发送通知。"
+    await update.message.reply_text(text, reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
