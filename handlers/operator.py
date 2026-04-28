@@ -1,6 +1,6 @@
 # handlers/operator.py
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import ContextTypes, ConversationHandler
 from auth import (
     add_operator, remove_operator, get_operators_list_text, 
@@ -15,6 +15,21 @@ ADD_OPERATOR = 1
 REMOVE_OPERATOR = 2
 ADD_TEMP_OPERATOR = 3
 REMOVE_TEMP_OPERATOR = 4
+
+def get_operator_keyboard(user_id: int):
+    """返回操作人管理的固定键盘"""
+    if user_id == OWNER_ID:
+        keyboard = [
+            [KeyboardButton("➕ 添加操作人"), KeyboardButton("➖ 删除操作人"), KeyboardButton("📋 操作人列表")],
+            [KeyboardButton("🔄 更新操作人信息"), KeyboardButton("👥 临时操作人")],
+            [KeyboardButton("◀️ 返回主菜单")],
+        ]
+    else:
+        keyboard = [
+            [KeyboardButton("👥 临时操作人")],
+            [KeyboardButton("◀️ 返回主菜单")],
+        ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 # 点击操作人按钮
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -224,60 +239,30 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("current_action", None)
     context.user_data.pop("active_module", None)
 
-    # 根据用户身份显示不同菜单
-    if user_id == OWNER_ID:
-        # 控制人：完整菜单
-        keyboard = [
-            [InlineKeyboardButton("➕ 添加操作人", callback_data="op_add")],
-            [InlineKeyboardButton("➖ 删除操作人", callback_data="op_remove")],
-            [InlineKeyboardButton("📋 查询操作人", callback_data="op_list")],
-            [InlineKeyboardButton("🔄 更新信息", callback_data="op_update")],
-            [InlineKeyboardButton("👥 临时操作人", callback_data="op_temp_menu")],
-            [InlineKeyboardButton("◀️ 返回主菜单", callback_data="main_menu")],
-        ]
-        await update.message.reply_text(
-            "👤 操作人管理：请选择功能",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-    else:
-        # 操作人：只能看到临时操作人菜单
-        keyboard = [
-            [InlineKeyboardButton("👥 临时操作人", callback_data="op_temp_menu")],
-            [InlineKeyboardButton("◀️ 返回主菜单", callback_data="main_menu")],
-        ]
-        await update.message.reply_text(
-            "👤 操作人管理\n\n"
-            "⚠️ 操作人只能管理【临时操作人】\n"
-            "正式操作人管理需要控制人权限\n\n"
-            "请选择功能：",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-
-async def cancel_operator(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """取消操作员管理"""
-    context.user_data.pop("current_action", None)
-    context.user_data.pop("active_module", None)
-    await update.message.reply_text("❌ 已取消操作")
-
-    user_id = update.effective_user.id
-
-    if user_id == OWNER_ID:
-        keyboard = [
-            [InlineKeyboardButton("➕ 添加操作人", callback_data="op_add")],
-            [InlineKeyboardButton("➖ 删除操作人", callback_data="op_remove")],
-            [InlineKeyboardButton("📋 查询操作人", callback_data="op_list")],
-            [InlineKeyboardButton("🔄 更新信息", callback_data="op_update")],
-            [InlineKeyboardButton("👥 临时操作人", callback_data="op_temp_menu")],
-            [InlineKeyboardButton("◀️ 返回主菜单", callback_data="main_menu")],
-        ]
-    else:
-        keyboard = [
-            [InlineKeyboardButton("👥 临时操作人", callback_data="op_temp_menu")],
-            [InlineKeyboardButton("◀️ 返回主菜单", callback_data="main_menu")],
-        ]
-
+    # 显示固定键盘菜单
     await update.message.reply_text(
         "👤 操作人管理：请选择功能",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        reply_markup=get_operator_keyboard(user_id)
     )
-    return ConversationHandler.END
+
+    async def cancel_operator(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """取消操作员管理"""
+        context.user_data.pop("current_action", None)
+        context.user_data.pop("active_module", None)
+        await update.message.reply_text("❌ 已取消操作")
+
+        user_id = update.effective_user.id
+        await update.message.reply_text(
+            "👤 操作人管理：请选择功能",
+            reply_markup=get_operator_keyboard(user_id)
+        )
+        return ConversationHandler.END
+
+# handlers/operator.py - 简化版
+
+async def handle_keyboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """操作人管理 - 键盘版（不再需要这个函数，因为 main.py 直接处理）"""
+    pass
+
+# 保留原有的 handle、handle_buttons、handle_input、cancel_operator 函数不变
+# 因为它们被 ConversationHandler 使用
