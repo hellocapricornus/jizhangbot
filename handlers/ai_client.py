@@ -1,4 +1,4 @@
-# handlers/ai_client.py - 重构版
+# handlers/ai_client.py - 带对话记忆版本
 
 import aiohttp
 import asyncio
@@ -48,13 +48,18 @@ API_CONFIGS = [
 
 API_CONFIGS = [c for c in API_CONFIGS if c["api_key"]]
 
-# 对话上下文缓存
+# 对话历史缓存
+CONVERSATION_HISTORY: Dict[int, List[Dict]] = {}   # user_id -> list of messages
+MAX_HISTORY = 20   # 最多保留最近 20 条消息（10 轮对话）
+HISTORY_TIMEOUT = 600   # 10 分钟无活动则清除历史
+
+# 保留旧的缓存用于导出意图
 CONVERSATION_CACHE = {}
 CACHE_TIMEOUT = 300
 
 
 class AIClient:
-    """多 API 自动切换客户端 - 智能回答版"""
+    """多 API 自动切换客户端 - 智能回答版（支持上下文记忆）"""
 
     def __init__(self, configs: List[Dict] = None):
         self.configs = configs or API_CONFIGS
@@ -62,29 +67,18 @@ class AIClient:
         self.failed_keys = set()
 
     async def chat(self, prompt: str, system_prompt: str = "你是一个智能助手，回答问题要简洁、准确、友好。") -> str:
-        """普通对话"""
-        errors = []
-        for config in self.configs:
-            if not config.get("api_key"):
-                continue
-            if config["name"] in self.failed_keys:
-                continue
-            try:
-                result = await self._call_api(config, prompt, system_prompt)
-                return result
-            except Exception as e:
-                error_msg = str(e)
-                errors.append(f"{config['name']}: {error_msg[:50]}")
-                if "insufficient" in error_msg.lower() or "quota" in error_msg.lower() or "balance" in error_msg.lower():
-                    self.failed_keys.add(config["name"])
-                continue
-        return f"❌ 所有 AI 服务暂时不可用，请稍后再试。\n错误: {', '.join(errors)}"
+        """普通对话（不带上下文）"""
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt}
+        ]
+        return await self._call_api_with_messages(messages)
 
-    async def chat_with_data(self, prompt: str, group_id: str = None, 
+    async def chat_with_data(self, prompt: str, group_id: str = None,
                               user_id: int = None,
                               system_prompt: str = None) -> str:
         """
-        支持数据查询的对话 - 让 AI 读取数据库中的数据并分析回答
+        支持数据查询的对话 - 带上下文记忆
         """
         from handlers.data_provider import data_provider
         from auth import is_authorized
@@ -92,23 +86,20 @@ class AIClient:
         if user_id is None:
             user_id = 0
 
-        # ========== ✅ 添加权限检查 ==========
-        # AI 对话功能仅限管理员和操作员（临时操作人不能使用）
+        # 权限检查
         if not is_authorized(user_id, require_full_access=True):
             return "❌ AI 对话功能仅限管理员和操作员使用\n\n如需使用，请联系 @ChinaEdward 申请权限"
-        # ===================================
 
         prompt_lower = prompt.lower()
 
-        # 检测是否是帮助类问题
+        # 帮助类问题直接返回静态帮助（不占记忆）
         help_keywords = ["你能做什么", "有什么功能", "怎么用", "帮助", "help", "功能列表", "提示词", "可以问什么"]
         if any(kw in prompt_lower for kw in help_keywords):
             return self._get_help_message()
 
-        # 检测是否是导出请求（这些使用固定格式，更清晰）
+        # 导出请求（使用固定格式，不经过 AI）
         export_keywords = ["导出", "详细账单", "原始账单", "完整账单", "所有记录", "每一笔", "导出完整账单"]
         is_export = any(word in prompt for word in export_keywords)
-
         question_keywords = ["哪些", "多少", "几个", "什么", "哪个", "谁", "哪几个", "哪些群"]
         is_question = any(word in prompt for word in question_keywords)
 
@@ -126,27 +117,27 @@ class AIClient:
                     CONVERSATION_CACHE.pop(user_id, None)
             return "📭 请先查询账单，然后再使用「导出」功能。\n\n例如：先问「测试5群今天收入」，然后说「导出详细账单」"
 
-        # 识别意图
+        # 意图识别
         intent = await self._identify_intent(prompt, user_id)
-
         print(f"[DEBUG] AI 意图识别结果: {intent}")
         print(f"[DEBUG] 用户ID: {user_id}")
 
-        # 普通聊天直接调用 AI
+        # 如果是普通聊天，直接使用记忆对话
         if intent.get("type") == "chat":
-            return await self.chat(prompt)
+            return await self._chat_with_history(user_id, prompt)
 
         # 获取数据
         data = await self._fetch_data(intent, data_provider)
-
         if data.get("error"):
             if data.get("suggestion"):
                 return f"❌ {data['error']}\n\n💡 {data['suggestion']}"
             if data.get("available_groups"):
                 return f"❌ {data['error']}\n\n💡 {data['suggestion']}"
             return f"❌ {data['error']}"
+        if data.get("message"):
+            return f"📭 {data['message']}"
 
-        # 缓存数据
+        # 缓存数据（用于后续导出）
         CONVERSATION_CACHE[user_id] = {
             "last_intent": intent,
             "last_data": data,
@@ -154,13 +145,151 @@ class AIClient:
         }
         print(f"[DEBUG] 已缓存用户 {user_id} 的查询数据")
 
-        # 🔥 核心改动：让 AI 生成自然回答（保留导出提示）
-        answer = await self._generate_natural_answer(prompt, intent, data)
+        # 使用上下文记忆生成回答
+        answer = await self._generate_natural_answer_with_memory(user_id, prompt, intent, data)
 
         if self._should_suggest_export(data):
             answer += "\n\n💡 如需查看详细账单，请发送「导出完整账单」"
 
         return answer
+
+    # ---------- 对话历史管理 ----------
+    def _get_history(self, user_id: int) -> List[Dict]:
+        """获取用户对话历史，并清理过期记录"""
+        now = time.time()
+        if user_id in CONVERSATION_HISTORY:
+            hist = CONVERSATION_HISTORY[user_id]
+            # 若超过 10 分钟未活动，清空历史
+            if hist and now - hist[-1].get('timestamp', 0) > HISTORY_TIMEOUT:
+                del CONVERSATION_HISTORY[user_id]
+                return []
+            # 只保留最近 MAX_HISTORY 条消息
+            if len(hist) > MAX_HISTORY:
+                CONVERSATION_HISTORY[user_id] = hist[-MAX_HISTORY:]
+            return [{"role": m["role"], "content": m["content"]} for m in CONVERSATION_HISTORY[user_id]]
+        return []
+
+    def _add_to_history(self, user_id: int, role: str, content: str):
+        """添加一条对话记录"""
+        if user_id not in CONVERSATION_HISTORY:
+            CONVERSATION_HISTORY[user_id] = []
+        CONVERSATION_HISTORY[user_id].append({
+            "role": role,
+            "content": content,
+            "timestamp": time.time()
+        })
+        # 保持长度
+        if len(CONVERSATION_HISTORY[user_id]) > MAX_HISTORY:
+            CONVERSATION_HISTORY[user_id] = CONVERSATION_HISTORY[user_id][-MAX_HISTORY:]
+
+    async def _chat_with_history(self, user_id: int, prompt: str) -> str:
+        """普通聊天，但带上下文记忆"""
+        history = self._get_history(user_id)
+        system_prompt = "你是一个智能记账助手，可以理解上下文。回答要简洁、准确、友好。"
+        messages = [{"role": "system", "content": system_prompt}]
+        messages.extend(history)
+        messages.append({"role": "user", "content": prompt})
+
+        # 调用 AI
+        reply = await self._call_api_with_messages(messages)
+
+        # 保存对话
+        self._add_to_history(user_id, "user", prompt)
+        self._add_to_history(user_id, "assistant", reply)
+        return reply
+
+    async def _generate_natural_answer_with_memory(self, user_id: int, question: str, intent: Dict, data: Dict) -> str:
+        """带记忆的自然语言生成"""
+        if data.get("summary"):
+            return data["summary"]
+
+        data_summary = json.dumps(data, ensure_ascii=False, indent=2, default=str)
+        if len(data_summary) > 2500:
+            data_summary = self._smart_truncate_data(data, data_summary)
+
+        system_prompt = self._build_system_prompt(intent.get("type", "unknown"), data)
+
+        history = self._get_history(user_id)
+        messages = [{"role": "system", "content": system_prompt}]
+        messages.extend(history)
+        messages.append({
+            "role": "user",
+            "content": f"用户问题：{question}\n\n查询到的数据：\n{data_summary}\n\n请根据以上数据回答。"
+        })
+
+        reply = await self._call_api_with_messages(messages)
+
+        # 保存对话
+        self._add_to_history(user_id, "user", question)
+        self._add_to_history(user_id, "assistant", reply)
+        return reply
+
+    # ---------- 通用 API 调用（支持消息列表） ----------
+    async def _call_api_with_messages(self, messages: List[Dict]) -> str:
+        """调用 API，兼容不同厂商的消息格式"""
+        errors = []
+        for config in self.configs:
+            if not config.get("api_key"):
+                continue
+            if config["name"] in self.failed_keys:
+                continue
+            try:
+                result = await self._call_api(config, messages=messages)
+                return result
+            except Exception as e:
+                error_msg = str(e)
+                errors.append(f"{config['name']}: {error_msg[:50]}")
+                if "insufficient" in error_msg.lower() or "quota" in error_msg.lower() or "balance" in error_msg.lower():
+                    self.failed_keys.add(config["name"])
+                continue
+        return f"❌ 所有 AI 服务暂时不可用，请稍后再试。\n错误: {', '.join(errors)}"
+
+    async def _call_api(self, config: Dict, messages: List[Dict]) -> str:
+        """实际 HTTP 调用，根据 API 类型构建请求体"""
+        name = config["name"]
+        url = config["url"]
+        api_key = config["api_key"]
+
+        print(f"🤖 正在使用 {name} API...")
+
+        headers = {"Content-Type": "application/json"}
+
+        if name in ["DeepSeek", "SiliconFlow", "智谱AI"]:
+            headers["Authorization"] = f"Bearer {api_key}"
+            payload = {
+                "model": config["model"],
+                "messages": messages,
+                "stream": False,
+                "max_tokens": 2000,
+                "temperature": 0.7
+            }
+        elif name == "阿里云通义":
+            headers["Authorization"] = f"Bearer {api_key}"
+            payload = {
+                "model": config["model"],
+                "input": {
+                    "messages": messages
+                },
+                "parameters": {
+                    "max_tokens": 2000,
+                    "temperature": 0.7
+                }
+            }
+        else:
+            raise ValueError(f"未知的 API: {name}")
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, json=payload, timeout=30) as resp:
+                if resp.status != 200:
+                    error_text = await resp.text()
+                    raise Exception(f"HTTP {resp.status}: {error_text[:100]}")
+                data = await resp.json()
+                if name in ["DeepSeek", "SiliconFlow", "智谱AI"]:
+                    return data["choices"][0]["message"]["content"]
+                elif name == "阿里云通义":
+                    return data["output"]["choices"][0]["message"]["content"]
+                else:
+                    return str(data)
 
     async def _identify_intent(self, prompt: str, user_id: int = 0) -> Dict:
         """
@@ -1060,60 +1189,6 @@ class AIClient:
             result += f"  • {g['name']}：{g['income_usdt']:.2f} USDT ({g['income_count']}笔)\n"
 
         return result
-
-    async def _call_api(self, config: Dict, prompt: str, system_prompt: str) -> str:
-        """调用 API"""
-        name = config["name"]
-        url = config["url"]
-        api_key = config["api_key"]
-
-        print(f"🤖 正在使用 {name} API...")
-
-        headers = {"Content-Type": "application/json"}
-
-        if name == "DeepSeek" or name == "SiliconFlow" or name == "智谱AI":
-            headers["Authorization"] = f"Bearer {api_key}"
-            payload = {
-                "model": config["model"],
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": prompt}
-                ],
-                "stream": False,
-                "max_tokens": 2000,
-                "temperature": 0.7
-            }
-        elif name == "阿里云通义":
-            headers["Authorization"] = f"Bearer {api_key}"
-            payload = {
-                "model": config["model"],
-                "input": {
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": prompt}
-                    ]
-                },
-                "parameters": {
-                    "max_tokens": 2000,
-                    "temperature": 0.7
-                }
-            }
-        else:
-            raise ValueError(f"未知的 API: {name}")
-
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=headers, json=payload, timeout=30) as resp:
-                if resp.status != 200:
-                    error_text = await resp.text()
-                    raise Exception(f"HTTP {resp.status}: {error_text[:100]}")
-                data = await resp.json()
-                if name == "DeepSeek" or name == "SiliconFlow" or name == "智谱AI":
-                    return data["choices"][0]["message"]["content"]
-                elif name == "阿里云通义":
-                    return data["output"]["choices"][0]["message"]["content"]
-                else:
-                    return str(data)
-
 
 ai_client = None
 
