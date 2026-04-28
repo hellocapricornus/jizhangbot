@@ -7,6 +7,7 @@ from telegram.ext import (
     CallbackQueryHandler, MessageHandler, ConversationHandler, 
     ContextTypes, filters, CommandHandler
 )
+from telegram.error import RetryAfter, TimedOut, NetworkError
 from auth import is_authorized
 from db import get_all_groups_from_db, delete_group_from_db, get_all_categories
 
@@ -138,6 +139,8 @@ async def start_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     groups = get_all_groups_from_db()
 
     if not groups:
+        # 🔥 清除广播状态
+        context.user_data.pop("in_broadcast", None)
         await query.message.reply_text("⚠️ **未找到任何有效群组**\n\n请确保机器人已添加到群组中。")
         return ConversationHandler.END
 
@@ -274,36 +277,43 @@ async def bc_back_to_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 返回主菜单
     from handlers.menu import get_main_menu
     # 🔥 移除 parse_mode="Markdown"
-    await query.message.edit_text(
+    # 发送新消息作为主菜单
+    await query.message.reply_text(
         "请选择功能：",
-        reply_markup=get_main_menu(),
-        parse_mode=None
+        reply_markup=get_main_menu(user_id)
     )
+    # 可选：删除原消息，避免界面混乱
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
     return ConversationHandler.END
 
-# broadcast.py - 添加新函数
-
 async def bc_cancel_and_exit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """取消群发并退出，清理所有状态"""
     query = update.callback_query
+    user_id = query.from_user.id
     await query.answer("已取消群发")
 
-    # 发送退出提示
-    await query.message.reply_text("❌ 已取消群发功能，返回主菜单")
-
-    # 清理所有广播相关的临时数据
+    # 清理数据
     keys = ["bc_all_groups", "bc_selected_ids", "bc_message_content", "bc_temp_target_ids",
             "bc_selected_category", "bc_batches", "bc_current_batch", "bc_batch_results",
             "bc_waiting_for_next", "in_broadcast", "active_module", "bc_current_page"]
     for k in keys:
         context.user_data.pop(k, None)
 
-    # 返回主菜单
     from handlers.menu import get_main_menu
-    await query.message.edit_text(
-        "请选择功能：",
-        reply_markup=get_main_menu()
+
+    # 直接发送新消息
+    await query.message.reply_text(
+        "✅ 已取消群发\n\n请选择功能：",
+        reply_markup=get_main_menu(user_id)
     )
+    # 可选删除原消息
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+
     return ConversationHandler.END
 
 async def bc_filter_by_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -634,6 +644,11 @@ async def bc_next_batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def receive_message_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """接收消息输入（支持文字、图片、视频、文件）"""
     message = update.message
+    user_id = update.effective_user.id
+    # 读取用户设置的默认附言
+    from db import get_user_preferences
+    prefs = get_user_preferences(user_id)
+    signature = prefs.get("broadcast_signature", "")
 
     # 调试日志
     logger.info(f"收到消息输入: text={message.text}, photo={bool(message.photo)}, video={bool(message.video)}")
@@ -647,7 +662,7 @@ async def receive_message_input(update: Update, context: ContextTypes.DEFAULT_TY
             context.user_data.pop(k, None)
         context.user_data.pop("active_module", None)
         from handlers.menu import get_main_menu
-        await update.message.reply_text("❌ 已取消，返回主菜单", reply_markup=get_main_menu())
+        await update.message.reply_text("❌ 已取消，返回主菜单", reply_markup=get_main_menu(user_id))
         return ConversationHandler.END
 
     # 存储消息内容（支持多种类型）
@@ -656,7 +671,10 @@ async def receive_message_input(update: Update, context: ContextTypes.DEFAULT_TY
     # 文字消息
     if message.text:
         message_data["type"] = "text"
-        message_data["content"] = message.text
+        content = message.text
+        if signature:
+            content += "\n附言：" + signature
+        message_data["content"] = content
         logger.info(f"检测到文字消息: {message.text[:50]}")
     # 图片消息
     elif message.photo:
@@ -664,32 +682,47 @@ async def receive_message_input(update: Update, context: ContextTypes.DEFAULT_TY
         # 取最大尺寸的图片
         photo = message.photo[-1]
         message_data["file_id"] = photo.file_id
-        message_data["caption"] = message.caption or ""
+        caption = message.caption or ""
+        if signature:
+            caption = caption + "\n附言：" + signature if caption else signature
+        message_data["caption"] = caption
         logger.info(f"检测到图片消息, file_id: {photo.file_id[:20]}...")
     # 视频消息
     elif message.video:
         message_data["type"] = "video"
         message_data["file_id"] = message.video.file_id
-        message_data["caption"] = message.caption or ""
+        caption = message.caption or ""
+        if signature:
+            caption = caption + "\n附言：" + signature if caption else signature
+        message_data["caption"] = caption
         logger.info(f"检测到视频消息, file_id: {message.video.file_id[:20]}...")
     # 文档/文件消息
     elif message.document:
         message_data["type"] = "document"
         message_data["file_id"] = message.document.file_id
-        message_data["caption"] = message.caption or ""
+        caption = message.caption or ""
+        if signature:
+            caption = caption + "\n附言：" + signature if caption else signature
+        message_data["caption"] = caption
         message_data["filename"] = message.document.file_name
         logger.info(f"检测到文件消息: {message.document.file_name}")
     # 动画/GIF消息
     elif message.animation:
         message_data["type"] = "animation"
         message_data["file_id"] = message.animation.file_id
-        message_data["caption"] = message.caption or ""
+        caption = message.caption or ""
+        if signature:
+            caption = caption + "\n附言：" + signature if caption else signature
+        message_data["caption"] = caption
         logger.info(f"检测到GIF消息")
     # 音频消息
     elif message.audio:
         message_data["type"] = "audio"
         message_data["file_id"] = message.audio.file_id
-        message_data["caption"] = message.caption or ""
+        caption = message.caption or ""
+        if signature:
+            caption = caption + "\n附言：" + signature if caption else signature
+        message_data["caption"] = caption
         logger.info(f"检测到音频消息")
     # 贴纸消息
     elif message.sticker:
@@ -870,55 +903,65 @@ async def execute_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     failed = 0
 
     async def send_one(gid):
-        """发送单条消息"""
-        try:
-            msg_type = message_data["type"]
-
-            if msg_type == "text":
-                await context.bot.send_message(
-                    chat_id=gid,
-                    text=message_data["content"],
-                    parse_mode="Markdown"
-                )
-            elif msg_type == "photo":
-                await context.bot.send_photo(
-                    chat_id=gid,
-                    photo=message_data["file_id"],
-                    caption=message_data.get("caption", "")
-                )
-            elif msg_type == "video":
-                await context.bot.send_video(
-                    chat_id=gid,
-                    video=message_data["file_id"],
-                    caption=message_data.get("caption", "")
-                )
-            elif msg_type == "document":
-                await context.bot.send_document(
-                    chat_id=gid,
-                    document=message_data["file_id"],
-                    caption=message_data.get("caption", "")
-                )
-            elif msg_type == "animation":
-                await context.bot.send_animation(
-                    chat_id=gid,
-                    animation=message_data["file_id"],
-                    caption=message_data.get("caption", "")
-                )
-            elif msg_type == "audio":
-                await context.bot.send_audio(
-                    chat_id=gid,
-                    audio=message_data["file_id"],
-                    caption=message_data.get("caption", "")
-                )
-            elif msg_type == "sticker":
-                await context.bot.send_sticker(
-                    chat_id=gid,
-                    sticker=message_data["file_id"]
-                )
-            return True
-        except Exception as e:
-            logger.error(f"发送失败 {gid}: {e}")
-            return False
+        """发送单条消息，自动处理频控重试"""
+        retries = 3
+        for attempt in range(retries):
+            try:
+                msg_type = message_data["type"]
+                if msg_type == "text":
+                    await context.bot.send_message(
+                        chat_id=gid,
+                        text=message_data["content"],
+                        parse_mode="Markdown"
+                    )
+                elif msg_type == "photo":
+                    await context.bot.send_photo(
+                        chat_id=gid,
+                        photo=message_data["file_id"],
+                        caption=message_data.get("caption", "")
+                    )
+                elif msg_type == "video":
+                    await context.bot.send_video(
+                        chat_id=gid,
+                        video=message_data["file_id"],
+                        caption=message_data.get("caption", "")
+                    )
+                elif msg_type == "document":
+                    await context.bot.send_document(
+                        chat_id=gid,
+                        document=message_data["file_id"],
+                        caption=message_data.get("caption", "")
+                    )
+                elif msg_type == "animation":
+                    await context.bot.send_animation(
+                        chat_id=gid,
+                        animation=message_data["file_id"],
+                        caption=message_data.get("caption", "")
+                    )
+                elif msg_type == "audio":
+                    await context.bot.send_audio(
+                        chat_id=gid,
+                        audio=message_data["file_id"],
+                        caption=message_data.get("caption", "")
+                    )
+                elif msg_type == "sticker":
+                    await context.bot.send_sticker(
+                        chat_id=gid,
+                        sticker=message_data["file_id"]
+                    )
+                return True
+            except RetryAfter as e:
+                wait_time = e.retry_after
+                logger.warning(f"发送到 {gid} 触发频控，等待 {wait_time} 秒后重试 (尝试 {attempt+1}/{retries})")
+                await asyncio.sleep(wait_time)
+                # 继续重试
+            except (TimedOut, NetworkError) as e:
+                logger.warning(f"发送到 {gid} 网络错误: {e}，重试 {attempt+1}/{retries}")
+                await asyncio.sleep(2 ** attempt)  # 指数退避
+            except Exception as e:
+                logger.error(f"发送到 {gid} 失败: {e}")
+                return False
+        return False
 
     # 分批发送
     for batch_start in range(0, total, batch_size):
@@ -960,10 +1003,15 @@ async def execute_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await end_conversation(update, context)
 
 # --- 辅助函数 ---
-# 在文件末尾添加
 async def end_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """结束对话并清理数据"""
-    # 清理所有广播相关的临时数据
+    # 获取 user_id
+    if update.callback_query:
+        user_id = update.callback_query.from_user.id
+    else:
+        user_id = update.effective_user.id
+
+    # 清理所有广播相关数据
     keys = ["bc_all_groups", "bc_selected_ids", "bc_message_content", "bc_temp_target_ids",
             "bc_selected_category", "bc_batches", "bc_current_batch", "bc_batch_results",
             "bc_waiting_for_next", "bc_current_state", "in_broadcast", "bc_current_page"]
@@ -971,38 +1019,42 @@ async def end_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if k in context.user_data:
             context.user_data.pop(k, None)
 
-    # 重要：清除整个对话状态
-    # 这样可以确保下次点击群发时是全新对话
-    if "conversation_state" in context.user_data:
-        context.user_data.pop("conversation_state", None)
-
     # 返回主菜单
     from handlers.menu import get_main_menu
-    
+
     try:
         if update.callback_query and update.callback_query.message:
-            await update.callback_query.message.edit_text(
+            # 改为发送新消息，然后删除原内联键盘消息
+            await update.callback_query.message.reply_text(
                 "请选择功能：",
-                reply_markup=get_main_menu()
+                reply_markup=get_main_menu(user_id)
             )
+            try:
+                await update.callback_query.message.delete()
+            except Exception:
+                pass
         elif update.message:
             await update.message.reply_text(
                 "请选择功能：",
-                reply_markup=get_main_menu()
+                reply_markup=get_main_menu(user_id)
             )
         elif update.effective_chat:
             await update.effective_chat.send_message(
                 "请选择功能：",
-                reply_markup=get_main_menu()
+                reply_markup=get_main_menu(user_id)
             )
     except Exception as e:
         logger.error(f"返回主菜单失败: {e}")
-        # 如果编辑失败，尝试发送新消息
-        if update.effective_chat:
-            await update.effective_chat.send_message(
+        # 降级方案：如果 reply 也失败，尝试直接发送
+        if update.callback_query and update.callback_query.message:
+            await update.callback_query.message.reply_text(
                 "请选择功能：",
-                reply_markup=get_main_menu()
+                reply_markup=get_main_menu(user_id)
             )
+            try:
+                await update.callback_query.message.delete()
+            except Exception:
+                pass
 
     return ConversationHandler.END
 
@@ -1017,6 +1069,12 @@ async def bc_cancel_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def bc_fallback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理未预期的消息，清理并返回主菜单"""
     logger.info(f"广播模块 fallback 被触发")
+
+    # 确定 user_id
+    if update.callback_query:
+        user_id = update.callback_query.from_user.id
+    else:
+        user_id = update.effective_user.id
 
     # 检查是否正在等待输入消息
     if context.user_data.get("bc_temp_target_ids") and not context.user_data.get("bc_message_data"):
@@ -1038,17 +1096,22 @@ async def bc_fallback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     from handlers.menu import get_main_menu
     try:
         if update.callback_query:
-            await update.callback_query.message.edit_text(
+            # 修改为 reply_text + 删除原消息
+            await update.callback_query.message.reply_text(
                 "请选择功能：",
-                reply_markup=get_main_menu()
+                reply_markup=get_main_menu(user_id)
             )
+            try:
+                await update.callback_query.message.delete()
+            except Exception:
+                pass
         elif update.message:
             await update.message.reply_text(
                 "请选择功能：",
-                reply_markup=get_main_menu()
+                reply_markup=get_main_menu(user_id)
             )
-    except:
-        pass
+    except Exception as e:
+        logger.error(f"返回主菜单失败: {e}")
 
     return ConversationHandler.END
 
@@ -1065,10 +1128,14 @@ async def bc_force_cleanup(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop(k, None)
 
     from handlers.menu import get_main_menu
-    await query.message.edit_text(
+    await query.message.reply_text(
         "请选择功能：",
-        reply_markup=get_main_menu()
+        reply_markup=get_main_menu(user_id)
     )
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
     return ConversationHandler.END
 
 # 🔥 添加统一的取消命令处理器
@@ -1095,14 +1162,18 @@ async def bc_cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         if update.callback_query:
-            await update.callback_query.message.edit_text(
+            await update.callback_query.message.reply_text(
                 "❌ 已取消群发\n\n请选择功能：",
-                reply_markup=get_main_menu()
+                reply_markup=get_main_menu(user_id)
             )
+            try:
+                await update.callback_query.message.delete()
+            except Exception:
+                pass
         elif update.message:
             await update.message.reply_text(
                 "❌ 已取消群发\n\n请选择功能：",
-                reply_markup=get_main_menu()
+                reply_markup=get_main_menu(user_id)
             )
     except Exception as e:
         logger.error(f"取消操作失败: {e}")
@@ -1115,6 +1186,12 @@ async def bc_cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def bc_cancel_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """作为 ConversationHandler fallback 的取消处理"""
     print(f"[DEBUG] bc_cancel_fallback 被调用")
+
+    # 确定 user_id
+    if update.callback_query:
+        user_id = update.callback_query.from_user.id
+    else:
+        user_id = update.effective_user.id
 
     # 发送提示消息
     try:
@@ -1137,16 +1214,19 @@ async def bc_cancel_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     from handlers.menu import get_main_menu
 
     try:
-        # 判断消息来源
         if update.callback_query:
-            await update.callback_query.message.edit_text(
+            await update.callback_query.message.reply_text(
                 "❌ 已取消群发\n\n请选择功能：",
-                reply_markup=get_main_menu()
+                reply_markup=get_main_menu(user_id)
             )
+            try:
+                await update.callback_query.message.delete()
+            except Exception:
+                pass
         elif update.message:
             await update.message.reply_text(
                 "❌ 已取消群发\n\n请选择功能：",
-                reply_markup=get_main_menu()
+                reply_markup=get_main_menu(user_id)
             )
     except Exception as e:
         logger.error(f"取消操作失败: {e}")
@@ -1154,7 +1234,7 @@ async def bc_cancel_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if update.effective_chat:
             await update.effective_chat.send_message(
                 "❌ 已取消群发\n\n请选择功能：",
-                reply_markup=get_main_menu()
+                reply_markup=get_main_menu(user_id)
             )
 
     # 返回 END 结束对话
@@ -1206,3 +1286,43 @@ def get_handlers():
             allow_reentry=True,
         )
     ]
+# handlers/broadcast.py - 添加键盘版
+
+async def start_broadcast_keyboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """群发功能 - 键盘版入口"""
+    user_id = update.effective_user.id
+
+    if not is_authorized(user_id, require_full_access=True):
+        await update.message.reply_text("❌ 管理人/操作员才能使用，如需使用请联系 @ChinaEdward")
+        return
+
+    # 模拟点击群发按钮，触发原有的 inline 流程
+    # 先设置必要的状态
+    context.user_data["in_broadcast"] = True
+
+    # 清理旧数据
+    keys = ["bc_all_groups", "bc_selected_ids", "bc_message_content", "bc_temp_target_ids",
+            "bc_selected_category", "bc_batches", "bc_current_batch", "bc_batch_results",
+            "bc_waiting_for_next", "bc_current_state", "bc_current_page"]
+    for k in keys:
+        context.user_data.pop(k, None)
+
+    from db import get_all_groups_from_db
+    groups = get_all_groups_from_db()
+
+    if not groups:
+        await update.message.reply_text("⚠️ **未找到任何有效群组**\n\n请确保机器人已添加到群组中。")
+        return
+
+    context.user_data["bc_all_groups"] = groups
+    context.user_data["bc_selected_ids"] = []
+
+    # 使用内联按钮显示群组选择（和原有的 start_broadcast 一样）
+    await show_group_selection_keyboard(update, context)
+
+
+async def show_group_selection_keyboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """群组选择 - 混合模式（键盘+内联）"""
+    # 这里保持使用内联按钮来选择群组（因为群组列表很长，键盘不适合）
+    # 只需要在底部添加返回主菜单的键盘即可
+    await show_group_selection(update, context)
