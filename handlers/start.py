@@ -1,4 +1,4 @@
-# handlers/start.py - 删除 handle_private_message 函数
+# handlers/start.py
 
 from telegram import Update
 from telegram.ext import ContextTypes
@@ -23,12 +23,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # 私聊中的处理 - 显示菜单
+    # 私聊中的处理 - 显示键盘菜单
     await update.message.reply_text(
-        "请选择功能：",
-        reply_markup=get_main_menu()
+        "🤖 欢迎使用记账机器人！\n\n请选择功能：",
+        reply_markup=get_main_menu(user_id)
     )
-
-# ✅ 删除下面的整个 handle_private_message 函数
-# async def handle_private_message(...):
-#     ...
