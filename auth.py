@@ -141,10 +141,6 @@ init_operators_from_db()
 # 3. 加载临时操作人
 init_temp_operators_from_db()
 
-def is_authorized(user_id: int) -> bool:
-    """检查用户是否是控制人或者操作人"""
-    return user_id == OWNER_ID or user_id in operators
-
 async def add_operator(user_id: int, context: ContextTypes.DEFAULT_TYPE = None) -> bool:
     """添加操作员并同步到数据库"""
     if user_id in operators:
@@ -328,56 +324,15 @@ async def cmd_update_operator_info(update: Update, context: ContextTypes.DEFAULT
     else:
         await update.message.reply_text("⚠️ 没有操作人被更新，或更新失败")
 
-def init_temp_operators_from_db():
-    """从数据库加载临时操作人"""
-    global temp_operators
-    try:
-        conn = _get_db_connection()
-        c = conn.cursor()
-
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS temp_operators (
-                user_id TEXT PRIMARY KEY,
-                username TEXT,
-                first_name TEXT,
-                last_name TEXT,
-                added_at INTEGER,
-                added_by INTEGER
-            )
-        """)
-        conn.commit()
-
-        c.execute("SELECT user_id, username, first_name, last_name FROM temp_operators")
-        rows = c.fetchall()
-        conn.close()
-
-        temp_operators = {}
-        for row in rows:
-            user_id = int(row['user_id'])
-            temp_operators[user_id] = {
-                "id": user_id,
-                "username": row['username'],
-                "first_name": row['first_name'],
-                "last_name": row['last_name']
-            }
-
-        print(f"✅ 已从数据库加载 {len(temp_operators)} 名临时操作人")
-        return temp_operators
-    except Exception as e:
-        print(f"❌ 加载临时操作人失败: {e}")
-        temp_operators = {}
-        return temp_operators
-
 def is_temp_authorized(user_id: int) -> bool:
     """检查是否是临时操作人（仅记账权限）"""
     return user_id in temp_operators
 
 def is_authorized(user_id: int, require_full_access: bool = False) -> bool:
-    """检查用户权限
-
-    Args:
-        user_id: 用户ID
-        require_full_access: 是否需要完全访问权限（True=需要完整权限，False=记账权限即可）
+    """
+    检查用户权限
+    - require_full_access=True：需要控制人或正式操作员（用于所有管理功能）
+    - require_full_access=False：记账权限即可（控制人、正式操作员、临时操作员）
     """
     # 超级管理员始终有权限
     if user_id == OWNER_ID:
@@ -472,3 +427,11 @@ def get_temp_operators_list_text() -> str:
         text += "━" * 20 + "\n"
 
     return text
+
+def is_admin(user_id: int) -> bool:
+    """控制人或正式操作员"""
+    return is_authorized(user_id, require_full_access=True)
+
+def is_operator_or_temp(user_id: int) -> bool:
+    """控制人、正式操作员或临时操作员"""
+    return is_authorized(user_id, require_full_access=False)
