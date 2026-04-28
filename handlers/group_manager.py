@@ -1,7 +1,7 @@
 # handlers/group_manager.py - 完整功能版
 import time
 import asyncio
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import ContextTypes
 from auth import is_authorized
 from db import (
@@ -14,24 +14,33 @@ user_states = {}
 
 # 分页常量
 ITEMS_PER_PAGE = 10
+CATEGORIES_PER_PAGE = 8   # 每页显示的分类数量
 
 # 用户状态超时清理（1分钟）
 USER_STATE_TIMEOUT = 60
 
+def get_group_manager_keyboard():
+    keyboard = [
+        [KeyboardButton("📊 群组统计"), KeyboardButton("📁 查看分类"), KeyboardButton("➕ 创建分类")],
+        [KeyboardButton("🏷️ 设置群组分类"), KeyboardButton("🗑️ 删除分类")],
+        [KeyboardButton("◀️ 返回主菜单")],
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
 async def cleanup_expired_states():
     """清理过期的用户状态"""
-    current_time = time.time()
-    expired_users = []
-
-    for user_id, state in user_states.items():
-        if 'timestamp' not in state:
-            state['timestamp'] = current_time
-        elif current_time - state['timestamp'] > USER_STATE_TIMEOUT:
-            expired_users.append(user_id)
-
-    for user_id in expired_users:
-        del user_states[user_id]
-        print(f"[清理] 已清除用户 {user_id} 的过期状态")
+    while True:
+        await asyncio.sleep(300)   # 每5分钟执行一次
+        current_time = time.time()
+        expired_users = []
+        for user_id, state in user_states.items():
+            if 'timestamp' not in state:
+                state['timestamp'] = current_time
+            elif current_time - state['timestamp'] > USER_STATE_TIMEOUT:
+                expired_users.append(user_id)
+        for user_id in expired_users:
+            del user_states[user_id]
+            print(f"[清理] 已清除用户 {user_id} 的过期状态")
 
 async def group_manager_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """群组管理主菜单"""
@@ -86,46 +95,38 @@ async def group_manager_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
 
 async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """显示群组统计"""
     query = update.callback_query
     await query.answer()
-    print(f"[DEBUG] show_stats 被调用")
-
     groups_by_cat = get_groups_by_category()
     categories = get_all_categories()
-
     text = "📊 **群组统计**\n\n"
     for cat in categories:
         cat_name = cat['name']
         count = groups_by_cat.get(cat_name, 0)
         text += f"• **{cat_name}**：{count} 个群组\n"
     text += f"\n总计：**{sum(groups_by_cat.values())}** 个群组"
-
-    keyboard = [[InlineKeyboardButton("◀️ 返回", callback_data="group_manager")]]
-
-    await query.message.edit_text(
-        text,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="Markdown"
+    await query.message.edit_text(text, parse_mode="Markdown")  # 编辑原消息
+    # 发送固定键盘
+    await query.message.reply_text(
+        "请继续操作：",
+        reply_markup=get_group_manager_keyboard()
     )
 
 async def list_categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """查看所有分类"""
     query = update.callback_query
     await query.answer()
-    print(f"[DEBUG] list_categories 被调用")
-
     categories = get_all_categories()
     groups_by_cat = get_groups_by_category()
-
     text = "📁 **现有分类**\n\n"
     for cat in categories:
         cat_name = cat['name']
         count = groups_by_cat.get(cat_name, 0)
         text += f"• **{cat_name}** ({count}个群组)\n"
-
-    keyboard = [[InlineKeyboardButton("◀️ 返回", callback_data="group_manager")]]
-    await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    await query.message.edit_text(text, parse_mode="Markdown")
+    await query.message.reply_text(
+        "请继续操作：",
+        reply_markup=get_group_manager_keyboard()
+    )
 
 # ==================== 创建分类 ====================
 async def add_category_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -160,7 +161,7 @@ async def add_category_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
             del user_states[user_id]
         await message.reply_text("❌ 已取消创建分类")
         from handlers.menu import get_main_menu
-        await message.reply_text("请选择功能：", reply_markup=get_main_menu())
+        await message.reply_text("请选择功能：", reply_markup=get_main_menu(user_id))
         return
 
     # 验证分类名称
@@ -194,7 +195,7 @@ async def add_category_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
             del user_states[user_id]
         await message.reply_text("❌ 已取消创建分类")
         from handlers.menu import get_main_menu
-        await message.reply_text("请选择功能：", reply_markup=get_main_menu())
+        await message.reply_text("请选择功能：", reply_markup=get_main_menu(user_id))
         return
 
     # 🔥 处理 /skip
@@ -225,40 +226,95 @@ async def add_category_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 返回主菜单
     from handlers.menu import get_main_menu
-    await message.reply_text("请选择功能：", reply_markup=get_main_menu())
+    await message.reply_text("请选择功能：", reply_markup=get_main_menu(user_id))
 
 # ==================== 删除分类 ====================
 async def delete_category_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """开始删除分类"""
+    """开始删除分类（分页显示）"""
     query = update.callback_query
     await query.answer()
-    print(f"[DEBUG] delete_category_start 被调用")
 
     categories = get_all_categories()
+    # 过滤掉不可删除的“未分类”
     deletable = [cat for cat in categories if cat['name'] != '未分类']
 
     if not deletable:
         await query.message.edit_text("⚠️ 没有可删除的分类（「未分类」不能删除）")
         return
 
+    # 存储到上下文用于分页
+    context.user_data["del_categories"] = deletable
+    context.user_data["del_categories_page"] = 0
+
+    await send_delete_category_page(update, context)
+
+async def send_delete_category_page(update: Update, context: ContextTypes.DEFAULT_TYPE, is_callback=True):
+    """发送删除分类的页面（支持回调或普通消息）"""
+    categories = context.user_data.get("del_categories", [])
+    page = context.user_data.get("del_categories_page", 0)
+
+    if not categories:
+        if is_callback and update.callback_query:
+            await update.callback_query.message.edit_text("⚠️ 没有可删除的分类")
+        else:
+            await update.message.reply_text("⚠️ 没有可删除的分类")
+        return
+
+    page_size = CATEGORIES_PER_PAGE
+    total_pages = (len(categories) + page_size - 1) // page_size
+    start = page * page_size
+    end = min(start + page_size, len(categories))
+    page_cats = categories[start:end]
+
     keyboard = []
-    for cat in deletable:
+    for cat in page_cats:
         keyboard.append([InlineKeyboardButton(f"🗑️ {cat['name']}", callback_data=f"del_cat_{cat['name']}")])
+
+    # 分页按钮
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton("⬅️ 上一页", callback_data="del_cat_page_prev"))
+    if page < total_pages - 1:
+        nav_buttons.append(InlineKeyboardButton("下一页 ➡️", callback_data="del_cat_page_next"))
+    if nav_buttons:
+        keyboard.append(nav_buttons)
+
     keyboard.append([InlineKeyboardButton("◀️ 返回", callback_data="group_manager")])
 
-    await query.message.edit_text(
-        "🗑️ **删除分类**\n\n"
-        "选择要删除的分类：",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="Markdown"
-    )
+    text = f"🗑️ **删除分类** (第 {page+1}/{total_pages} 页)\n\n选择要删除的分类："
+
+    if is_callback and update.callback_query:
+        await update.callback_query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+    else:
+        await update.message.reply_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+        
+async def handle_delete_category_pagination(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理删除分类的分页"""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    if data == "del_cat_page_prev":
+        page = context.user_data.get("del_categories_page", 0)
+        context.user_data["del_categories_page"] = max(0, page - 1)
+    elif data == "del_cat_page_next":
+        page = context.user_data.get("del_categories_page", 0)
+        context.user_data["del_categories_page"] = page + 1
+    await send_delete_category_page(update, context)
+
+
 
 async def delete_category_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """确认删除分类"""
     query = update.callback_query
     category_name = query.data.replace("del_cat_", "")
     await query.answer()
-    print(f"[DEBUG] delete_category_confirm: {category_name}")
 
     if delete_category(category_name):
         await query.message.edit_text(f"✅ 已删除分类「{category_name}」")
@@ -266,8 +322,11 @@ async def delete_category_confirm(update: Update, context: ContextTypes.DEFAULT_
         await query.message.edit_text(f"❌ 删除失败")
 
     await asyncio.sleep(1)
-    # 返回主菜单
-    await group_manager_menu(update, context)
+    # 发送固定键盘菜单
+    await query.message.reply_text(
+        "📁 群组分类管理：",
+        reply_markup=get_group_manager_keyboard()
+    )
 
 # ==================== 设置群组分类 ====================
 async def set_group_category_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -426,38 +485,70 @@ async def filter_groups(update: Update, context: ContextTypes.DEFAULT_TYPE, filt
     await show_group_list_page(update, context)
 
 async def select_group_for_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """选择要设置分类的群组"""
+    """选择要设置分类的群组后，显示分类列表（分页）"""
     query = update.callback_query
     group_id = query.data.replace("sel_group_", "")
     await query.answer()
-    print(f"[DEBUG] select_group_for_category: {group_id}")
 
-    # 保存选中的群组ID
     context.user_data['selected_group_id'] = group_id
 
-    # 显示分类列表
     categories = get_all_categories()
+    context.user_data["set_cat_categories"] = categories
+    context.user_data["set_cat_page"] = 0
+
+    await send_set_category_page(update, context)
+
+async def send_set_category_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """发送设置分类的页面（分页）"""
+    query = update.callback_query
+    categories = context.user_data.get("set_cat_categories", [])
+    page = context.user_data.get("set_cat_page", 0)
+    group_id = context.user_data.get("selected_group_id")
+
+    if not categories:
+        await query.message.edit_text("⚠️ 暂无分类")
+        return
+
+    page_size = CATEGORIES_PER_PAGE
+    total_pages = (len(categories) + page_size - 1) // page_size
+    start = page * page_size
+    end = min(start + page_size, len(categories))
+    page_cats = categories[start:end]
+
     keyboard = []
+    for cat in page_cats:
+        cat_name = cat['name']
+        keyboard.append([InlineKeyboardButton(f"📁 {cat_name}", callback_data=f"set_cat_{cat_name}_{group_id}")])
 
-    # 添加"未分类"选项
-    keyboard.append([InlineKeyboardButton(f"📂 未分类", callback_data=f"set_cat_未分类_{group_id}")])
+    # 分页按钮
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton("⬅️ 上一页", callback_data="set_cat_page_prev"))
+    if page < total_pages - 1:
+        nav_buttons.append(InlineKeyboardButton("下一页 ➡️", callback_data="set_cat_page_next"))
+    if nav_buttons:
+        keyboard.append(nav_buttons)
 
-    # 添加其他分类
-    for cat in categories:
-        if cat['name'] != '未分类':  # 避免重复添加未分类
-            keyboard.append([InlineKeyboardButton(f"📁 {cat['name']}", callback_data=f"set_cat_{cat['name']}_{group_id}")])
-
-    # 添加返回按钮
     keyboard.append([InlineKeyboardButton("◀️ 返回", callback_data="gm_set_cat")])
 
     await query.message.edit_text(
-        "🏷️ **选择分类**\n\n"
-        "请选择要分配给该群组的分类：\n"
-        "• 未分类：群组尚未分类\n"
-        "• 其他：已建立的分类",
+        f"🏷️ **选择分类** (第 {page+1}/{total_pages} 页)\n\n请选择要分配给该群组的分类：",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown"
     )
+
+async def handle_set_category_pagination(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理设置分类时的分页"""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    if data == "set_cat_page_prev":
+        page = context.user_data.get("set_cat_page", 0)
+        context.user_data["set_cat_page"] = max(0, page - 1)
+    elif data == "set_cat_page_next":
+        page = context.user_data.get("set_cat_page", 0)
+        context.user_data["set_cat_page"] = page + 1
+    await send_set_category_page(update, context)
 
 async def set_group_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """设置群组的分类"""
@@ -511,7 +602,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             del user_states[user_id]
         await message.reply_text("❌ 已取消操作")
         from handlers.menu import get_main_menu
-        await message.reply_text("请选择功能：", reply_markup=get_main_menu())
+        await message.reply_text("请选择功能：", reply_markup=get_main_menu(user_id))
         return
 
     state = user_states[user_id]
@@ -545,7 +636,7 @@ async def add_category_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
             del user_states[user_id]
         await message.reply_text("❌ 已取消创建分类")
         from handlers.menu import get_main_menu
-        await message.reply_text("请选择功能：", reply_markup=get_main_menu())
+        await message.reply_text("请选择功能：", reply_markup=get_main_menu(user_id))
         return
 
     # 验证分类名称
@@ -578,7 +669,7 @@ async def add_category_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
             del user_states[user_id]
         await message.reply_text("❌ 已取消创建分类")
         from handlers.menu import get_main_menu
-        await message.reply_text("请选择功能：", reply_markup=get_main_menu())
+        await message.reply_text("请选择功能：", reply_markup=get_main_menu(user_id))
         return
 
     # 🔥 处理 /skip
@@ -609,7 +700,7 @@ async def add_category_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 返回主菜单
     from handlers.menu import get_main_menu
-    await message.reply_text("请选择功能：", reply_markup=get_main_menu())
+    await message.reply_text("请选择功能：", reply_markup=get_main_menu(user_id))
 
 # group_manager.py - 确保 cancel 命令清除状态后返回主菜单
 
@@ -638,12 +729,12 @@ async def handle_cancel_in_group_manager(update: Update, context: ContextTypes.D
     if update.message:
         await update.message.reply_text(
             "请选择功能：",
-            reply_markup=get_main_menu()
+            reply_markup=get_main_menu(user_id)
         )
     elif update.callback_query:
         await update.callback_query.message.reply_text(
             "请选择功能：",
-            reply_markup=get_main_menu()
+            reply_markup=get_main_menu(user_id)
         )
 
 # group_manager.py - 添加 skip 命令处理
@@ -689,3 +780,31 @@ __all__ = [
     'user_states',
     'ITEMS_PER_PAGE'
 ]
+
+# handlers/group_manager.py - 添加键盘版
+
+async def group_manager_menu_keyboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """群组管理 - 键盘版菜单"""
+    from telegram import ReplyKeyboardMarkup, KeyboardButton
+    from db import get_all_categories, get_groups_by_category
+
+    categories = get_all_categories()
+    groups_by_cat = get_groups_by_category()
+    total_groups = sum(groups_by_cat.values())
+
+    keyboard = [
+        [KeyboardButton("📊 群组统计"), KeyboardButton("📁 查看分类"), KeyboardButton("➕ 创建分类")],
+        [KeyboardButton("🏷️ 设置群组分类"), KeyboardButton("🗑️ 删除分类")],
+        [KeyboardButton("◀️ 返回主菜单")],
+    ]
+
+    text = f"📁 **群组分类管理**\n\n"
+    text += f"📊 总群组数：**{total_groups}** 个\n"
+    text += f"🏷️ 分类数量：**{len(categories)}** 个\n\n"
+    text += "💡 点击下方按钮进行操作"
+
+    await update.message.reply_text(
+        text,
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
+        parse_mode="Markdown"
+    )
