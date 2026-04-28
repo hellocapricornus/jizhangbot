@@ -105,7 +105,9 @@ async def query_tron(address: str):
 async def send_trx_usdt_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session = context.user_data.get("usdt_session")
     if not session or "data" not in session:
-        await update.message.reply_text("❌ 未查询数据")
+        context.user_data.pop("active_module", None)
+        context.user_data.pop("usdt_session", None)
+        await update.message.reply_text("⚠️ 查询数据已过期，请重新查询。")
         return
 
     data = session["data"]
@@ -136,30 +138,50 @@ async def send_trx_usdt_page(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # 分页按钮
 async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    user_id = query.from_user.id
     await query.answer()
-    
-    # 完整权限检查（禁止临时操作人）
+
     if not is_authorized(query.from_user.id, require_full_access=True):
         await query.message.reply_text("❌ 只有操作人才能使用此功能")
         return
-        
+
     session = context.user_data.get("usdt_session")
 
-    # ✅ 添加完成按钮处理
+    # ----- 处理“完成”按钮 -----
     if query.data == "usdt_done":
         context.user_data.pop("active_module", None)
         context.user_data.pop("usdt_session", None)
         from handlers.menu import get_main_menu
-        await query.message.edit_text(
-            "✅ 查询完成\n\n请选择功能：",
-            reply_markup=get_main_menu()
-        )
-        return
-    
-    if not session or "data" not in session:
-        await query.message.reply_text("❌ 未查询数据")
+        try:
+            await query.message.edit_text(
+                "✅ 查询完成\n\n请选择功能：",
+                reply_markup=get_main_menu(user_id)
+            )
+        except Exception:
+            await query.message.reply_text(
+                "✅ 查询完成\n\n请选择功能：",
+                reply_markup=get_main_menu(user_id)
+            )
         return
 
+    # ----- session 丢失时的优雅降级 -----
+    if not session or "data" not in session:
+        context.user_data.pop("active_module", None)
+        context.user_data.pop("usdt_session", None)
+        from handlers.menu import get_main_menu
+        try:
+            await query.message.edit_text(
+                "⚠️ 查询数据已过期，请重新查询。",
+                reply_markup=get_main_menu(user_id)
+            )
+        except Exception:
+            await query.message.reply_text(
+                "⚠️ 查询数据已过期，请重新查询。",
+                reply_markup=get_main_menu(user_id)
+            )
+        return
+
+    # ----- 正常分页 -----
     data = session["data"]
     if query.data == "usdt_prev":
         data["page"] = max(data["page"] - 1, 0)
@@ -180,5 +202,18 @@ async def usdt_finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from handlers.menu import get_main_menu
     await query.message.reply_text(
         "✅ 查询完成\n\n请选择功能：",
-        reply_markup=get_main_menu()
+        reply_markup=get_main_menu(user_id)
+    )
+
+async def handle_keyboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """USDT 查询 - 键盘版"""
+    from telegram import ReplyKeyboardMarkup, KeyboardButton
+
+    context.user_data["active_module"] = "usdt"
+    context.user_data["usdt_session"] = {"waiting_for_address": True}
+
+    keyboard = [[KeyboardButton("◀️ 返回主菜单")]]
+    await update.message.reply_text(
+        "💰 请输入 TRON TRC20 地址（T 开头）：",
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     )
