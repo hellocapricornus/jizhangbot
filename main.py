@@ -1,4 +1,11 @@
 # main.py - 完整修复版
+try:
+    import pysqlite3
+    import sys
+    sys.modules['sqlite3'] = pysqlite3
+    print("✅ Replit 环境：使用 pysqlite3")
+except ImportError:
+    pass  # 服务器环境，使用默认 sqlite3
 
 import asyncio
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
@@ -1298,6 +1305,7 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ 已取消所有操作")
 
 async def send_daily_reports(app: Application):
+    import sqlite3
     from auth import is_authorized, OWNER_ID
     from db import get_all_groups_from_db, get_user_preferences, get_all_categories
     from handlers.accounting import accounting_manager
@@ -1426,6 +1434,16 @@ async def daily_report_loop(app: Application):
             sent_today = False
         await asyncio.sleep(60)
 
+async def test_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    from config import OWNER_ID
+    if user_id != OWNER_ID:
+        await update.message.reply_text("❌ 只有控制人可以使用")
+        return
+    await update.message.reply_text("⏳ 正在发送测试早报...")
+    await send_daily_reports(context.application)
+    await update.message.reply_text("✅ 测试早报已发送")
+
 
 # ==================== main 函数 ====================
 
@@ -1474,6 +1492,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("update_ops", cmd_update_operator_info))
     app.add_handler(CommandHandler("clean", force_clean_groups))
+    app.add_handler(CommandHandler("test_report", test_report))
 
     for handler in get_git_handlers():
         app.add_handler(handler)
