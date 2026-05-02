@@ -1,7 +1,10 @@
-import requests
+import aiohttp             # ✅ 新增
+import asyncio             # ✅ 新增
+from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
-from auth import is_authorized  # 确保只有授权用户可用
+from auth import is_authorized
+from logger import bot_logger as logger  # ✅ 新增
 
 # --- 配置 ---
 TRON_GRID_API = "https://api.trongrid.io"
@@ -40,23 +43,46 @@ async def show_transfer_menu_keyboard(update: Update, context: ContextTypes.DEFA
     )
 
 # --- 辅助函数：调用 TronGrid API ---
-def get_trc20_transfers(address, limit=200):
-    """获取指定地址的 TRC20 转账记录"""
+async def get_trc20_transfers(address: str, limit: int = 200) -> list:
+    """获取指定地址的 TRC20 转账记录（异步版）"""
     url = f"{TRON_GRID_API}/v1/accounts/{address}/transactions/trc20"
     params = {
-        "only_to": False,
+        "limit": limit,
+        "contract_address": USDT_CONTRACT
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params, 
+                                   timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data.get("data", [])
+                logger.warning(f"TronGrid API 返回状态码: {resp.status}")
+                return []
+    except asyncio.TimeoutError:
+        logger.error(f"请求超时: {address}")
+        return []
+    except Exception as e:
+        logger.error(f"API 错误: {e}")
+        return []
+
+
+# ✅ 保留同步版本给 tools.py 使用
+def get_trc20_transfers_sync(address: str, limit: int = 200) -> list:
+    """同步版本，仅供非异步环境使用（如 tools.py）"""
+    import requests
+    url = f"{TRON_GRID_API}/v1/accounts/{address}/transactions/trc20"
+    params = {
         "limit": limit,
         "contract_address": USDT_CONTRACT
     }
     try:
         resp = requests.get(url, params=params, timeout=10)
         if resp.status_code == 200:
-            data = resp.json()
-            return data.get("data", [])
-        else:
-            return []
+            return resp.json().get("data", [])
+        return []
     except Exception as e:
-        print(f"API Error: {e}")
+        logger.error(f"API Error: {e}")
         return []
 
 def extract_counterparties(transfers, my_address):
@@ -114,8 +140,8 @@ async def process_transfer_query(update: Update, context: ContextTypes.DEFAULT_T
 
     # 获取两个地址的交易记录
     # 注意：为了性能，这里只获取最近 200 条进行交易匹配。如需全量，需处理分页循环。
-    history_a = get_trc20_transfers(addr_a, limit=200)
-    history_b = get_trc20_transfers(addr_b, limit=200)
+    history_a = await get_trc20_transfers(addr_a, limit=200)
+    history_b = await get_trc20_transfers(addr_b, limit=200)
 
     matches = []
 
@@ -204,8 +230,8 @@ async def process_transfer_analysis(update: Update, context: ContextTypes.DEFAUL
 
     # 获取两个地址的交易对手集合
     # 增加 limit 以获取更全面的对手列表
-    history_a = get_trc20_transfers(addr_a, limit=200)
-    history_b = get_trc20_transfers(addr_b, limit=200)
+    history_a = await get_trc20_transfers(addr_a, limit=200)
+    history_b = await get_trc20_transfers(addr_b, limit=200)
 
     set_a = extract_counterparties(history_a, addr_a)
     set_b = extract_counterparties(history_b, addr_b)
@@ -261,7 +287,7 @@ async def send_transfer_page(update: Update, context: ContextTypes.DEFAULT_TYPE,
             raw_amount = tx.get("value") or tx.get("amount")
 
             # 调试打印 (保留以便观察)
-            print(f"DEBUG: TX ID={tx.get('txID', 'N/A')[:10]}..., Raw Value={raw_amount}, Keys={list(tx.keys())}")
+            logger.debug(f"TX ID={tx.get('txID', 'N/A')[:10]}..., Raw Value={raw_amount}, Keys={list(tx.keys())}")
 
             try:
                 # 确保转换为浮点数前先转为字符串并去除可能的空白
@@ -271,7 +297,7 @@ async def send_transfer_page(update: Update, context: ContextTypes.DEFAULT_TYPE,
                     # TronGrid 返回的 amount 通常是字符串 "100000000"
                     amount_float = float(str(raw_amount)) / 1_000_000.0
             except (ValueError, TypeError) as e:
-                print(f"ERROR converting amount: {e}, raw value: {raw_amount}")
+                logger.error(f"converting amount: {e}, raw value: {raw_amount}")
                 amount_float = 0.0
 
             # 格式化显示，保留 2 位小数，但如果金额很小则显示更多
