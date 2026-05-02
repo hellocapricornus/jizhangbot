@@ -2284,11 +2284,13 @@ async def handle_set_per_transaction_fee(update: Update, context: ContextTypes.D
                 raise e
 
 
+# accounting.py - handle_add_income 函数
+
 async def handle_add_income(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                             amount: float, is_correction: bool = False,
                             category: str = "", temp_rate: float = None,
-                            temp_fee: float = None):
-    """添加入款记录（支持修正、备注、临时汇率、临时手续费）"""
+                            temp_fee: float = None, temp_per_fee: float = None):  # 🔥 新增参数
+    """添加入款记录（支持修正、备注、临时汇率、临时手续费、临时单笔费用）"""
     if not _is_authorized_in_group(update, full_access=False):
         await update.message.reply_text("❌ 此操作需要管理员权限")
         return
@@ -2301,14 +2303,33 @@ async def handle_add_income(update: Update, context: ContextTypes.DEFAULT_TYPE,
     record_amount = -abs(amount) if is_correction else abs(amount)
     desc = "修正入款" if is_correction else "入款"
 
-    # 🔥 获取当前消息的ID，用于撤销功能
     message_id = update.message.message_id
+
+    # 🔥 如果有临时单笔费用，需要临时修改会话的单笔费用
+    original_per_fee = None
+    if temp_per_fee is not None:
+        session = accounting_manager.get_or_create_session(group_id)
+        original_per_fee = session.get('per_transaction_fee', 0)
+        accounting_manager.set_per_transaction_fee(group_id, temp_per_fee)
+
+    # 🔥 如果有临时手续费，需要临时修改会话的手续费率
+    original_fee = None
+    if temp_fee is not None:
+        session = accounting_manager.get_or_create_session(group_id)
+        original_fee = session.get('fee_rate', 0)
+        accounting_manager.set_fee_rate(group_id, temp_fee)
 
     # 🔥 传递临时手续费到 add_record
     success, record_id = accounting_manager.add_record(
         group_id, user.id, username, 'income', 
-        record_amount, desc, category, temp_rate, message_id, temp_fee  # 新增 temp_fee
+        record_amount, desc, category, temp_rate, message_id, temp_fee
     )
+
+    # 🔥 恢复原始费率和单笔费用
+    if original_fee is not None:
+        accounting_manager.set_fee_rate(group_id, original_fee)
+    if original_per_fee is not None:
+        accounting_manager.set_per_transaction_fee(group_id, original_per_fee)
 
     if success:
         stats = accounting_manager.get_current_stats(group_id)
@@ -2325,6 +2346,8 @@ async def handle_add_income(update: Update, context: ContextTypes.DEFAULT_TYPE,
             temp_info.append(f"临时手续费：{temp_fee}%")
         if temp_rate is not None:
             temp_info.append(f"临时汇率：{temp_rate}")
+        if temp_per_fee is not None:
+            temp_info.append(f"临时单笔费用：{temp_per_fee}元")
         if temp_info:
             prefix += f" ({', '.join(temp_info)})"
 
@@ -3148,72 +3171,95 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
             temp_rate = None
             temp_fee = None
+            temp_per_fee = None
             category = ""
             amount_str = content
 
-            # 🔥 检查是否包含 * 号（临时手续费）
+            # 🔥 先检查是否包含 # 号（临时单笔费用）
+            if '#' in content:
+                hash_index = content.index('#')
+                before_hash = content[:hash_index]  # # 前面的部分
+                after_hash = content[hash_index + 1:]  # # 后面的部分
+
+                # 提取单笔费用数字
+                per_fee_match = re.match(r'^(\d+(?:\.\d+)?)', after_hash)
+                if per_fee_match:
+                    temp_per_fee = float(per_fee_match.group(1))
+                    # # 后面剩余部分可能是备注
+                    remaining = after_hash[per_fee_match.end():].strip()
+                    if remaining:
+                        category = remaining
+                else:
+                    await update.message.reply_text("❌ 单笔费用格式错误：#数字 或 #数字 备注")
+                    return
+
+                # 更新 content 为 # 前面的部分
+                content = before_hash.strip()
+                if not content:
+                    await update.message.reply_text("❌ # 前面需要输入金额")
+                    return
+                amount_str = content
+
+            # 检查是否包含 * 号（临时手续费）
             if '*' in content:
-                # 格式: +金额*手续费%/汇率
                 star_parts = content.split('*', 1)
                 amount_str = star_parts[0].strip()
                 rest = star_parts[1].strip()
 
-                # 检查是否包含 / 汇率
                 if '/' in rest:
                     fee_part, rate_part = rest.split('/', 1)
-                    # 解析手续费（去掉%号）
                     temp_fee_str = fee_part.replace('%', '').strip()
                     try:
                         temp_fee = float(temp_fee_str)
                     except ValueError:
-                        temp_fee = None
+                        pass
 
-                    # 解析汇率
                     rate_part_clean = rate_part.split(' ', 1)[0].strip()
                     try:
                         temp_rate = float(rate_part_clean)
                     except ValueError:
-                        temp_rate = None
+                        pass
 
-                    # 提取备注（汇率后面的部分）
-                    if ' ' in rate_part:
+                    if ' ' in rate_part and not category:
                         category = rate_part.split(' ', 1)[1].strip()
                 else:
-                    # 只有手续费，没有汇率
                     fee_part = rest.split(' ', 1)[0].strip()
                     temp_fee_str = fee_part.replace('%', '').strip()
                     try:
                         temp_fee = float(temp_fee_str)
                     except ValueError:
-                        temp_fee = None
+                        pass
 
-                    # 提取备注
-                    if ' ' in rest:
+                    if ' ' in rest and not category:
                         category = rest.split(' ', 1)[1].strip()
 
-            # 检查是否包含 / 汇率（没有 * 号的情况）
+            # 检查是否包含 / 汇率
             elif '/' in content:
                 parts = content.split('/', 1)
                 amount_str = parts[0].strip()
                 rest = parts[1].strip()
 
                 if ' ' in rest:
-                    rate_part, category = rest.split(' ', 1)
+                    rate_part, cat = rest.split(' ', 1)
                     try:
                         temp_rate = float(rate_part)
+                        if not category:
+                            category = cat
                     except ValueError:
-                        category = rest
+                        if not category:
+                            category = rest
                         temp_rate = None
                 else:
                     try:
                         temp_rate = float(rest)
                     except ValueError:
-                        category = rest
+                        if not category:
+                            category = rest
                         temp_rate = None
 
-            # 提取备注（没有 * 和 / 的情况）
+            # 提取备注（没有 * 和 / 和 # 的情况）
             else:
-                if ' ' in amount_str:
+                if ' ' in amount_str and not category:
                     parts = amount_str.split(' ', 1)
                     amount_str = parts[0]
                     category = parts[1]
@@ -3222,14 +3268,15 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 amount = float(amount_str)
 
                 await handle_add_income(update, context, amount, is_correction=False, 
-                                       category=category, temp_rate=temp_rate, temp_fee=temp_fee)
+                                       category=category, temp_rate=temp_rate, 
+                                       temp_fee=temp_fee, temp_per_fee=temp_per_fee)
             else:
-                await message.reply_text("❌ 格式错误：+金额 或 +金额*手续费% 或 +金额/汇率 或 +金额*手续费%/汇率 或 +金额 备注")
+                await update.message.reply_text("❌ 格式错误：+金额 或 +金额#单笔费用 备注")
         except ValueError:
-            await message.reply_text("❌ 金额格式错误，请输入数字")
+            await update.message.reply_text("❌ 金额格式错误，请输入数字")
         except Exception as e:
             logger.error(f"解析入款失败: {e}")
-            await message.reply_text("❌ 格式错误：+金额 或 +金额*手续费% 或 +金额/汇率 或 +金额*手续费%/汇率 或 +金额 备注")
+            await update.message.reply_text("❌ 格式错误")
             return
 
     # -xxx 修正入款（支持备注、临时汇率、临时手续费）
@@ -3239,13 +3286,37 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
             temp_rate = None
             temp_fee = None
+            temp_per_fee = None
             category = ""
             amount_str = content
 
-            # 🔥 完整的解析代码（从 + 复制过来）
+            # 🔥 先检查是否包含 # 号（临时单笔费用）
+            if '#' in content:
+                hash_index = content.index('#')
+                before_hash = content[:hash_index]  # # 前面的部分
+                after_hash = content[hash_index + 1:]  # # 后面的部分
+
+                # 提取单笔费用数字
+                per_fee_match = re.match(r'^(\d+(?:\.\d+)?)', after_hash)
+                if per_fee_match:
+                    temp_per_fee = float(per_fee_match.group(1))
+                    # # 后面剩余部分可能是备注
+                    remaining = after_hash[per_fee_match.end():].strip()
+                    if remaining:
+                        category = remaining
+                else:
+                    await update.message.reply_text("❌ 单笔费用格式错误：#数字 或 #数字 备注")
+                    return
+
+                # 更新 content 为 # 前面的部分
+                content = before_hash.strip()
+                if not content:
+                    await update.message.reply_text("❌ # 前面需要输入金额")
+                    return
+                amount_str = content
+
             # 检查是否包含 * 号（临时手续费）
             if '*' in content:
-                # 格式: -金额*手续费%/汇率
                 star_parts = content.split('*', 1)
                 amount_str = star_parts[0].strip()
                 rest = star_parts[1].strip()
@@ -3268,7 +3339,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                         temp_rate = None
 
                     # 提取备注（汇率后面的部分）
-                    if ' ' in rate_part:
+                    if ' ' in rate_part and not category:
                         category = rate_part.split(' ', 1)[1].strip()
                 else:
                     # 只有手续费，没有汇率
@@ -3280,7 +3351,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                         temp_fee = None
 
                     # 提取备注
-                    if ' ' in rest:
+                    if ' ' in rest and not category:
                         category = rest.split(' ', 1)[1].strip()
 
             # 检查是否包含 / 汇率（没有 * 号的情况）
@@ -3290,22 +3361,26 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 rest = parts[1].strip()
 
                 if ' ' in rest:
-                    rate_part, category = rest.split(' ', 1)
+                    rate_part, cat = rest.split(' ', 1)
                     try:
                         temp_rate = float(rate_part)
+                        if not category:
+                            category = cat
                     except ValueError:
-                        category = rest
+                        if not category:
+                            category = rest
                         temp_rate = None
                 else:
                     try:
                         temp_rate = float(rest)
                     except ValueError:
-                        category = rest
+                        if not category:
+                            category = rest
                         temp_rate = None
 
-            # 提取备注（没有 * 和 / 的情况）
+            # 提取备注（没有 * 和 / 和 # 的情况）
             else:
-                if ' ' in amount_str:
+                if ' ' in amount_str and not category:
                     parts = amount_str.split(' ', 1)
                     amount_str = parts[0]
                     category = parts[1]
@@ -3314,14 +3389,15 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 amount = float(amount_str)
 
                 await handle_add_income(update, context, amount, is_correction=True, 
-                                       category=category, temp_rate=temp_rate, temp_fee=temp_fee)
+                                       category=category, temp_rate=temp_rate, 
+                                       temp_fee=temp_fee, temp_per_fee=temp_per_fee)
             else:
-                await message.reply_text("❌ 格式错误：-金额 或 -金额*手续费% 或 -金额/汇率 或 -金额*手续费%/汇率 或 -金额 备注")
+                await update.message.reply_text("❌ 格式错误：-金额 或 -金额#单笔费用 或 -金额*手续费% 或 -金额/汇率 或 -金额*手续费%/汇率#单笔费用 备注")
         except ValueError:
-            await message.reply_text("❌ 金额格式错误，请输入数字")
+            await update.message.reply_text("❌ 金额格式错误，请输入数字")
         except Exception as e:
             logger.error(f"解析修正入款失败: {e}")
-            await message.reply_text("❌ 格式错误：-金额 或 -金额*手续费% 或 -金额/汇率 或 -金额*手续费%/汇率 或 -金额 备注")
+            await update.message.reply_text("❌ 格式错误：-金额 或 -金额#单笔费用 备注")
             return
 
     # 下发 xxxu 添加出款（正数）
@@ -4331,6 +4407,8 @@ async def handle_keyboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "`+1000 德国` 带分类\n"
         "`+1000/7.2` 临时汇率\n"
         "`+1000*5` 临时费率\n"
+        "`+1000#2` 临时单笔费用\n"              # 🔥 新增
+        "`+1000*5/7.2#2 德国` 完整格式\n"       # 🔥 新增
         "`+1000*5/7.2 德国` 临时费率+汇率+分类\n"
         "`-500` 修正入款\n\n"
 
