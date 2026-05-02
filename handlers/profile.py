@@ -11,6 +11,7 @@ from auth import is_authorized, OWNER_ID
 from db import get_monitored_addresses, get_user_preferences, set_user_preference
 from handlers.accounting import get_today_beijing
 from handlers.monitor import get_monthly_stats, get_trc20_transactions, get_address_balance
+from logger import bot_logger as logger
 
 # 状态定义
 PROFILE_MAIN = 1
