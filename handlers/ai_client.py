@@ -14,6 +14,7 @@ from config import (
     DASHSCOPE_API_KEY,
     ZHIPU_API_KEY
 )
+from logger import bot_logger as logger
 
 API_CONFIGS = [
     {
@@ -111,7 +112,7 @@ class AIClient:
                     last_intent = cached.get("last_intent")
                     last_data = cached.get("last_data")
                     if last_data:
-                        print(f"[DEBUG] 使用缓存数据导出 (年龄: {cache_age:.0f}秒)")
+                        logger.debug(f"使用缓存数据导出 (年龄: {cache_age:.0f}秒)")
                         return await self._export_raw_bill(prompt, last_data, last_intent)
                 else:
                     CONVERSATION_CACHE.pop(user_id, None)
@@ -119,8 +120,8 @@ class AIClient:
 
         # 意图识别
         intent = await self._identify_intent(prompt, user_id)
-        print(f"[DEBUG] AI 意图识别结果: {intent}")
-        print(f"[DEBUG] 用户ID: {user_id}")
+        logger.debug(f"AI 意图识别结果: {intent}")
+        logger.debug(f"用户ID: {user_id}")
 
         # 如果是普通聊天，直接使用记忆对话
         if intent.get("type") == "chat":
@@ -143,7 +144,7 @@ class AIClient:
             "last_data": data,
             "timestamp": time.time()
         }
-        print(f"[DEBUG] 已缓存用户 {user_id} 的查询数据")
+        logger.debug(f"已缓存用户 {user_id} 的查询数据")
 
         # 使用上下文记忆生成回答
         answer = await self._generate_natural_answer_with_memory(user_id, prompt, intent, data)
@@ -250,7 +251,7 @@ class AIClient:
         url = config["url"]
         api_key = config["api_key"]
 
-        print(f"🤖 正在使用 {name} API...")
+        logger.info(f"正在使用 {name} API...")
 
         headers = {"Content-Type": "application/json"}
 
