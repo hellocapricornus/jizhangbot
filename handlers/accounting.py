@@ -6,16 +6,18 @@ import sqlite3
 import logging
 import aiohttp
 import math
+import asyncio as _asyncio
+import re as _re
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Tuple, Optional
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import TimedOut, RetryAfter, NetworkError
 from telegram.ext import ContextTypes, ConversationHandler, CallbackQueryHandler
 from auth import is_authorized
-
-# 配置日志
-logger = logging.getLogger(__name__)
+from constants import COUNTRY_FLAGS
+from logger import bot_logger as logger
 
 # 状态定义
 ACCOUNTING_DATE_SELECT = 1
@@ -57,146 +59,6 @@ def beijing_time(timestamp: int) -> datetime:
 def get_today_beijing() -> str:
     """获取今天的北京时间日期字符串"""
     return beijing_time(int(time.time())).strftime('%Y-%m-%d')
-
-
-# 国家代码和名称映射（带国旗）
-COUNTRY_FLAGS = {
-    # 中文名称
-    '中国': '🇨🇳', '美国': '🇺🇸', '日本': '🇯🇵', '韩国': '🇰🇷',
-    '英国': '🇬🇧', '法国': '🇫🇷', '德国': '🇩🇪', '意大利': '🇮🇹',
-    '西班牙': '🇪🇸', '葡萄牙': '🇵🇹', '荷兰': '🇳🇱', '瑞士': '🇨🇭',
-    '瑞典': '🇸🇪', '挪威': '🇳🇴', '丹麦': '🇩🇰', '芬兰': '🇫🇮',
-    '俄罗斯': '🇷🇺', '澳大利亚': '🇦🇺', '新西兰': '🇳🇿', '加拿大': '🇨🇦',
-    '巴西': '🇧🇷', '阿根廷': '🇦🇷', '墨西哥': '🇲🇽', '印度': '🇮🇳',
-    '泰国': '🇹🇭', '越南': '🇻🇳', '新加坡': '🇸🇬', '马来西亚': '🇲🇾',
-    '印度尼西亚': '🇮🇩', '菲律宾': '🇵🇭', '土耳其': '🇹🇷', '阿联酋': '🇦🇪',
-    '沙特': '🇸🇦', '南非': '🇿🇦', '埃及': '🇪🇬', '希腊': '🇬🇷',
-    '爱尔兰': '🇮🇪', '波兰': '🇵🇱', '捷克': '🇨🇿', '奥地利': '🇦🇹',
-    '比利时': '🇧🇪', '匈牙利': '🇭🇺',
-    '尼日利亚': '🇳🇬', '乌克兰': '🇺🇦', '波兰': '🇵🇱', '捷克': '🇨🇿',
-    '斯洛伐克': '🇸🇰', '匈牙利': '🇭🇺', '罗马尼亚': '🇷🇴', '保加利亚': '🇧🇬',
-    '塞尔维亚': '🇷🇸', '克罗地亚': '🇭🇷', '斯洛文尼亚': '🇸🇮', '爱沙尼亚': '🇪🇪',
-    '拉脱维亚': '🇱🇻', '立陶宛': '🇱🇹', '白俄罗斯': '🇧🇾', '摩尔多瓦': '🇲🇩',
-    '格鲁吉亚': '🇬🇪', '亚美尼亚': '🇦🇲', '阿塞拜疆': '🇦🇿', '哈萨克斯坦': '🇰🇿',
-    '乌兹别克斯坦': '🇺🇿', '土库曼斯坦': '🇹🇲', '吉尔吉斯斯坦': '🇰🇬', '塔吉克斯坦': '🇹🇯',
-    '蒙古': '🇲🇳', '朝鲜': '🇰🇵', '柬埔寨': '🇰🇭', '老挝': '🇱🇦',
-    '缅甸': '🇲🇲', '斯里兰卡': '🇱🇰', '巴基斯坦': '🇵🇰', '孟加拉国': '🇧🇩',
-    '尼泊尔': '🇳🇵', '不丹': '🇧🇹', '马尔代夫': '🇲🇻', '伊朗': '🇮🇷',
-    '伊拉克': '🇮🇶', '科威特': '🇰🇼', '卡塔尔': '🇶🇦', '巴林': '🇧🇭',
-    '阿曼': '🇴🇲', '也门': '🇾🇪', '约旦': '🇯🇴', '黎巴嫩': '🇱🇧',
-    '叙利亚': '🇸🇾', '以色列': '🇮🇱', '巴勒斯坦': '🇵🇸', '塞浦路斯': '🇨🇾',
-    '阿尔及利亚': '🇩🇿', '摩洛哥': '🇲🇦', '突尼斯': '🇹🇳', '利比亚': '🇱🇾',
-    '苏丹': '🇸🇩', '埃塞俄比亚': '🇪🇹', '肯尼亚': '🇰🇪', '坦桑尼亚': '🇹🇿',
-    '乌干达': '🇺🇬', '卢旺达': '🇷🇼', '刚果': '🇨🇩', '安哥拉': '🇦🇴',
-    '纳米比亚': '🇳🇦', '博茨瓦纳': '🇧🇼', '赞比亚': '🇿🇲', '津巴布韦': '🇿🇼',
-    '莫桑比克': '🇲🇿', '马达加斯加': '🇲🇬', '毛里求斯': '🇲🇺', '塞舌尔': '🇸🇨',
-    '加纳': '🇬🇭', '科特迪瓦': '🇨🇮', '喀麦隆': '🇨🇲', '塞内加尔': '🇸🇳',
-    '马里': '🇲🇱', '布基纳法索': '🇧🇫', '尼日尔': '🇳🇪', '乍得': '🇹🇩',
-    '中非': '🇨🇫', '加蓬': '🇬🇦', '赤道几内亚': '🇬🇶', '吉布提': '🇩🇯',
-    '索马里': '🇸🇴', '厄立特里亚': '🇪🇷', '毛里塔尼亚': '🇲🇷', '冈比亚': '🇬🇲',
-    '几内亚': '🇬🇳', '几内亚比绍': '🇬🇼', '塞拉利昂': '🇸🇱', '利比里亚': '🇱🇷',
-    '冰岛': '🇮🇸', '马耳他': '🇲🇹', '卢森堡': '🇱🇺', '摩纳哥': '🇲🇨',
-    '列支敦士登': '🇱🇮', '安道尔': '🇦🇩', '圣马力诺': '🇸🇲', '梵蒂冈': '🇻🇦',
-    '古巴': '🇨🇺', '牙买加': '🇯🇲', '海地': '🇭🇹', '多米尼加': '🇩🇴',
-    '波多黎各': '🇵🇷', '巴哈马': '🇧🇸', '特立尼达和多巴哥': '🇹🇹', '巴巴多斯': '🇧🇧',
-    '圣卢西亚': '🇱🇨', '格林纳达': '🇬🇩', '安提瓜和巴布达': '🇦🇬', '圣基茨和尼维斯': '🇰🇳',
-    '哥伦比亚': '🇨🇴', '委内瑞拉': '🇻🇪', '厄瓜多尔': '🇪🇨', '秘鲁': '🇵🇪',
-    '玻利维亚': '🇧🇴', '巴拉圭': '🇵🇾', '乌拉圭': '🇺🇾', '圭亚那': '🇬🇾',
-    '苏里南': '🇸🇷', '法属圭亚那': '🇬🇫', '斐济': '🇫🇯', '巴布亚新几内亚': '🇵🇬',
-    '所罗门群岛': '🇸🇧', '瓦努阿图': '🇻🇺', '萨摩亚': '🇼🇸', '汤加': '🇹🇴',
-    '密克罗尼西亚': '🇫🇲', '马绍尔群岛': '🇲🇭', '帕劳': '🇵🇼', '瑙鲁': '🇳🇷',
-    '图瓦卢': '🇹🇻', '基里巴斯': '🇰🇮',
-
-    # 英文名称
-    'china': '🇨🇳', 'usa': '🇺🇸', 'japan': '🇯🇵', 'korea': '🇰🇷',
-    'uk': '🇬🇧', 'france': '🇫🇷', 'germany': '🇩🇪', 'italy': '🇮🇹',
-    'spain': '🇪🇸', 'portugal': '🇵🇹', 'netherlands': '🇳🇱', 'switzerland': '🇨🇭',
-    'sweden': '🇸🇪', 'norway': '🇳🇴', 'denmark': '🇩🇰', 'finland': '🇫🇮',
-    'russia': '🇷🇺', 'australia': '🇦🇺', 'new zealand': '🇳🇿', 'canada': '🇨🇦',
-    'brazil': '🇧🇷', 'argentina': '🇦🇷', 'mexico': '🇲🇽', 'india': '🇮🇳',
-    'thailand': '🇹🇭', 'vietnam': '🇻🇳', 'singapore': '🇸🇬', 'malaysia': '🇲🇾',
-    'indonesia': '🇮🇩', 'philippines': '🇵🇭', 'turkey': '🇹🇷', 'uae': '🇦🇪',
-    'saudi': '🇸🇦', 'south africa': '🇿🇦', 'egypt': '🇪🇬', 'greece': '🇬🇷',
-    'ireland': '🇮🇪', 'poland': '🇵🇱', 'czech': '🇨🇿', 'austria': '🇦🇹',
-    'belgium': '🇧🇪', 'hungary': '🇭🇺',
-    'nigeria': '🇳🇬', 'ukraine': '🇺🇦', 'poland': '🇵🇱', 'czech': '🇨🇿',
-    'slovakia': '🇸🇰', 'hungary': '🇭🇺', 'romania': '🇷🇴', 'bulgaria': '🇧🇬',
-    'serbia': '🇷🇸', 'croatia': '🇭🇷', 'slovenia': '🇸🇮', 'estonia': '🇪🇪',
-    'latvia': '🇱🇻', 'lithuania': '🇱🇹', 'belarus': '🇧🇾', 'moldova': '🇲🇩',
-    'georgia': '🇬🇪', 'armenia': '🇦🇲', 'azerbaijan': '🇦🇿', 'kazakhstan': '🇰🇿',
-    'uzbekistan': '🇺🇿', 'turkmenistan': '🇹🇲', 'kyrgyzstan': '🇰🇬', 'tajikistan': '🇹🇯',
-    'mongolia': '🇲🇳', 'cambodia': '🇰🇭', 'laos': '🇱🇦', 'myanmar': '🇲🇲',
-    'sri lanka': '🇱🇰', 'pakistan': '🇵🇰', 'bangladesh': '🇧🇩', 'nepal': '🇳🇵',
-    'bhutan': '🇧🇹', 'maldives': '🇲🇻', 'iran': '🇮🇷', 'iraq': '🇮🇶',
-    'kuwait': '🇰🇼', 'qatar': '🇶🇦', 'bahrain': '🇧🇭', 'oman': '🇴🇲',
-    'yemen': '🇾🇪', 'jordan': '🇯🇴', 'lebanon': '🇱🇧', 'syria': '🇸🇾',
-    'israel': '🇮🇱', 'palestine': '🇵🇸', 'cyprus': '🇨🇾', 'algeria': '🇩🇿',
-    'morocco': '🇲🇦', 'tunisia': '🇹🇳', 'libya': '🇱🇾', 'sudan': '🇸🇩',
-    'ethiopia': '🇪🇹', 'kenya': '🇰🇪', 'tanzania': '🇹🇿', 'uganda': '🇺🇬',
-    'rwanda': '🇷🇼', 'congo': '🇨🇩', 'angola': '🇦🇴', 'namibia': '🇳🇦',
-    'botswana': '🇧🇼', 'zambia': '🇿🇲', 'zimbabwe': '🇿🇼', 'mozambique': '🇲🇿',
-    'madagascar': '🇲🇬', 'mauritius': '🇲🇺', 'seychelles': '🇸🇨', 'ghana': '🇬🇭',
-    'ivory coast': '🇨🇮', 'cameroon': '🇨🇲', 'senegal': '🇸🇳', 'mali': '🇲🇱',
-    'burkina faso': '🇧🇫', 'niger': '🇳🇪', 'chad': '🇹🇩', 'central african': '🇨🇫',
-    'gabon': '🇬🇦', 'equatorial guinea': '🇬🇶', 'djibouti': '🇩🇯', 'somalia': '🇸🇴',
-    'eritrea': '🇪🇷', 'mauritania': '🇲🇷', 'gambia': '🇬🇲', 'guinea': '🇬🇳',
-    'guinea-bissau': '🇬🇼', 'sierra leone': '🇸🇱', 'liberia': '🇱🇷', 'iceland': '🇮🇸',
-    'malta': '🇲🇹', 'luxembourg': '🇱🇺', 'monaco': '🇲🇨', 'liechtenstein': '🇱🇮',
-    'andorra': '🇦🇩', 'san marino': '🇸🇲', 'vatican': '🇻🇦', 'cuba': '🇨🇺',
-    'jamaica': '🇯🇲', 'haiti': '🇭🇹', 'dominican': '🇩🇴', 'puerto rico': '🇵🇷',
-    'bahamas': '🇧🇸', 'trinidad': '🇹🇹', 'barbados': '🇧🇧', 'saint lucia': '🇱🇨',
-    'grenada': '🇬🇩', 'antigua': '🇦🇬', 'colombia': '🇨🇴', 'venezuela': '🇻🇪',
-    'ecuador': '🇪🇨', 'peru': '🇵🇪', 'bolivia': '🇧🇴', 'paraguay': '🇵🇾',
-    'uruguay': '🇺🇾', 'guyana': '🇬🇾', 'suriname': '🇸🇷', 'fiji': '🇫🇯',
-    'papua new guinea': '🇵🇬', 'solomon islands': '🇸🇧', 'vanuatu': '🇻🇺',
-    'samoa': '🇼🇸', 'tonga': '🇹🇴', 'micronesia': '🇫🇲', 'marshall islands': '🇲🇭',
-    'palau': '🇵🇼', 'nauru': '🇳🇷', 'tuvalu': '🇹🇻', 'kiribati': '🇰🇮',
-
-    # 常用缩写
-    'cn': '🇨🇳', 'us': '🇺🇸', 'jp': '🇯🇵', 'kr': '🇰🇷',
-    'gb': '🇬🇧', 'fr': '🇫🇷', 'de': '🇩🇪', 'it': '🇮🇹',
-    'es': '🇪🇸', 'pt': '🇵🇹', 'nl': '🇳🇱', 'ch': '🇨🇭',
-    'se': '🇸🇪', 'no': '🇳🇴', 'dk': '🇩🇰', 'fi': '🇫🇮',
-    'ru': '🇷🇺', 'au': '🇦🇺', 'nz': '🇳🇿', 'ca': '🇨🇦',
-    'br': '🇧🇷', 'ar': '🇦🇷', 'mx': '🇲🇽', 'in': '🇮🇳',
-    'th': '🇹🇭', 'vn': '🇻🇳', 'sg': '🇸🇬', 'my': '🇲🇾',
-    'id': '🇮🇩', 'ph': '🇵🇭', 'tr': '🇹🇷', 'ae': '🇦🇪',
-    'sa': '🇸🇦', 'za': '🇿🇦', 'eg': '🇪🇬', 'gr': '🇬🇷',
-    'ie': '🇮🇪', 'pl': '🇵🇱', 'cz': '🇨🇿', 'at': '🇦🇹',
-    'be': '🇧🇪', 'hu': '🇭🇺',
-    'ng': '🇳🇬', 'ua': '🇺🇦', 'pl': '🇵🇱', 'cz': '🇨🇿',
-    'sk': '🇸🇰', 'hu': '🇭🇺', 'ro': '🇷🇴', 'bg': '🇧🇬',
-    'rs': '🇷🇸', 'hr': '🇭🇷', 'si': '🇸🇮', 'ee': '🇪🇪',
-    'lv': '🇱🇻', 'lt': '🇱🇹', 'by': '🇧🇾', 'md': '🇲🇩',
-    'ge': '🇬🇪', 'am': '🇦🇲', 'az': '🇦🇿', 'kz': '🇰🇿',
-    'uz': '🇺🇿', 'tm': '🇹🇲', 'kg': '🇰🇬', 'tj': '🇹🇯',
-    'mn': '🇲🇳', 'kh': '🇰🇭', 'la': '🇱🇦', 'mm': '🇲🇲',
-    'lk': '🇱🇰', 'pk': '🇵🇰', 'bd': '🇧🇩', 'np': '🇳🇵',
-    'bt': '🇧🇹', 'mv': '🇲🇻', 'ir': '🇮🇷', 'iq': '🇮🇶',
-    'kw': '🇰🇼', 'qa': '🇶🇦', 'bh': '🇧🇭', 'om': '🇴🇲',
-    'ye': '🇾🇪', 'jo': '🇯🇴', 'lb': '🇱🇧', 'sy': '🇸🇾',
-    'il': '🇮🇱', 'ps': '🇵🇸', 'cy': '🇨🇾', 'dz': '🇩🇿',
-    'ma': '🇲🇦', 'tn': '🇹🇳', 'ly': '🇱🇾', 'sd': '🇸🇩',
-    'et': '🇪🇹', 'ke': '🇰🇪', 'tz': '🇹🇿', 'ug': '🇺🇬',
-    'rw': '🇷🇼', 'cd': '🇨🇩', 'ao': '🇦🇴', 'na': '🇳🇦',
-    'bw': '🇧🇼', 'zm': '🇿🇲', 'zw': '🇿🇼', 'mz': '🇲🇿',
-    'mg': '🇲🇬', 'mu': '🇲🇺', 'sc': '🇸🇨', 'gh': '🇬🇭',
-    'ci': '🇨🇮', 'cm': '🇨🇲', 'sn': '🇸🇳', 'ml': '🇲🇱',
-    'bf': '🇧🇫', 'ne': '🇳🇪', 'td': '🇹🇩', 'cf': '🇨🇫',
-    'ga': '🇬🇦', 'gq': '🇬🇶', 'dj': '🇩🇯', 'so': '🇸🇴',
-    'er': '🇪🇷', 'mr': '🇲🇷', 'gm': '🇬🇲', 'gn': '🇬🇳',
-    'gw': '🇬🇼', 'sl': '🇸🇱', 'lr': '🇱🇷', 'is': '🇮🇸',
-    'mt': '🇲🇹', 'lu': '🇱🇺', 'mc': '🇲🇨', 'li': '🇱🇮',
-    'ad': '🇦🇩', 'sm': '🇸🇲', 'va': '🇻🇦', 'cu': '🇨🇺',
-    'jm': '🇯🇲', 'ht': '🇭🇹', 'do': '🇩🇴', 'pr': '🇵🇷',
-    'bs': '🇧🇸', 'tt': '🇹🇹', 'bb': '🇧🇧', 'lc': '🇱🇨',
-    'gd': '🇬🇩', 'ag': '🇦🇬', 'co': '🇨🇴', 've': '🇻🇪',
-    'ec': '🇪🇨', 'pe': '🇵🇪', 'bo': '🇧🇴', 'py': '🇵🇾',
-    'uy': '🇺🇾', 'gy': '🇬🇾', 'sr': '🇸🇷', 'fj': '🇫🇯',
-    'pg': '🇵🇬', 'sb': '🇸🇧', 'vu': '🇻🇺', 'ws': '🇼🇸',
-    'to': '🇹🇴', 'fm': '🇫🇲', 'mh': '🇲🇭', 'pw': '🇵🇼',
-    'nr': '🇳🇷', 'tv': '🇹🇻', 'ki': '🇰🇮',
-}
 
 def get_category_with_flag(category: str) -> str:
     """获取带国旗的类别名称"""
@@ -633,13 +495,13 @@ def generate_export_html(records: List[Dict], group_name: str, start_date: str, 
                 <div class="section-title">📈 入款记录</div>
                 <table>
                     <thead>
-                        <tr><th>时间</th><th>金额(元)</th><th>手续费</th><th>汇率</th><th>单笔费用</th><th>USDT</th><th>分类</th><th>操作人</th></tr>
+                        <tr><th>日期时间</th><th>金额(元)</th><th>手续费</th><th>汇率</th><th>单笔费用</th><th>USDT</th><th>分类</th><th>操作人</th></tr>
                     </thead>
                     <tbody>
 '''
             for r in data['income']:
                 dt = beijing_time(r['created_at'])
-                time_str = dt.strftime('%H:%M:%S')
+                time_str = dt.strftime('%m-%d %H:%M')
 
                 # 获取费率和汇率
                 fee_rate = r.get('fee_rate', 0)
@@ -695,13 +557,13 @@ def generate_export_html(records: List[Dict], group_name: str, start_date: str, 
                 <div class="section-title expense">📉 出款记录</div>
                 <table>
                     <thead>
-                        <tr><th>时间</th><th>USDT</th><th>操作人</th></tr>
+                        <tr><th>日期时间</th><th>USDT</th><th>操作人</th></tr>
                     </thead>
                     <tbody>
 '''
             for r in data['expense']:
                 dt = beijing_time(r['created_at'])
-                time_str = dt.strftime('%H:%M:%S')
+                time_str = dt.strftime('%m-%d %H:%M')
                 operator = r.get('display_name', '未知')
                 html += f'''
                         <tr>
@@ -801,21 +663,21 @@ class AccountingManager:
                 c.execute("SELECT category FROM accounting_records LIMIT 1")
             except sqlite3.OperationalError:
                 c.execute("ALTER TABLE accounting_records ADD COLUMN category TEXT DEFAULT ''")
-                logger.info("✅ 已添加 category 字段到 accounting_records 表")
+                logger.info("已添加 category 字段到 accounting_records 表")
 
             # 2. 添加 rate 字段（放在这里！）
             try:
                 c.execute("SELECT rate FROM accounting_records LIMIT 1")
             except sqlite3.OperationalError:
                 c.execute("ALTER TABLE accounting_records ADD COLUMN rate REAL DEFAULT 0")
-                logger.info("✅ 已添加 rate 字段到 accounting_records 表")
+                logger.info("已添加 rate 字段到 accounting_records 表")
 
             # 3. 🔥 添加 fee_rate 字段（保存当时的手续费率）
             try:
                 c.execute("SELECT fee_rate FROM accounting_records LIMIT 1")
             except sqlite3.OperationalError:
                 c.execute("ALTER TABLE accounting_records ADD COLUMN fee_rate REAL DEFAULT 0")
-                logger.info("✅ 已添加 fee_rate 字段到 accounting_records 表")
+                logger.info("已添加 fee_rate 字段到 accounting_records 表")
 
             # 🔥 在这里添加第4个字段
             # 4. 🔥 添加 per_transaction_fee 字段（保存当时的单笔费用）
@@ -823,21 +685,21 @@ class AccountingManager:
                 c.execute("SELECT per_transaction_fee FROM accounting_records LIMIT 1")
             except sqlite3.OperationalError:
                 c.execute("ALTER TABLE accounting_records ADD COLUMN per_transaction_fee REAL DEFAULT 0")
-                logger.info("✅ 已添加 per_transaction_fee 字段到 accounting_records 表")
+                logger.info("已添加 per_transaction_fee 字段到 accounting_records 表")
 
             # 5. 🔥 添加 message_id 字段（记录记账消息的ID，用于撤销功能）
             try:
                 c.execute("SELECT message_id FROM accounting_records LIMIT 1")
             except sqlite3.OperationalError:
                 c.execute("ALTER TABLE accounting_records ADD COLUMN message_id INTEGER DEFAULT 0")
-                logger.info("✅ 已添加 message_id 字段到 accounting_records 表")
+                logger.info("已添加 message_id 字段到 accounting_records 表")
 
             # 2. 添加索引（如果不存在）
             c.execute("CREATE INDEX IF NOT EXISTS idx_records_group_id ON accounting_records(group_id)")
             c.execute("CREATE INDEX IF NOT EXISTS idx_records_session_id ON accounting_records(session_id)")
             c.execute("CREATE INDEX IF NOT EXISTS idx_records_date ON accounting_records(date)")
 
-            logger.info("✅ 数据库表结构检查完成")
+            logger.info("数据库表结构检查完成")
 
             # 已结束的会话表
             c.execute("""
@@ -858,7 +720,7 @@ class AccountingManager:
                 c.execute("SELECT per_transaction_fee FROM accounting_sessions LIMIT 1")
             except sqlite3.OperationalError:
                 c.execute("ALTER TABLE accounting_sessions ADD COLUMN per_transaction_fee REAL DEFAULT 0")
-                logger.info("✅ 已添加 per_transaction_fee 字段到 accounting_sessions 表")
+                logger.info("已添加 per_transaction_fee 字段到 accounting_sessions 表")
 
             # 添加用户追踪表
             c.execute("""
@@ -901,7 +763,7 @@ class AccountingManager:
                 )
             """)
             conn.commit()
-            logger.info("✅ 地址查询表初始化完成")
+            logger.info("地址查询表初始化完成")
 
     def get_or_create_session(self, group_id: str) -> Dict:
         """获取或创建当前会话"""
@@ -2351,14 +2213,21 @@ async def handle_add_income(update: Update, context: ContextTypes.DEFAULT_TYPE,
         if temp_info:
             prefix += f" ({', '.join(temp_info)})"
 
-        try:
-            await update.message.reply_text(f"{prefix} \n\n{message}", parse_mode='Markdown')
-        except Exception as e:
-            error_msg = str(e)
-            if "ConnectError" in error_msg or "Timeout" in error_msg:
-                await update.message.reply_text(f"{prefix}\n\n⚠️ ✅ 记账成功，网络问题无法显示账单")
-            else:
-                raise e
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+        # 构建内联按钮
+        view_button = InlineKeyboardButton("📊 查看当前账单", callback_data="view_current_bill")
+        reply_markup = InlineKeyboardMarkup([[view_button]])
+
+        result = await safe_reply_text(
+            update.message,
+            f"{prefix} \n\n{message}",
+            parse_mode='Markdown',
+            reply_markup=reply_markup
+        )
+        if result is None:
+            # 重试失败，至少确认记账成功
+            await safe_reply_text(update.message, f"{prefix}\n\n⚠️ 记账成功，但账单显示失败（网络问题），请手动查看")
     else:
         await update.message.reply_text("❌ 记录失败，请稍后重试")
 
@@ -2398,14 +2267,20 @@ async def handle_add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
         prefix = f"✅ 已记录修正出款：-{abs(amount):.2f} USDT" if is_correction else f"✅ 已记录出款：{amount:.2f} USDT"
 
-        try:
-            await update.message.reply_text(f"{prefix}\n\n{message}", parse_mode='Markdown')
-        except Exception as e:
-            error_msg = str(e)
-            if "ConnectError" in error_msg or "Timeout" in error_msg:
-                await update.message.reply_text(f"{prefix}\n\n⚠️ ✅ 记账成功，网络问题无法显示账单")
-            else:
-                raise e
+        # ===== 修改后 =====
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+        view_button = InlineKeyboardButton("📊 查看当前账单", callback_data="view_current_bill")
+        reply_markup = InlineKeyboardMarkup([[view_button]])
+
+        result = await safe_reply_text(
+            update.message,
+            f"{prefix}\n\n{message}",
+            parse_mode='Markdown',
+            reply_markup=reply_markup
+        )
+        if result is None:
+            await safe_reply_text(update.message, f"{prefix}\n\n⚠️ 记账成功，但账单显示失败（网络问题），请手动查看")
     else:
         await update.message.reply_text("❌ 记录失败，请稍后重试")
 
@@ -2989,7 +2864,8 @@ async def handle_revoke_record(update: Update, context: ContextTypes.DEFAULT_TYP
 • 时间：{beijing_time(record['created_at']).strftime('%Y-%m-%d %H:%M:%S')}
 """
 
-        await message.reply_text(
+        await safe_reply_text(
+            message,
             f"✅ 已撤销{record_type_name}记录\n{detail_info}",
             parse_mode='Markdown'
         )
@@ -3001,6 +2877,62 @@ async def handle_revoke_record(update: Update, context: ContextTypes.DEFAULT_TYP
         await message.reply_text(bill_message, parse_mode='Markdown')
     else:
         await message.reply_text("❌ 撤销失败，请稍后重试")
+
+async def safe_reply_text(message, text: str, parse_mode: str = None, max_retries: int = 3, **kwargs):
+    """
+    安全的消息回复函数，自动处理限流和超时
+
+    Args:
+        message: Telegram Message 对象
+        text: 要发送的文本
+        parse_mode: 解析模式（Markdown/HTML）
+        max_retries: 最大重试次数
+        **kwargs: 其他传递给 reply_text 的参数
+
+    Returns:
+        Message 对象或 None
+    """
+    last_error = None
+
+    for attempt in range(max_retries):
+        try:
+            return await message.reply_text(text, parse_mode=parse_mode, **kwargs)
+
+        except RetryAfter as e:
+            wait = e.retry_after + 0.5
+            logger.warning(
+                f"safe_reply 触发限流 | 等待 {wait:.1f}秒 | "
+                f"重试 {attempt + 1}/{max_retries}"
+            )
+            await _asyncio.sleep(wait)
+            last_error = e
+
+        except TimedOut:
+            wait = 1 * (2 ** attempt)  # 指数退避: 1, 2, 4 秒
+            logger.warning(
+                f"safe_reply 超时 | 等待 {wait}秒 | "
+                f"重试 {attempt + 1}/{max_retries}"
+            )
+            await _asyncio.sleep(wait)
+            last_error = TimedOut()
+
+        except NetworkError as e:
+            wait = 1 * (2 ** attempt)
+            logger.warning(
+                f"safe_reply 网络错误: {e} | 等待 {wait}秒 | "
+                f"重试 {attempt + 1}/{max_retries}"
+            )
+            await _asyncio.sleep(wait)
+            last_error = e
+
+        except Exception as e:
+            # 其他错误不重试，直接抛出
+            logger.error(f"safe_reply 不可重试的错误: {e}")
+            raise e
+
+    # 所有重试都失败
+    logger.error(f"safe_reply 所有重试均失败 | 最后错误: {last_error}")
+    return None
 
 async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理群组消息中的记账指令"""
@@ -3089,24 +3021,24 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
     elif text.startswith('设置单笔费用'):
         try:
             fee_str = text.replace('设置单笔费用', '').strip()
-            print(f"[DEBUG] 设置单笔费用 - 原始文本: '{text}'")
-            print(f"[DEBUG] 设置单笔费用 - 提取的字符串: '{fee_str}'")
+            logger.debug(f"[DEBUG] 设置单笔费用 - 原始文本: '{text}'")
+            logger.debug(f"[DEBUG] 设置单笔费用 - 提取的字符串: '{fee_str}'")
 
             if not fee_str:
                 await message.reply_text("❌ 格式错误：设置单笔费用 数字（如：设置单笔费用10）")
                 return
 
             fee = float(fee_str)
-            print(f"[DEBUG] 设置单笔费用 - 转换后的数字: {fee}")
+            logger.debug(f"[DEBUG] 设置单笔费用 - 转换后的数字: {fee}")
 
             await handle_set_per_transaction_fee(update, context, fee)
             # 成功提示已经在 handle_set_per_transaction_fee 中发送，这里不需要再发送
 
         except ValueError as e:
-            print(f"[DEBUG] ValueError: {e}")
+            logger.debug(f"ValueError: {e}")
             await message.reply_text("❌ 金额格式错误，请输入数字（如：设置单笔费用10 或 设置单笔费用2）")
         except Exception as e:
-            print(f"[DEBUG] 其他异常: {e}")
+            logger.debug(f"其他异常: {e}")
             await message.reply_text(f"❌ 设置失败：{str(e)[:50]}")
         return
 
@@ -3449,7 +3381,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                     reply_to_message_id=message.message_id
                 )
             except Exception as e:
-                print(f"[ERROR] 发送权限提示失败: {e}")
+                logger.info(f"[ERROR] 发送权限提示失败: {e}")
                 await message.reply_text("❌ 无权限使用 AI 对话")
             return
 
@@ -4006,15 +3938,15 @@ async def generate_and_send_export(update: Update, context: ContextTypes.DEFAULT
     group_name = context.user_data.get("export_group_name", "群组")
 
     # 🔥 添加调试日志
-    print(f"[DEBUG] 导出查询 - group_id: {group_id}")
-    print(f"[DEBUG] 导出查询 - start_date: {start_date}, end_date: {end_date}")
+    logger.debug(f"[DEBUG] 导出查询 - group_id: {group_id}")
+    logger.debug(f"[DEBUG] 导出查询 - start_date: {start_date}, end_date: {end_date}")
 
     # 获取所有记录（不加日期限制）看看有什么数据
     all_records = accounting_manager.get_total_records(group_id)
-    print(f"[DEBUG] 数据库总记录数: {len(all_records)}")
+    logger.debug(f"[DEBUG] 数据库总记录数: {len(all_records)}")
     if all_records:
         dates_in_db = set(r.get('date') for r in all_records)
-        print(f"[DEBUG] 数据库中的日期: {sorted(dates_in_db)}")
+        logger.debug(f"[DEBUG] 数据库中的日期: {sorted(dates_in_db)}")
 
     # 发送处理中提示
     await query.message.edit_text(f"📊 正在生成 {title} 账单导出文件，请稍候...")
@@ -4211,20 +4143,20 @@ async def welcome_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
     chat_member = update.chat_member
 
     if not chat_member:
-        print("❌ 没有 chat_member 数据")
+        logger.warning("没有 chat_member 数据")
         return
 
     # 获取新旧状态
     old_status = chat_member.old_chat_member.status if chat_member.old_chat_member else None
     new_status = chat_member.new_chat_member.status if chat_member.new_chat_member else None
 
-    print(f"[欢迎检测] 群组: {chat_member.chat.title}")
-    print(f"[欢迎检测] 旧状态: {old_status}")
-    print(f"[欢迎检测] 新状态: {new_status}")
+    logger.debug(f"群组: {chat_member.chat.title}")
+    logger.debug(f"旧状态: {old_status}")
+    logger.debug(f"新状态: {new_status}")
 
     # 检测成员加入（从 left/kicked/restricted 变为 member）
     if new_status == 'member' and old_status in ['left', 'kicked', 'restricted']:
-        print(f"✅ 检测到新成员加入！")
+        logger.info("检测到新成员加入！")
 
         user = chat_member.new_chat_member.user
         chat = chat_member.chat
@@ -4242,15 +4174,15 @@ async def welcome_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
         # 发送欢迎消息
         try:
             await context.bot.send_message(chat_id=chat.id, text=welcome_text)
-            print(f"✅ 欢迎消息已发送: {welcome_text}")
+            logger.info(f"欢迎消息已发送: {welcome_text}")
         except Exception as e:
-            print(f"❌ 发送欢迎消息失败: {e}")
+            logger.error(f"发送欢迎消息失败: {e}")
 
     # 检测成员离开（从 member 变为 left/kicked）
     elif old_status == 'member' and new_status in ['left', 'kicked']:
-        print(f"👋 检测到成员离开")
+        logger.info("检测到成员离开")
         user = chat_member.new_chat_member.user
-        print(f"离开的用户: {user.first_name}")
+        logger.info(f"离开的用户: {user.first_name}")
 
 # ==================== 群组成员变化监听器（服务消息方式）====================
 
@@ -4286,7 +4218,7 @@ async def handle_group_service_message(update: Update, context: ContextTypes.DEF
 
             try:
                 await message.reply_text(welcome_message)
-                logger.info(f"✅ 已发送欢迎消息给 {user_name} (群组: {chat.title})")
+                logger.info(f"已发送欢迎消息给 {user_name} (群组: {chat.title})")
             except Exception as e:
                 logger.error(f"发送欢迎消息失败: {e}")
 
@@ -4322,7 +4254,7 @@ async def handle_group_service_message(update: Update, context: ContextTypes.DEF
 
         try:
             await message.reply_text(leave_message)
-            logger.info(f"✅ 已发送退出消息 (用户: {user_name}, 群组: {chat.title})")
+            logger.info(f"已发送退出消息 (用户: {user_name}, 群组: {chat.title})")
         except Exception as e:
             logger.error(f"发送退出消息失败: {e}")
 
@@ -4339,6 +4271,393 @@ def get_service_message_handler():
         filters.StatusUpdate.NEW_CHAT_MEMBERS | filters.StatusUpdate.LEFT_CHAT_MEMBER,
         handle_group_service_message
     )
+
+# ===== 在 accounting.py 文件末尾添加 =====
+
+# ---------- 美化 HTML 账单生成 ----------
+
+def generate_beautiful_bill_html(stats: Dict, records: List[Dict], title: str = "当前账单") -> str:
+    """
+    生成美化版 HTML 账单
+
+    Args:
+        stats: 统计信息字典
+        records: 记账记录列表
+        title: 账单标题
+    Returns:
+        HTML 字符串
+    """
+    from datetime import datetime
+    import json as _json
+    from datetime import timezone, timedelta
+    BEIJING_TZ = timezone(timedelta(hours=8))
+
+    # 分离入款和出款
+    income_records = [r for r in records if r['type'] == 'income']
+    expense_records = [r for r in records if r['type'] == 'expense']
+
+    # 按备注分组
+    categories = {}
+    no_category_records = []
+    for r in income_records:
+        category = r.get('category', '') or ''
+        if category:
+            if category not in categories:
+                categories[category] = []
+            categories[category].append(r)
+        else:
+            no_category_records.append(r)
+
+    # 统计数据
+    fee_rate = stats.get('fee_rate', 0)
+    exchange_rate = stats.get('exchange_rate', 1)
+    per_transaction_fee = stats.get('per_transaction_fee', 0)
+    total_income_cny = stats.get('income_total', 0)
+    total_income_usdt = stats.get('income_usdt', 0)
+    total_expense_usdt = stats.get('expense_usdt', 0)
+    pending_usdt = total_income_usdt - total_expense_usdt
+
+    now = datetime.now(BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S')
+
+    # 生成国旗显示
+    def get_flag(cat):
+        if not cat:
+            return ''
+        try:
+            from constants import COUNTRY_FLAGS
+            cat_lower = cat.lower().strip()
+            if cat_lower in COUNTRY_FLAGS:
+                return COUNTRY_FLAGS[cat_lower]
+            for country, flag in COUNTRY_FLAGS.items():
+                if country in cat_lower or cat_lower in country:
+                    return flag
+        except:
+            pass
+        return ''
+
+    # 格式化金额
+    def fmt(num, decimals=2):
+        if num == int(num):
+            return str(int(num))
+        return f"{num:.{decimals}f}"
+
+    # 生成表格行
+    income_rows = ""
+    for r in income_records:
+        dt = datetime.fromtimestamp(r['created_at'], tz=BEIJING_TZ)
+        time_str = dt.strftime('%m-%d %H:%M')
+        cat = r.get('category', '') or ''
+        flag = get_flag(cat)
+        cat_display = f"{flag} {cat}" if flag else (cat or '无')
+        fee_info = f"{fmt(r.get('fee_rate', 0))}% / {fmt(r.get('rate', 0))}"
+        operator = r.get('display_name', r.get('username', '未知'))
+        income_rows += f"""
+        <tr>
+            <td>{time_str}</td>
+            <td class="income-amount">+{fmt(r['amount'])}</td>
+            <td>{fee_info}</td>
+            <td class="usdt-amount">{fmt(r['amount_usdt'])} USDT</td>
+            <td>{cat_display}</td>
+            <td>{operator}</td>
+        </tr>"""
+
+    expense_rows = ""
+    for r in expense_records:
+        dt = datetime.fromtimestamp(r['created_at'], tz=BEIJING_TZ)
+        time_str = dt.strftime('%m-%d %H:%M')
+        operator = r.get('display_name', r.get('username', '未知'))
+        expense_rows += f"""
+        <tr>
+            <td>{time_str}</td>
+            <td class="expense-amount">-{fmt(r['amount_usdt'])} USDT</td>
+            <td>{operator}</td>
+        </tr>"""
+
+    # 分组统计
+    group_stats = ""
+    if categories:
+        for cat, group_records in categories.items():
+            cat_cny = sum(r['amount'] for r in group_records)
+            cat_usdt = sum(r['amount_usdt'] for r in group_records)
+            flag = get_flag(cat)
+            cat_display = f"{flag} {cat}" if flag else cat
+            group_stats += f"""
+            <tr>
+                <td>{cat_display}</td>
+                <td>{len(group_records)}笔</td>
+                <td>{fmt(cat_cny)} 元</td>
+                <td>{fmt(cat_usdt)} USDT</td>
+            </tr>"""
+
+    category_section = ""
+    if group_stats:
+        category_section = f"""
+        <div class="card">
+            <h2>📊 入款分组统计</h2>
+            <table>
+                <thead>
+                    <tr><th>分类</th><th>笔数</th><th>金额(元)</th><th>金额(USDT)</th></tr>
+                </thead>
+                <tbody>{group_stats}</tbody>
+            </table>
+        </div>"""
+
+    html = f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{title} - 记账账单</title>
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }}
+        .container {{ max-width: 900px; margin: 0 auto; }}
+        .header {{
+            background: white;
+            border-radius: 20px;
+            padding: 28px 24px;
+            margin-bottom: 20px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+            text-align: center;
+        }}
+        .header h1 {{
+            font-size: 26px;
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 8px;
+        }}
+        .header .time {{ color: #888; font-size: 13px; }}
+        .summary-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+            margin-bottom: 20px;
+        }}
+        .summary-card {{
+            background: white;
+            border-radius: 16px;
+            padding: 20px;
+            text-align: center;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+            transition: transform 0.2s;
+        }}
+        .summary-card:hover {{ transform: translateY(-2px); }}
+        .summary-card .icon {{ font-size: 28px; margin-bottom: 8px; }}
+        .summary-card .label {{ font-size: 12px; color: #888; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 1px; }}
+        .summary-card .value {{ font-size: 24px; font-weight: 700; }}
+        .summary-card.income {{ border-bottom: 4px solid #10b981; }}
+        .summary-card.income .value {{ color: #10b981; }}
+        .summary-card.expense {{ border-bottom: 4px solid #ef4444; }}
+        .summary-card.expense .value {{ color: #ef4444; }}
+        .summary-card.pending {{ border-bottom: 4px solid #f59e0b; }}
+        .summary-card.pending .value {{ color: #f59e0b; }}
+        .config-bar {{
+            background: white;
+            border-radius: 16px;
+            padding: 16px 24px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+            display: flex;
+            justify-content: space-around;
+            flex-wrap: wrap;
+            gap: 12px;
+            text-align: center;
+        }}
+        .config-item .config-label {{ font-size: 11px; color: #888; margin-bottom: 4px; }}
+        .config-item .config-value {{ font-size: 18px; font-weight: 600; color: #333; }}
+        .card {{
+            background: white;
+            border-radius: 16px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+        }}
+        .card h2 {{
+            font-size: 18px;
+            color: #1e293b;
+            margin-bottom: 16px;
+            padding-bottom: 12px;
+            border-bottom: 2px solid #f1f5f9;
+        }}
+        table {{
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }}
+        th {{
+            background: #f8fafc;
+            padding: 10px 12px;
+            text-align: left;
+            font-weight: 600;
+            color: #475569;
+            border-bottom: 2px solid #e2e8f0;
+        }}
+        td {{
+            padding: 10px 12px;
+            border-bottom: 1px solid #f1f5f9;
+            color: #334155;
+        }}
+        tr:hover {{ background: #f8fafc; }}
+        .income-amount {{ color: #10b981; font-weight: 600; }}
+        .expense-amount {{ color: #ef4444; font-weight: 600; }}
+        .usdt-amount {{ color: #6366f1; font-weight: 500; }}
+        .table-responsive {{ overflow-x: auto; -webkit-overflow-scrolling: touch; }}
+        .footer {{
+            text-align: center;
+            padding: 24px;
+            color: rgba(255,255,255,0.8);
+            font-size: 12px;
+        }}
+        @media (max-width: 640px) {{
+            .header h1 {{ font-size: 20px; }}
+            .summary-card .value {{ font-size: 18px; }}
+            th, td {{ padding: 8px 6px; font-size: 11px; }}
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📋 {title}</h1>
+            <div class="time">生成时间：{now}</div>
+        </div>
+
+        <div class="config-bar">
+            <div class="config-item">
+                <div class="config-label">💰 手续费率</div>
+                <div class="config-value">{fee_rate}%</div>
+            </div>
+            <div class="config-item">
+                <div class="config-label">💱 汇率</div>
+                <div class="config-value">1 USDT = {exchange_rate} 元</div>
+            </div>
+            <div class="config-item">
+                <div class="config-label">📝 单笔费用</div>
+                <div class="config-value">{per_transaction_fee} 元</div>
+            </div>
+        </div>
+
+        <div class="summary-grid">
+            <div class="summary-card income">
+                <div class="icon">💰</div>
+                <div class="label">总入款</div>
+                <div class="value">{fmt(total_income_cny)} 元</div>
+                <div style="font-size:14px;color:#666;">≈ {fmt(total_income_usdt)} USDT</div>
+            </div>
+            <div class="summary-card expense">
+                <div class="icon">📤</div>
+                <div class="label">总出款</div>
+                <div class="value">{fmt(total_expense_usdt)} USDT</div>
+            </div>
+            <div class="summary-card pending">
+                <div class="icon">⏳</div>
+                <div class="label">待下发</div>
+                <div class="value">{fmt(pending_usdt)} USDT</div>
+            </div>
+        </div>
+
+        {category_section}
+
+        <div class="card">
+            <h2>📈 入款记录（{len(income_records)}笔）</h2>
+            <div class="table-responsive">
+                <table>
+                    <thead>
+                        <tr><th>日期时间</th><th>金额(元)</th><th>费率/汇率</th><th>到账(USDT)</th><th>分类</th><th>操作人</th></tr>
+                    </thead>
+                    <tbody>{income_rows if income_rows else '<tr><td colspan="6" style="text-align:center;color:#999;">暂无入款记录</td></tr>'}</tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>📉 出款记录（{len(expense_records)}笔）</h2>
+            <div class="table-responsive">
+                <table>
+                    <thead>
+                        <tr><th>日期时间</th><th>金额(USDT)</th><th>操作人</th></tr>
+                    </thead>
+                    <tbody>{expense_rows if expense_rows else '<tr><td colspan="3" style="text-align:center;color:#999;">暂无出款记录</td></tr>'}</tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="footer">
+            由 Telegram 记账机器人自动生成
+        </div>
+    </div>
+</body>
+</html>"""
+
+    return html
+
+
+# ---------- 内联按钮回调处理 ----------
+async def handle_view_current_bill(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理「查看当前账单」按钮回调，生成 HTML 文件并发送"""
+    query = update.callback_query
+    await query.answer("正在生成账单...")
+
+    chat = query.message.chat
+    group_id = str(chat.id)
+
+    # 获取当前账单数据
+    stats = accounting_manager.get_current_stats(group_id)
+    records = accounting_manager.get_current_records(group_id)
+
+    if not records:
+        await query.answer("当前没有账单记录", show_alert=True)
+        return
+
+    # ✅ 发送一个临时提示消息
+    loading_msg = await query.message.reply_text("📊 正在生成美化账单，请稍候...")
+
+    try:
+        # 获取群组名称
+        group_name = chat.title or chat.first_name or "当前群组"
+
+        # 生成 HTML
+        html_content = generate_beautiful_bill_html(stats, records, f"{group_name} - 当前账单")
+
+        # 保存为临时文件
+        import tempfile
+        import os
+
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.html', encoding='utf-8', delete=False) as f:
+            f.write(html_content)
+            temp_path = f.name
+
+        try:
+            # 发送文件
+            with open(temp_path, 'rb') as f:
+                await query.message.reply_document(
+                    document=f,
+                    filename=f"账单_{group_name}_当前.html",
+                    caption=f"📊 **{group_name}** 当前账单\n\n"
+                            f"💰 总入款：{stats['income_total']:.2f} 元 ≈ {stats['income_usdt']:.2f} USDT\n"
+                            f"📤 总出款：{stats['expense_usdt']:.2f} USDT\n"
+                            f"⏳ 待下发：{stats['pending_usdt']:.2f} USDT\n"
+                            f"📝 共 {stats['income_count'] + stats['expense_count']} 条记录",
+                    parse_mode='Markdown'
+                )
+        finally:
+            try:
+                os.unlink(temp_path)
+            except:
+                pass
+
+        # ✅ 删除临时提示，保留原账单消息
+        await loading_msg.delete()
+
+    except Exception as e:
+        logger.error(f"生成账单HTML失败: {e}")
+        await loading_msg.edit_text(f"❌ 生成失败：{str(e)[:100]}")
 
 
 def get_conversation_handler():
