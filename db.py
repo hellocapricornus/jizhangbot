@@ -4,6 +4,8 @@ import sqlite3
 import os
 import time
 import re
+from contextlib import contextmanager
+from logger import bot_logger as logger  # ✅ 新增
 
 DB_PATH = "bot.db"
 if not os.path.isabs(DB_PATH):
@@ -316,14 +318,14 @@ def init_db():
         c.execute("SELECT category FROM groups LIMIT 1")
     except sqlite3.OperationalError:
         c.execute("ALTER TABLE groups ADD COLUMN category TEXT DEFAULT '未分类'")
-        print("✅ 已为 groups 表添加 category 字段")
+        logger.info("已为 groups 表添加 category 字段")
 
     # 🔥 数据库迁移：为已存在的 group_accounting_config 表添加 per_transaction_fee 字段
     try:
         c.execute("SELECT per_transaction_fee FROM group_accounting_config LIMIT 1")
     except sqlite3.OperationalError:
         c.execute("ALTER TABLE group_accounting_config ADD COLUMN per_transaction_fee REAL DEFAULT 0.0")
-        print("✅ 已为 group_accounting_config 表添加 per_transaction_fee 字段")
+        logger.info("已为 group_accounting_config 表添加 per_transaction_fee 字段")
 
     # ========== 新增：监控地址表 ==========
     c.execute("""
@@ -342,7 +344,7 @@ def init_db():
     # 迁移：删除旧的唯一约束（如果存在）
     try:
         c.execute("DROP INDEX IF EXISTS sqlite_autoindex_monitored_addresses_1")
-        print("✅ 已移除 monitored_addresses 的唯一约束")
+        logger.info("已移除 monitored_addresses 的唯一约束")
     except:
         pass
 
@@ -351,14 +353,14 @@ def init_db():
         c.execute("SELECT note FROM monitored_addresses LIMIT 1")
     except sqlite3.OperationalError:
         c.execute("ALTER TABLE monitored_addresses ADD COLUMN note TEXT DEFAULT ''")
-        print("✅ 已为 monitored_addresses 表添加 note 字段")
+        logger.info("已为 monitored_addresses 表添加 note 字段")
 
     # 数据库迁移：为 groups 表添加 joined_at 字段
     try:
         c.execute("SELECT joined_at FROM groups LIMIT 1")
     except sqlite3.OperationalError:
         c.execute("ALTER TABLE groups ADD COLUMN joined_at INTEGER DEFAULT 0")
-        print("✅ 已为 groups 表添加 joined_at 字段")
+        logger.info("已为 groups 表添加 joined_at 字段")
 
     # 新增：交易记录表
     c.execute("""
@@ -436,7 +438,7 @@ def init_db():
     except sqlite3.OperationalError:
         c.execute("ALTER TABLE user_preferences ADD COLUMN daily_report_enabled INTEGER DEFAULT 0")
         c.execute("ALTER TABLE user_preferences ADD COLUMN daily_report_hour INTEGER DEFAULT 9")
-        print("✅ 已为 user_preferences 表添加每日早报字段")
+        logger.info("已为 user_preferences 表添加每日早报字段")
 
     # 创建索引
     c.execute("CREATE INDEX IF NOT EXISTS idx_records_group_id ON accounting_records(group_id)")
@@ -444,7 +446,7 @@ def init_db():
     c.execute("CREATE INDEX IF NOT EXISTS idx_records_date ON accounting_records(date)")
 
     # ========== 添加索引优化（支持500个群组）==========
-    print("📊 正在创建数据库索引...")
+    logger.info("正在创建数据库索引...")
 
     # 记账记录表的索引
     c.execute("CREATE INDEX IF NOT EXISTS idx_records_group_id ON accounting_records(group_id)")
@@ -459,11 +461,11 @@ def init_db():
     # 用户表的索引
     c.execute("CREATE INDEX IF NOT EXISTS idx_users_group_id ON group_users(group_id)")
 
-    print("✅ 数据库索引创建完成")
+    logger.info("数据库索引创建完成")
 
     conn.commit()
     conn.close()
-    print(f"✅ 数据库初始化完成: {DB_PATH}")
+    logger.info(f"数据库初始化完成: {DB_PATH}")
 
 # ========== 监控地址相关操作 ==========
 
@@ -493,7 +495,7 @@ def add_monitored_address(address: str, chain_type: str, added_by: int, note: st
         # 检查该用户是否已经添加过这个地址
         c.execute("SELECT id FROM monitored_addresses WHERE address = ? AND added_by = ?", (address, added_by))
         if c.fetchone():
-            print(f"用户 {added_by} 已添加过地址 {address}")
+            logger.warning(f"用户 {added_by} 已添加过地址 {address}")
             return False
 
         # 允许不同用户添加
@@ -505,7 +507,7 @@ def add_monitored_address(address: str, chain_type: str, added_by: int, note: st
         conn.commit()
         return True
     except Exception as e:
-        print(f"添加监控地址失败: {e}")
+        logger.error(f"添加监控地址失败: {e}")
         return False
     finally:
         conn.close()
@@ -542,7 +544,7 @@ def add_transaction_record(address: str, tx_id: str, from_addr: str, to_addr: st
         conn.commit()
         return True
     except Exception as e:
-        print(f"添加交易记录失败: {e}")
+        logger.error(f"添加交易记录失败: {e}")
         return False
     finally:
         conn.close()
@@ -605,7 +607,7 @@ def save_group(group_id: str, title: str, category: str = None):
             if country:
                 if ensure_country_category(country):
                     final_category = country
-                    print(f"✅ 自动分类：群组「{title}」已归类到「{country}」")
+                    logger.info(f"自动分类：群组「{title}」已归类到「{country}」")
 
         c.execute("""
             INSERT OR REPLACE INTO groups (group_id, title, last_seen, category, joined_at)
@@ -613,10 +615,10 @@ def save_group(group_id: str, title: str, category: str = None):
         """, (group_id, title, int(time.time()), final_category, joined_at))
 
         conn.commit()
-        print(f"💾 [DB] 群组 {title} (分类: {final_category}) 已保存。")
+        logger.info(f"[DB] 群组 {title} (分类: {final_category}) 已保存。")
 
     except Exception as e:
-        print(f"❌ [DB Error] 保存群组失败: {e}")
+        logger.error(f"[DB Error] 保存群组失败: {e}")
         conn.rollback()
     finally:
         conn.close()
@@ -639,7 +641,7 @@ def fix_joined_at():
 
     conn.commit()
     conn.close()
-    print(f"✅ 已修复 {count} 个群组的 joined_at")
+    logger.info(f"已修复 {count} 个群组的 joined_at")
 
 def delete_group_from_db(group_id: str):
     conn = get_db_connection()
@@ -647,7 +649,7 @@ def delete_group_from_db(group_id: str):
     c.execute("DELETE FROM groups WHERE group_id = ?", (group_id,))
     conn.commit()
     count = c.execute("SELECT count(*) FROM groups").fetchone()[0]
-    print(f"🗑️ [DB] 群组 {group_id} 已删除。剩余群组数：{count}")
+    logger.info(f"[DB] 群组 {group_id} 已删除。剩余群组数：{count}")
     conn.close()
 
 def get_all_groups_from_db(category: str = None):
@@ -687,10 +689,10 @@ def update_group_category(group_id: str, category: str):
     try:
         c.execute("UPDATE groups SET category = ? WHERE group_id = ?", (category, group_id))
         conn.commit()
-        print(f"✅ 群组 {group_id} 分类已更新为: {category}")
+        logger.info(f"群组 {group_id} 分类已更新为: {category}")
         return True
     except Exception as e:
-        print(f"❌ 更新分类失败: {e}")
+        logger.error(f"更新分类失败: {e}")
         return False
     finally:
         conn.close()
@@ -713,10 +715,10 @@ def add_category(category_name: str, description: str = ""):
         c.execute("INSERT INTO group_categories (category_name, description, created_at) VALUES (?, ?, ?)",
                   (category_name, description, int(time.time())))
         conn.commit()
-        print(f"✅ 已添加分类: {category_name}")
+        logger.info(f"已添加分类: {category_name}")
         return True
     except sqlite3.IntegrityError:
-        print(f"❌ 分类已存在: {category_name}")
+        logger.warning(f"分类已存在: {category_name}")
         return False
     finally:
         conn.close()
@@ -729,10 +731,10 @@ def delete_category(category_name: str):
         c.execute("UPDATE groups SET category = '未分类' WHERE category = ?", (category_name,))
         c.execute("DELETE FROM group_categories WHERE category_name = ?", (category_name,))
         conn.commit()
-        print(f"✅ 已删除分类: {category_name}")
+        logger.info(f"已删除分类: {category_name}")
         return True
     except Exception as e:
-        print(f"❌ 删除分类失败: {e}")
+        logger.error(f"删除分类失败: {e}")
         return False
     finally:
         conn.close()
@@ -782,7 +784,7 @@ def update_group_category_if_needed(group_id: str, group_name: str):
             c.execute("UPDATE groups SET category = ? WHERE group_id = ?", (country, group_id))
             conn.commit()
             conn.close()
-            print(f"✅ 自动分类：群组「{group_name}」已归类到「{country}」")
+            logger.info(f"自动分类：群组「{group_name}」已归类到「{country}」")
             return True
 
     return False
@@ -821,3 +823,23 @@ def set_user_preference(user_id: int, key: str, value):
                   (int(value), now, user_id))
     conn.commit()
     conn.close()
+
+# 在文件末尾添加这个函数（在最后一个函数定义之后）：
+
+@contextmanager
+def safe_db_connection(db_path: str = DB_PATH):
+    """安全的数据库连接，确保异常时也能关闭"""
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        yield conn
+    except Exception as e:
+        logger.error(f"数据库操作失败: {e}")
+        raise
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
