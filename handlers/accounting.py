@@ -4316,14 +4316,16 @@ async def handle_keyboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """记账功能 - 键盘版"""
     from telegram import ReplyKeyboardMarkup, KeyboardButton
 
-    keyboard = [[KeyboardButton("◀️ 返回主菜单")]]
+    user_id = update.effective_user.id
+
+    # 🔥 两个普通键盘按钮
+    keyboard = [
+        [KeyboardButton("➕ 添加机器人到群组"), KeyboardButton("◀️ 返回主菜单")]
+    ]
 
     message = (
         "📒 **记账功能说明**\n\n"
-
-        # 🔥 添加这个超链接
-        f"➕ **[点击这里添加机器人到你的群组](https://t.me/jizhangtextjibot?startgroup=start)**\n\n"
-
+        "点击下方按钮添加机器人到群组\n\n"
         "💰 **入款操作**\n"
         "`+1000` 普通入款\n"
         "`+1000 德国` 带分类\n"
