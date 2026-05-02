@@ -8,6 +8,7 @@ import sqlite3
 import os
 import time
 from typing import Dict, Optional
+from logger import bot_logger as logger
 
 # 连接缓存: key = admin_id (0 表示主库)
 _connections: Dict[int, sqlite3.Connection] = {}
@@ -212,7 +213,7 @@ def init_admin_db(admin_id: int):
     conn.execute("INSERT OR IGNORE INTO group_categories (category_name, created_at) VALUES ('未分类', ?)", (now,))
     conn.commit()
     conn.close()
-    print(f"✅ 已创建管理员 {admin_id} 的独立数据库: {db_path}")
+    logger.info(f"已创建管理员 {admin_id} 的独立数据库: {db_path}")
 
 
 # ==================== 主数据库初始化 ====================
@@ -252,4 +253,4 @@ def init_master_db():
         );
     """)
     conn.commit()
-    print("✅ 主数据库初始化完成")
+    logger.info("主数据库初始化完成")
