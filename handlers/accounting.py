@@ -1977,8 +1977,7 @@ def _format_record_line(record: Dict) -> str:
 # --- 格式化账单函数 ---
 def format_bill_message(stats: Dict, records: List[Dict], title: str = "当前账单") -> str:
     """格式化账单消息"""
-    safe_title = title.replace('*', '').replace('_', '').replace('[', '').replace(']', '').replace('`', '')  # 🔥 添加这行
-    message = f"📊 **{safe_title}**\n\n"
+    message = f"📊 **{title}**\n\n"
 
     # 分离入款和出款记录
     income_records = [r for r in records if r['type'] == 'income']
@@ -2194,7 +2193,8 @@ async def handle_end_bill(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"✅ **账单已结束并保存！**\n\n{final_bill}\n\n"
             f"💡 提示：费率已重置为0%，汇率已重置为1 = 1 USDT\n"
-            f"可使用「设置手续费」和「设置汇率」重新配置"
+            f"可使用「设置手续费」和「设置汇率」重新配置",
+            parse_mode='Markdown'
         )
     else:
         await update.message.reply_text("❌ 结束账单失败")
@@ -2352,7 +2352,7 @@ async def handle_add_income(update: Update, context: ContextTypes.DEFAULT_TYPE,
             prefix += f" ({', '.join(temp_info)})"
 
         try:
-            await update.message.reply_text(f"{prefix} \n\n{message}")
+            await update.message.reply_text(f"{prefix} \n\n{message}", parse_mode='Markdown')
         except Exception as e:
             error_msg = str(e)
             if "ConnectError" in error_msg or "Timeout" in error_msg:
@@ -2399,7 +2399,7 @@ async def handle_add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE,
         prefix = f"✅ 已记录修正出款：-{abs(amount):.2f} USDT" if is_correction else f"✅ 已记录出款：{amount:.2f} USDT"
 
         try:
-            await update.message.reply_text(f"{prefix}\n\n{message}")
+            await update.message.reply_text(f"{prefix}\n\n{message}", parse_mode='Markdown')
         except Exception as e:
             error_msg = str(e)
             if "ConnectError" in error_msg or "Timeout" in error_msg:
@@ -2803,7 +2803,7 @@ async def handle_clear_current_confirm(update: Update, context: ContextTypes.DEF
         stats = accounting_manager.get_current_stats(group_id)
         records = accounting_manager.get_current_records(group_id)
         message = format_bill_message(stats, records, "当前账单")
-        await query.message.reply_text(message)
+        await query.message.reply_text(message, parse_mode='Markdown')
     else:
         await query.message.edit_text("❌ 清空失败，请稍后重试")
 
@@ -2863,7 +2863,7 @@ async def handle_clear_all_confirm(update: Update, context: ContextTypes.DEFAULT
         stats = accounting_manager.get_current_stats(group_id)
         records = accounting_manager.get_current_records(group_id)
         message = format_bill_message(stats, records, "当前账单")
-        await query.message.reply_text(message)
+        await query.message.reply_text(message, parse_mode='Markdown')
     else:
         await query.message.edit_text("❌ 清空失败，请稍后重试")
 
@@ -2924,7 +2924,7 @@ async def handle_remove_last_record(update: Update, context: ContextTypes.DEFAUL
     stats = accounting_manager.get_current_stats(group_id)
     records = accounting_manager.get_current_records(group_id)
     message = format_bill_message(stats, records, "当前账单")
-    await update.message.reply_text(message)
+    await update.message.reply_text(message, parse_mode='Markdown')
 
 async def handle_revoke_record(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """撤销账单 - 回复记账消息后调用"""
@@ -2991,13 +2991,14 @@ async def handle_revoke_record(update: Update, context: ContextTypes.DEFAULT_TYP
 
         await message.reply_text(
             f"✅ 已撤销{record_type_name}记录\n{detail_info}",
+            parse_mode='Markdown'
         )
 
         # 显示更新后的账单
         stats = accounting_manager.get_current_stats(group_id)
         records = accounting_manager.get_current_records(group_id)
         bill_message = format_bill_message(stats, records, "当前账单")
-        await message.reply_text(bill_message)
+        await message.reply_text(bill_message, parse_mode='Markdown')
     else:
         await message.reply_text("❌ 撤销失败，请稍后重试")
 
@@ -3623,12 +3624,14 @@ async def send_bill_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.edit_message_text(
             message,
             reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown",
             disable_web_page_preview=True
         )
     else:
         await update.message.reply_text(
             message,
             reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown",
             disable_web_page_preview=True
         )
 
@@ -4192,12 +4195,14 @@ async def handle_user_info_tracking(update: Update, context: ContextTypes.DEFAUL
                 f"🚨🚨 **用户信息变更提醒**\n\n"
                 f"用户 {old_name}\n"
                 f"已更新{change_type}为：\n"
-                f"{new_name}"
+                f"{new_name}",
+                parse_mode='Markdown'
             )
         else:
             await update.message.reply_text(
                 f"🚨🚨 **用户信息变更提醒**\n\n"
-                f"用户 {old_name} → {new_name}"
+                f"用户 {old_name} → {new_name}",
+                parse_mode='Markdown'
             )
 
 async def welcome_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
