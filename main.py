@@ -8,6 +8,7 @@ except ImportError:
     pass  # 服务器环境，使用默认 sqlite3
 
 import asyncio
+import re
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
@@ -113,6 +114,7 @@ def get_input_cancel_keyboard():
 ALL_KNOWN_BUTTONS = {
     # 主菜单
     "📒 记账", "🔔 USDT监控", "📢 群发", "💰 USDT查询",
+    "➕ 添加机器人到群组",
     "👤 操作人管理", "🔄 互转查询", "📁 群组管理",
     # 监控
     "➕ 添加监控地址", "📋 监控列表", "📊 月度统计", "❌ 删除监控地址",
@@ -148,6 +150,19 @@ async def keyboard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     print(f"[KEYBOARD] 收到按钮: {text}")
+
+    # 🔥 处理"添加机器人到群组"按钮
+    if text == "➕ 添加机器人到群组":
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        keyboard = [
+            [InlineKeyboardButton("🤖 点击这里添加机器人到群组", url="https://t.me/ChainLedgerBot?startgroup=start")]
+        ]
+        await update.message.reply_text(
+            "👇 点击下方按钮，选择要添加的群组：\n\n"
+            "添加后即可在群组中使用记账功能",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return
 
     # ==================== 返回主菜单 ====================
     if text == "◀️ 返回主菜单":
@@ -580,7 +595,6 @@ async def module_input_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 # ==================== AI 对话处理器 (group=2) ====================
-
 async def ai_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理 AI 对话 - group=2，最低优先级"""
     chat = update.effective_chat
@@ -589,21 +603,32 @@ async def ai_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat.type != 'private':
         return
 
-    # 检查个人中心输入标志，有则拦截并清除标志
+    # 检查个人中心输入标志
     if context.user_data.pop("profile_input_state", False):
         return
 
-    # ✅ 终极防御：如果消息已被其他模块处理，绝对不进入 AI
     if context.user_data.get("_message_handled"):
-        context.user_data.pop("_message_handled", None) # 清理标记
+        context.user_data.pop("_message_handled", None)
         return
-        
+
     text = update.message.text.strip() if update.message.text else ""
 
     if text in ALL_KNOWN_BUTTONS or text.startswith('/'):
         return
 
-    # ✅ 只要存在任何模块状态，就不进入 AI 对话
+    # 🔥 检查是否是记账命令，如果是则跳过AI处理
+    accounting_patterns = [
+        r'^[+-]\d',  # +100 或 -100
+        r'^下发',     # 下发100u
+        r'^设置(手续费|汇率|单笔费用)',
+        r'^(今日总|总|当前账单|查询账单|导出账单|清理账单|清空账单|清理总账单|清空总账单|清空所有账单|移除上一笔|删除上一笔|撤销账单|结束账单)$'
+    ]
+
+    for pattern in accounting_patterns:
+        if re.match(pattern, text):
+            return  # 让记账处理器处理
+
+    # 检查是否有模块状态
     if any([
         context.user_data.get("active_module"),
         context.user_data.get("monitor_action"),
@@ -619,13 +644,31 @@ async def ai_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id in user_states:
         return
 
-    # 检查互转查询地址格式
-    import re
+    # 检查地址格式
     if re.match(r'^T[0-9A-Za-z]{33}\s+T[0-9A-Za-z]{33}$', text):
         return
 
     if not text:
         return
+
+    # 🔥 如果正在AI思考中，允许发送新消息来打断/切换
+    # 检查是否有正在进行的AI请求
+    current_ai_task = context.user_data.get("_ai_task")
+    if current_ai_task and not current_ai_task.done():
+        # 取消当前的AI请求
+        current_ai_task.cancel()
+        try:
+            await current_ai_task
+        except asyncio.CancelledError:
+            pass
+
+        # 删除思考中的消息
+        thinking_msg_id = context.user_data.get("_ai_thinking_msg_id")
+        if thinking_msg_id:
+            try:
+                await context.bot.delete_message(chat_id=user_id, message_id=thinking_msg_id)
+            except:
+                pass
 
     print(f"[AI_CHAT] 进入 AI 对话: {text[:50]}")
 
@@ -635,15 +678,30 @@ async def ai_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     thinking_msg = await update.message.reply_text("🤔 思考中...")
 
-    try:
-        ai_client = get_ai_client()
-        reply = await ai_client.chat_with_data(text, user_id=user_id)
-        if len(reply) > 4000:
-            reply = reply[:4000] + "...\n\n(回复过长已截断)"
-        await thinking_msg.edit_text(reply)
-    except Exception as e:
-        print(f"[DEBUG] AI 调用失败: {e}")
-        await thinking_msg.edit_text(f"❌ AI 服务出错: {str(e)[:100]}")
+    # 保存思考消息ID，以便后续取消
+    context.user_data["_ai_thinking_msg_id"] = thinking_msg.message_id
+
+    # 🔥 创建异步任务，不阻塞其他消息
+    async def ai_task():
+        try:
+            ai_client = get_ai_client()
+            reply = await ai_client.chat_with_data(text, user_id=user_id)
+            if len(reply) > 4000:
+                reply = reply[:4000] + "...\n\n(回复过长已截断)"
+            await thinking_msg.edit_text(reply)
+        except asyncio.CancelledError:
+            # 任务被取消，不处理
+            pass
+        except Exception as e:
+            print(f"[DEBUG] AI 调用失败: {e}")
+            try:
+                await thinking_msg.edit_text(f"❌ AI 服务出错: {str(e)[:100]}")
+            except:
+                pass
+
+    # 创建异步任务
+    task = asyncio.create_task(ai_task())
+    context.user_data["_ai_task"] = task
 
 
 # ==================== 菜单显示函数 ====================
@@ -1456,7 +1514,8 @@ def main():
     from handlers.accounting import init_accounting, handle_group_message
     init_accounting(DB_PATH)
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    # 🔥 关键修改：使用 concurrent_updates 支持并发处理
+    app = Application.builder().token(BOT_TOKEN).concurrent_updates(True).build()
 
     async def force_clean_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
