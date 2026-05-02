@@ -1059,7 +1059,7 @@ async def analyze_transfer_relation(addr_a: str, addr_b: str) -> str:
 
 async def get_transfer_volume(addr_a: str, addr_b: str) -> str:
     """两地址间交易总额"""
-    from handlers.transfer import get_trc20_transfers
+    from handlers.transfer import get_trc20_transfers_sync
 
     history = get_trc20_transfers(addr_a, limit=200)
 
