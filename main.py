@@ -42,7 +42,9 @@ from handlers.profile import (
     SET_SIGNATURE, FEEDBACK
 )
 
-from datetime import datetime, timedelta, timezone   # 新增这一行
+from datetime import datetime, timedelta, timezone
+from logger import bot_logger as logger
+from telegram.error import TimedOut, RetryAfter, NetworkError, BadRequest, Forbidden
 
 
 # ==================== 辅助键盘函数 ====================
@@ -150,7 +152,7 @@ async def keyboard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text not in ALL_KNOWN_BUTTONS:
         return
 
-    print(f"[KEYBOARD] 收到按钮: {text}")
+    logger.debug(f"[KEYBOARD] 收到按钮: {text}")
 
     # 🔥 处理"添加机器人到群组"按钮
     if text == "➕ 添加机器人到群组":
@@ -671,7 +673,7 @@ async def ai_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except:
                 pass
 
-    print(f"[AI_CHAT] 进入 AI 对话: {text[:50]}")
+    logger.info(f"进入 AI 对话: {text[:50]}")
 
     if not is_authorized(user_id, require_full_access=True):
         await update.message.reply_text("❌ AI 对话功能仅限管理员和操作员使用\n\n如需使用，请联系 @ChinaEdward 申请权限")
@@ -793,8 +795,8 @@ async def handle_transfer_query_input(update: Update, context: ContextTypes.DEFA
 
     from handlers.transfer import get_trc20_transfers
 
-    history_a = get_trc20_transfers(addr_a, limit=200)
-    history_b = get_trc20_transfers(addr_b, limit=200)
+    history_a = await get_trc20_transfers(addr_a, limit=200)   # ✅ 添加 await
+    history_b = await get_trc20_transfers(addr_b, limit=200)   # ✅ 添加 await
 
     matches = []
     for tx in history_a:
@@ -849,8 +851,8 @@ async def handle_transfer_analysis_input(update: Update, context: ContextTypes.D
 
     from handlers.transfer import get_trc20_transfers, extract_counterparties
 
-    history_a = get_trc20_transfers(addr_a, limit=200)
-    history_b = get_trc20_transfers(addr_b, limit=200)
+    history_a = await get_trc20_transfers(addr_a, limit=200)   # ✅ 添加 await
+    history_b = await get_trc20_transfers(addr_b, limit=200)   # ✅ 添加 await
 
     set_a = extract_counterparties(history_a, addr_a)
     set_b = extract_counterparties(history_b, addr_b)
@@ -1041,7 +1043,7 @@ async def show_group_list_inline(update: Update, context: ContextTypes.DEFAULT_T
             await message.reply_text(text, reply_markup=reply_markup, parse_mode=None)
     except Exception as e:
         # 编辑失败（可能是消息内容问题），回退到删除原消息并发送新消息
-        print(f"编辑消息失败，回退到删除重发: {e}")
+        logger.warning(f"编辑消息失败，回退到删除重发: {e}")
         try:
             if update.callback_query:
                 await update.callback_query.message.delete()
@@ -1059,7 +1061,13 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     data = query.data
-    print(f"[BUTTON_ROUTER] 收到: {data}")
+    logger.debug(f"[BUTTON_ROUTER] 收到: {data}")
+
+    # ===== ✅ 新增：处理查看当前账单 =====
+    if data == "view_current_bill":
+        from handlers.accounting import handle_view_current_bill
+        await handle_view_current_bill(update, context)
+        return
 
     if data.startswith("profile_"):
         return
@@ -1304,7 +1312,7 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.edit_text("✅ 已取消")
         return
 
-    print(f"[BUTTON_ROUTER] 未处理: {data}")
+    logger.warning(f"[BUTTON_ROUTER] 未处理: {data}")
 
 
 # ==================== 原有函数保留 ====================
@@ -1336,7 +1344,7 @@ async def auto_classify_all_groups_on_startup(app: Application):
         if group.get('category', '未分类') == '未分类':
             if update_group_category_if_needed(group['id'], group['title']):
                 classified_count += 1
-    print(f"[自动分类] 完成！自动分类了 {classified_count} 个群组")
+    logger.info(f"[自动分类] 完成！自动分类了 {classified_count} 个群组")
 
 
 async def on_bot_join_or_leave(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1473,9 +1481,9 @@ async def send_daily_reports(app: Application):
         report += f"\n📌 由记账机器人自动生成"
         try:
             await app.bot.send_message(chat_id=uid, text=report, parse_mode="Markdown")
-            print(f"✅ 早报已发送至 {uid}")
+            logger.info(f"早报已发送至 {uid}")
         except Exception as e:
-            print(f"❌ 发送早报失败 {uid}: {e}")
+            logger.error(f"发送早报失败 {uid}: {e}")
 
 async def daily_report_loop(app: Application):
     await asyncio.sleep(30)
@@ -1488,7 +1496,7 @@ async def daily_report_loop(app: Application):
             try:
                 await send_daily_reports(app)
             except Exception as e:
-                print(f"❌ 每日早报发送失败: {e}")
+                logger.error(f"每日早报发送失败: {e}")
         elif beijing_now.hour != 9:
             sent_today = False
         await asyncio.sleep(60)
@@ -1517,6 +1525,78 @@ def main():
 
     # 🔥 关键修改：使用 concurrent_updates 支持并发处理
     app = Application.builder().token(BOT_TOKEN).concurrent_updates(True).build()
+
+    # ===== 新增：全局错误处理器 =====
+    async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """全局错误处理器，处理限流、超时等异常"""
+        error = context.error
+
+        # 获取基本信息用于日志
+        chat_id = "未知"
+        user_id = "未知"
+        if update and hasattr(update, 'effective_chat') and update.effective_chat:
+            chat_id = update.effective_chat.id
+        if update and hasattr(update, 'effective_user') and update.effective_user:
+            user_id = update.effective_user.id
+
+        if isinstance(error, RetryAfter):
+            # Telegram 限流：等待指定时间后会自动重试
+            wait_seconds = error.retry_after
+            logger.warning(
+                f"触发 Telegram 限流 | 用户: {user_id} | 群组: {chat_id} | "
+                f"等待 {wait_seconds} 秒"
+            )
+            await asyncio.sleep(wait_seconds + 0.5)
+
+        elif isinstance(error, TimedOut):
+            # 请求超时：通常是网络问题，Telegram 会自动重试
+            logger.warning(
+                f"请求超时 | 用户: {user_id} | 群组: {chat_id} | "
+                f"错误: {error}"
+            )
+
+        elif isinstance(error, NetworkError):
+            # 网络错误：暂时性网络问题
+            logger.warning(
+                f"网络错误 | 用户: {user_id} | 群组: {chat_id} | "
+                f"错误: {error}"
+            )
+
+        elif isinstance(error, BadRequest):
+            # 请求格式错误：消息内容问题
+            error_msg = str(error)
+            logger.error(
+                f"请求格式错误 | 用户: {user_id} | 群组: {chat_id} | "
+                f"错误: {error_msg[:200]}"
+            )
+            # 如果是消息太长，尝试通知用户
+            if "message is too long" in error_msg.lower():
+                try:
+                    if update and hasattr(update, 'effective_chat') and update.effective_chat:
+                        await context.bot.send_message(
+                            chat_id=update.effective_chat.id,
+                            text="❌ 消息内容过长，请尝试减少内容后重试"
+                        )
+                except Exception:
+                    pass
+
+        elif isinstance(error, Forbidden):
+            # 权限错误：机器人被踢出群组等
+            logger.warning(
+                f"权限错误（可能已被踢出群组）| 群组: {chat_id} | "
+                f"错误: {error}"
+            )
+
+        else:
+            # 未预期的错误
+            logger.error(
+                f"未处理异常 | 用户: {user_id} | 群组: {chat_id}",
+                exc_info=error
+            )
+
+    # 注册错误处理器
+    app.add_error_handler(global_error_handler)
+    logger.info("全局错误处理器已注册")
 
     async def force_clean_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
@@ -1652,15 +1732,15 @@ def main():
                     await monitor.check_address_transactions(ctx)
                     await asyncio.sleep(30)
                 except Exception as e:
-                    print(f"⚠️ 监控检查失败: {e}")
+                    logger.warning(f"监控检查失败: {e}")
                     await asyncio.sleep(30)
         asyncio.create_task(monitor_check_loop())
 
     app.post_init = post_init
 
-    print("=" * 50)
-    print("🤖 机器人启动成功...")
-    print("=" * 50)
+    logger.info("=" * 50)
+    logger.info("机器人启动成功...")
+    logger.info("=" * 50)
 
     app.run_polling()
 
