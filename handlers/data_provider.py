@@ -8,6 +8,7 @@ from typing import Dict, List, Any, Optional
 from db import DB_PATH, get_all_groups_from_db, get_monitored_addresses
 from handlers.accounting import accounting_manager
 from auth import list_operators, OWNER_ID
+from logger import bot_logger as logger
 
 # 北京时间时区
 BEIJING_TZ = timezone(timedelta(hours=8))
@@ -385,7 +386,7 @@ class DataProvider:
         active_groups = []
         today = beijing_now().strftime('%Y-%m-%d')
 
-        print(f"[DEBUG] get_today_active_groups - 今日日期: {today}")
+        logger.debug(f"get_today_active_groups - 今日日期: {today}")
 
         for group in groups:
             try:
@@ -405,9 +406,9 @@ class DataProvider:
                         "income_count": income_count,
                         "expense_count": expense_count
                     })
-                    print(f"[DEBUG] 活跃群组: {group['title']}, 入款: {income_count}笔, 出款: {expense_count}笔")
+                    logger.debug(f"活跃群组: {group['title']}, 入款: {income_count}笔, 出款: {expense_count}笔")
             except Exception as e:
-                print(f"[DEBUG] 获取群组 {group['title']} 今日记录失败: {e}")
+                logger.debug(f"获取群组 {group['title']} 今日记录失败: {e}")
                 pass
 
         active_groups.sort(key=lambda x: x['income_usdt'], reverse=True)
@@ -1161,7 +1162,7 @@ class DataProvider:
         month_start = now.replace(day=1, hour=0, minute=0, second=0)
         start_ts = int(month_start.timestamp())
 
-        print(f"[DEBUG] 本月开始时间戳: {start_ts}, 日期: {month_start}")  # 添加
+        logger.debug(f"本月开始时间戳: {start_ts}, 日期: {month_start}")
 
         group_details = []
         total_income_usdt = 0
@@ -1170,10 +1171,10 @@ class DataProvider:
         for group in groups:
             try:
                 records = accounting_manager.get_total_records(group['id'])
-                print(f"[DEBUG] 群组 {group['title']} 总记录数: {len(records)}")  # 添加
+                logger.debug(f"群组 {group['title']} 总记录数: {len(records)}")
 
                 month_records = [r for r in records if r.get('created_at', 0) >= start_ts and r['type'] == 'income']
-                print(f"[DEBUG] 群组 {group['title']} 本月入款记录数: {len(month_records)}")  # 添加
+                logger.debug(f"群组 {group['title']} 本月入款记录数: {len(month_records)}")
 
                 if month_records:
                     income_usdt = sum(r['amount_usdt'] for r in month_records)
