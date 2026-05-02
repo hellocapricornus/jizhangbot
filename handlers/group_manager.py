@@ -8,6 +8,7 @@ from db import (
     get_all_groups_from_db, get_all_categories, update_group_category, 
     add_category, delete_category, get_groups_by_category
 )
+from logger import bot_logger as logger
 
 # 存储用户输入状态的字典
 user_states = {}
@@ -40,14 +41,14 @@ async def cleanup_expired_states():
                 expired_users.append(user_id)
         for user_id in expired_users:
             del user_states[user_id]
-            print(f"[清理] 已清除用户 {user_id} 的过期状态")
+            logger.info(f"已清除用户 {user_id} 的过期状态")
 
 async def group_manager_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """群组管理主菜单"""
     query = update.callback_query
     user_id = query.from_user.id
 
-    print(f"[DEBUG] group_manager_menu 被调用")
+    logger.debug(f"group_manager_menu 被调用")
 
     if not is_authorized(user_id, require_full_access=True):
         await query.answer("❌ 无权限", show_alert=True)
@@ -85,9 +86,9 @@ async def group_manager_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="Markdown"
         )
-        print(f"[DEBUG] 菜单显示成功")
+        logger.debug(f"菜单显示成功")
     except Exception as e:
-        print(f"[DEBUG] 菜单显示失败: {e}")
+        logger.debug(f"菜单显示失败: {e}")
         await query.message.reply_text(
             text,
             reply_markup=InlineKeyboardMarkup(keyboard),
@@ -557,7 +558,7 @@ async def set_group_category(update: Update, context: ContextTypes.DEFAULT_TYPE)
     category_name = data_parts[0]
     group_id = data_parts[1]
     await query.answer()
-    print(f"[DEBUG] set_group_category: {category_name} for {group_id}")
+    logger.debug(f"set_group_category: {category_name} for {group_id}")
 
     if update_group_category(group_id, category_name):
         # 获取群组信息
@@ -591,7 +592,7 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     text = message.text.strip()
 
-    print(f"[DEBUG] handle_text_input 收到: {message.text}, user_id: {user_id}")
+    logger.debug(f"handle_text_input 收到: {message.text}, user_id: {user_id}")
 
     if user_id not in user_states:
         return
@@ -707,11 +708,11 @@ async def add_category_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_cancel_in_group_manager(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """群组管理专用的取消处理"""
     user_id = update.effective_user.id
-    print(f"[DEBUG] handle_cancel_in_group_manager 被调用, user_id: {user_id}")
+    logger.debug(f"handle_cancel_in_group_manager 被调用, user_id: {user_id}")
 
     # 清除状态
     if user_id in user_states:
-        print(f"[DEBUG] 清除 user_states[{user_id}], 当前状态: {user_states[user_id]}")
+        logger.debug(f"清除 user_states[{user_id}], 当前状态: {user_states[user_id]}")
         del user_states[user_id]
 
     # ✅ 同时清除 active_module
@@ -743,7 +744,7 @@ async def skip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理 /skip 命令"""
     user_id = update.effective_user.id
 
-    print(f"[DEBUG] skip_command 被调用, user_id: {user_id}")
+    logger.debug(f"skip_command 被调用, user_id: {user_id}")
 
     # 检查是否在群组管理状态
     if user_id not in user_states:
