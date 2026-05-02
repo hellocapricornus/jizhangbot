@@ -11,6 +11,7 @@ from db import (
     get_monitored_addresses, add_monitored_address, remove_monitored_address,
     update_address_last_check, add_transaction_record, is_tx_notified, mark_tx_notified, get_db_connection, get_user_preferences
 )
+from logger import bot_logger as logger
 
 # 状态定义
 MONITOR_MENU = 0
@@ -41,7 +42,7 @@ async def get_address_balance(address: str) -> float:
                         if USDT_CONTRACT in token:
                             return int(token[USDT_CONTRACT]) / 1_000_000
     except Exception as e:
-        print(f"查询余额失败: {e}")
+        logger.error(f"查询余额失败: {e}")
     return 0.0
 
 async def get_monthly_stats(address: str) -> dict:
@@ -82,7 +83,7 @@ async def get_monthly_stats(address: str) -> dict:
                         elif from_addr == address:
                             total_sent += amount
     except Exception as e:
-        print(f"查询月度统计失败: {e}")
+        logger.error(f"查询月度统计失败: {e}")
     
     return {
         "received": total_received,
@@ -117,13 +118,13 @@ async def get_trc20_transactions(address: str, min_timestamp: int = 0, limit: in
                         data = await resp.json()
                         return data.get("data", [])
                     else:
-                        print(f"API返回错误状态码: {resp.status}")
+                        logger.warning(f"API返回错误状态码: {resp.status}")
                         return []
         except asyncio.CancelledError:
-            print(f"请求被取消: {address}")
+            logger.info(f"请求被取消: {address}")
             return []
         except Exception as e:
-            print(f"查询交易失败 (尝试 {attempt+1}/{max_retries}): {e}")
+            logger.warning(f"查询交易失败 (尝试 {attempt+1}/{max_retries}): {e}")
             if attempt < max_retries - 1:
                 await asyncio.sleep(retry_delay)
             else:
@@ -135,10 +136,10 @@ async def check_address_transactions(context: ContextTypes.DEFAULT_TYPE):
     """定时检查监控地址的交易 - 并发版本"""
     addresses = get_monitored_addresses()
     if not addresses:
-        print("📭 没有监控地址，跳过检查")
+        logger.info("没有监控地址，跳过检查")
         return
 
-    print(f"🔍 开始检查 {len(addresses)} 个监控地址")
+    logger.info(f"开始检查 {len(addresses)} 个监控地址")
     bot = context.bot
 
     # 控制并发数，避免 API 限流
@@ -169,7 +170,7 @@ async def _check_single_address(addr_info, bot):
     # 确定查询起始时间
     if last_check == 0:
         min_timestamp = added_at * 1000
-        print(f"  新监控地址 {address[:8]}...，从添加时间开始检查")
+        logger.info(f"新监控地址 {address[:8]}...，从添加时间开始检查")
     else:
         min_timestamp = last_check * 1000
 
@@ -181,7 +182,7 @@ async def _check_single_address(addr_info, bot):
         update_address_last_check(address, int(time.time()))
         return
 
-    print(f"  地址 {address[:8]}... 发现 {len(txs)} 笔新交易")
+    logger.info(f"地址 {address[:8]}... 发现 {len(txs)} 笔新交易")
 
     # 获取当前余额和月度统计（仅在需要发送通知时获取，以节省API调用）
     current_balance = None
@@ -206,7 +207,7 @@ async def _check_single_address(addr_info, bot):
 
         # 跳过添加时间之前的历史交易
         if last_check == 0 and timestamp < added_at:
-            print(f"    跳过添加前的历史交易: {tx_id[:10]}...")
+            logger.debug(f"跳过添加前的历史交易: {tx_id[:10]}...")
             mark_tx_notified(tx_id)
             continue
 
@@ -266,9 +267,9 @@ async def _check_single_address(addr_info, bot):
 
             try:
                 await bot.send_message(chat_id=added_by, text=message, parse_mode="Markdown")
-                print(f"✅ 已发送监控通知给用户 {added_by} (备注: {note or '无'})")
+                logger.info(f"已发送监控通知给用户 {added_by} (备注: {note or '无'})")
             except Exception as e:
-                print(f"发送给用户 {added_by} 失败: {e}")
+                logger.error(f"发送给用户 {added_by} 失败: {e}")
 
         # 无论是否发送通知，都标记为已通知，避免下次重复处理
         mark_tx_notified(tx_id)
