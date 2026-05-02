@@ -1947,7 +1947,7 @@ def is_valid_address(text: str) -> tuple:
 def _format_record_line(record: Dict) -> str:
     """格式化单条记录"""
     dt = beijing_time(record['created_at'])
-    time_str = dt.strftime('%H:%M')
+    time_str = dt.strftime('%m-%d %H:%M')
     amount = record['amount']
     amount_usdt = record['amount_usdt']
     rate = record.get('rate', 0)
@@ -2008,7 +2008,7 @@ def format_bill_message(stats: Dict, records: List[Dict], title: str = "当前�
         if no_category_records:
             for r in no_category_records[:MAX_DISPLAY_RECORDS]:
                 dt = beijing_time(r['created_at'])
-                time_str = dt.strftime('%H:%M')
+                time_str = dt.strftime('%m-%d %H:%M')
                 amount = r['amount']
                 amount_usdt = r['amount_usdt']
 
@@ -2043,7 +2043,7 @@ def format_bill_message(stats: Dict, records: List[Dict], title: str = "当前�
             # 显示该分组下的具体记录
             for r in group_sorted[:MAX_DISPLAY_RECORDS]:
                 dt = beijing_time(r['created_at'])
-                time_str = dt.strftime('%H:%M')
+                time_str = dt.strftime('%m-%d %H:%M')
                 amount = r['amount']
                 amount_usdt = r['amount_usdt']
 
@@ -2088,7 +2088,7 @@ def format_bill_message(stats: Dict, records: List[Dict], title: str = "当前�
 
         for r in display_expense:
             dt = beijing_time(r['created_at'])
-            time_str = dt.strftime('%H:%M')
+            time_str = dt.strftime('%m-%d %H:%M')
             amount = r['amount']
             amount_usdt = r['amount_usdt']
             operator = r.get('display_name', '未知用户')
@@ -3460,7 +3460,7 @@ async def send_bill_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if no_category_records:
             for r in no_category_records:
                 dt = beijing_time(r['created_at'])
-                time_str = dt.strftime('%H:%M')
+                time_str = dt.strftime('%m-%d %H:%M')
                 fee_rate = r.get('fee_rate', 0)
                 rate = r.get('rate', 0)
                 fee_info = format_fee_info(fee_rate, rate)
@@ -3477,7 +3477,7 @@ async def send_bill_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
             message += f"{display_category} ({len(group_records)} 笔)\n"
             for r in group_records:
                 dt = beijing_time(r['created_at'])
-                time_str = dt.strftime('%H:%M')
+                time_str = dt.strftime('%m-%d %H:%M')
                 fee_rate = r.get('fee_rate', 0)
                 rate = r.get('rate', 0)
                 fee_info = format_fee_info(fee_rate, rate)
@@ -3498,7 +3498,7 @@ async def send_bill_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message += f"📉 **出款 {len(expense_records)} 笔**\n"
         for r in expense_records:
             dt = beijing_time(r['created_at'])
-            time_str = dt.strftime('%H:%M')
+            time_str = dt.strftime('%m-%d %H:%M')
             amount_usdt = r['amount_usdt']
             display_name = r.get('display_name', '未知用户')
             user_id = r.get('user_id')
