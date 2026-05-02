@@ -137,6 +137,7 @@ ALL_KNOWN_BUTTONS = {
 
 async def keyboard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理固定键盘按钮点击 - group=0，最高优先级"""
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
     chat = update.effective_chat
     user_id = update.effective_user.id
 
