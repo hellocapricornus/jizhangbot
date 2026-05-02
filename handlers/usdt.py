@@ -3,6 +3,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from datetime import datetime
 from auth import is_authorized
+from logger import bot_logger as logger
 
 USDT_CONTRACT_ADDR = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
 PAGE_SIZE = 5
@@ -61,7 +62,7 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await send_trx_usdt_page(update, context)
 
     except Exception as e:
-        print("❗ USDT 查询异常:", e)
+        logger.error("❗ USDT 查询异常:", e)
         await update.message.reply_text("❌ 查询失败，请稍后再试")
         context.user_data.pop("active_module", None)
         context.user_data.pop("usdt_session", None)
