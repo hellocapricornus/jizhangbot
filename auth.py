@@ -215,6 +215,10 @@ def remove_operator(user_id: int) -> bool:
         with _safe_db_connection() as conn:
             c = conn.cursor()
             c.execute("DELETE FROM operators WHERE user_id = ?", (str(user_id),))
+
+            # ✅ 清除该用户的个性化配置
+            c.execute("DELETE FROM user_config WHERE user_id = ?", (user_id,))
+
             conn.commit()
         logger.info(f"[DB] 操作员 {user_id} 已从数据库移除。")
         return True
@@ -399,6 +403,10 @@ def remove_temp_operator(user_id: int) -> bool:
         with _safe_db_connection() as conn:
             c = conn.cursor()
             c.execute("DELETE FROM temp_operators WHERE user_id = ?", (str(user_id),))
+
+            # ✅ 清除该用户的个性化配置
+            c.execute("DELETE FROM user_config WHERE user_id = ?", (user_id,))
+
             conn.commit()
         logger.info(f"[DB] 临时操作员 {user_id} 已从数据库移除。")
         return True
@@ -436,3 +444,36 @@ def is_admin(user_id: int) -> bool:
 def is_operator_or_temp(user_id: int) -> bool:
     """控制人、正式操作员或临时操作员"""
     return is_authorized(user_id, require_full_access=False)
+
+async def batch_add_temp_operators(user_ids: list, added_by: int, context = None):
+    """批量添加临时操作人"""
+    results = {"success": [], "failed": [], "already_exists": []}
+
+    for user_id in user_ids:
+        if user_id in temp_operators or user_id in operators:
+            results["already_exists"].append(user_id)
+        else:
+            success = await add_temp_operator(user_id, added_by, context)
+            if success:
+                results["success"].append(user_id)
+            else:
+                results["failed"].append(user_id)
+
+    return results
+
+
+def batch_remove_temp_operators(user_ids: list):
+    """批量删除临时操作人"""
+    results = {"success": [], "failed": [], "not_found": []}
+
+    for user_id in user_ids:
+        if user_id not in temp_operators:
+            results["not_found"].append(user_id)
+        else:
+            success = remove_temp_operator(user_id)
+            if success:
+                results["success"].append(user_id)
+            else:
+                results["failed"].append(user_id)
+
+    return results
