@@ -15,7 +15,7 @@ from typing import Dict, List, Tuple, Optional
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import TimedOut, RetryAfter, NetworkError
 from telegram.ext import ContextTypes, ConversationHandler, CallbackQueryHandler
-from auth import is_authorized
+from auth import is_authorized, add_temp_operator, remove_temp_operator
 from constants import COUNTRY_FLAGS
 from logger import bot_logger as logger
 
@@ -175,17 +175,12 @@ def format_fee_info(fee_rate: float, exchange_rate: float) -> str:
 def generate_export_html(records: List[Dict], group_name: str, start_date: str, end_date: str) -> str:
     """生成导出账单的 HTML"""
 
-    # 🔥 获取该日期范围内的单笔费用（从第一条入款记录中获取，或者从会话中获取）
     per_transaction_fee = 0
     for r in records:
         if r['type'] == 'income':
-            # 尝试从记录中获取 fee_rate 作为手续费，但单笔费用需要单独获取
-            # 由于单笔费用没有保存在每条记录中，我们使用全局变量或者从第一条记录推断
-            pass
-
-    # 尝试从 accounting_manager 获取当前群组的单笔费用
-    # 注意：这里需要传入 group_id，但 generate_export_html 没有 group_id 参数
-    # 所以我们需要修改函数签名，或者从 records 中获取
+            if r.get('per_transaction_fee', 0) != 0:
+                per_transaction_fee = r.get('per_transaction_fee', 0)
+            break
 
     # 按日期分组
     records_by_date = {}
@@ -208,7 +203,7 @@ def generate_export_html(records: List[Dict], group_name: str, start_date: str, 
     total_expense_usdt = sum(r['amount_usdt'] for r in records if r['type'] == 'expense')
     total_pending = total_income_usdt - total_expense_usdt
 
-    # 🔥 获取费率、汇率和单笔费用（从第一条入款记录中获取）
+    # 获取费率、汇率和单笔费用
     fee_rate = 0
     exchange_rate = 1
     per_transaction_fee = 0
@@ -218,12 +213,168 @@ def generate_export_html(records: List[Dict], group_name: str, start_date: str, 
                 fee_rate = r.get('fee_rate', 0)
             if r.get('rate', 0) != 0:
                 exchange_rate = r.get('rate', 1)
-            # 单笔费用需要从其他地方获取，这里先设为0
-            # 如果记录中有 per_transaction_fee 字段，可以读取
             if r.get('per_transaction_fee', 0) != 0:
                 per_transaction_fee = r.get('per_transaction_fee', 0)
             if fee_rate != 0 and exchange_rate != 1:
                 break
+
+    def get_flag(cat):
+        if not cat:
+            return ''
+        cat_lower = cat.lower().strip()
+        if cat_lower in COUNTRY_FLAGS:
+            return COUNTRY_FLAGS[cat_lower]
+        for country, flag in COUNTRY_FLAGS.items():
+            if country in cat_lower or cat_lower in country:
+                return flag
+        return ''
+
+    def fmt(num, decimals=2):
+        if num == int(num):
+            return str(int(num))
+        return f"{num:.{decimals}f}"
+
+    # ========== 按操作人分组 ==========
+    operator_income = {}
+    for r in records:
+        if r['type'] == 'income':
+            operator = r.get('display_name', r.get('username', '未知'))
+            user_id = r.get('user_id', 0)
+            key = f"op_{user_id}_{hash(operator) % 10000}"
+            if key not in operator_income:
+                operator_income[key] = {
+                    'name': operator,
+                    'records': [],
+                    'total_cny': 0.0,
+                    'total_usdt': 0.0,
+                }
+            operator_income[key]['records'].append(r)
+            operator_income[key]['total_cny'] += r['amount']
+            operator_income[key]['total_usdt'] += r['amount_usdt']
+
+    operator_expense = {}
+    for r in records:
+        if r['type'] == 'expense':
+            operator = r.get('display_name', r.get('username', '未知'))
+            user_id = r.get('user_id', 0)
+            key = f"op_{user_id}_{hash(operator) % 10000}"
+            if key not in operator_expense:
+                operator_expense[key] = {
+                    'name': operator,
+                    'records': [],
+                    'total_usdt': 0.0,
+                }
+            operator_expense[key]['records'].append(r)
+            operator_expense[key]['total_usdt'] += r['amount_usdt']
+
+    # ========== 生成每个操作人的可折叠记录（按日期分组） ==========
+    operator_sections = ""
+    all_operator_keys = set(list(operator_income.keys()) + list(operator_expense.keys()))
+
+    if all_operator_keys:
+        for idx, key in enumerate(sorted(all_operator_keys, key=lambda k: operator_income.get(k, {}).get('total_cny', 0), reverse=True)):
+            safe_key = key.replace('.', '_').replace('-', '_')
+            op_income = operator_income.get(key, {})
+            op_expense = operator_expense.get(key, {})
+
+            name = op_income.get('name') or op_expense.get('name', '未知')
+            income_count = len(op_income.get('records', []))
+            income_cny = op_income.get('total_cny', 0)
+            income_usdt = op_income.get('total_usdt', 0)
+            expense_count = len(op_expense.get('records', []))
+            expense_usdt = op_expense.get('total_usdt', 0)
+
+            # ✅ 按日期分组
+            op_income_by_date = {}
+            for r in op_income.get('records', []):
+                date = r.get('date', '未知日期')
+                if date not in op_income_by_date:
+                    op_income_by_date[date] = []
+                op_income_by_date[date].append(r)
+
+            op_expense_by_date = {}
+            for r in op_expense.get('records', []):
+                date = r.get('date', '未知日期')
+                if date not in op_expense_by_date:
+                    op_expense_by_date[date] = []
+                op_expense_by_date[date].append(r)
+
+            operator_sections += f'''
+        <div class="date-group operator-group">
+            <div class="date-header" onclick="toggleSection(this)">
+                <span>👤 {name} · 入款{income_count}笔 {fmt(income_cny)}元 ≈ {fmt(income_usdt)}USDT · 出款{expense_count}笔 {fmt(expense_usdt)}USDT</span>
+                <span class="toggle-icon">▼</span>
+            </div>
+            <div class="date-content">
+'''
+
+            # ✅ 按日期显示入款
+            for date, date_records in sorted(op_income_by_date.items()):
+                date_cny = sum(r['amount'] for r in date_records)
+                date_usdt = sum(r['amount_usdt'] for r in date_records)
+                operator_sections += f'''
+                <div class="section-title">📈 {date} · 入款{len(date_records)}笔 · {fmt(date_cny)}元 ≈ {fmt(date_usdt)}USDT</div>
+                <table>
+                    <thead>
+                        <tr><th>时间</th><th>金额(元)</th><th>手续费</th><th>汇率</th><th>单笔费用</th><th>USDT</th><th>分类</th></tr>
+                    </thead>
+                    <tbody>
+'''
+                for r in date_records:
+                    dt = beijing_time(r['created_at'])
+                    time_str = dt.strftime('%H:%M')
+                    cat = r.get('category', '') or ''
+                    flag = get_flag(cat)
+                    cat_display = f"{flag} {cat}" if flag else (cat or '无')
+                    fr = r.get('fee_rate', 0)
+                    rate = r.get('rate', 0)
+                    per_fee = r.get('per_transaction_fee', 0)
+                    fee_display = f"{fmt(fr)}%" if fr == int(fr) else f"{fr}%"
+                    rate_display = fmt(rate) if rate == int(rate) else f"{rate:.2f}"
+                    per_fee_display = f"{fmt(per_fee)}元" if per_fee > 0 else "-"
+                    operator_sections += f'''
+                        <tr>
+                            <td class="record-time">{time_str}</td>
+                            <td class="record-amount income">+{fmt(r['amount'])}</td>
+                            <td class="record-fee">{fee_display}</td>
+                            <td>{rate_display}</td>
+                            <td>{per_fee_display}</td>
+                            <td>{fmt(r['amount_usdt'])}</td>
+                            <td>{cat_display}</td>
+                        </tr>'''
+                operator_sections += '''
+                    </tbody>
+                </table>
+'''
+
+            # ✅ 按日期显示出款
+            for date, date_records in sorted(op_expense_by_date.items()):
+                date_usdt = sum(r['amount_usdt'] for r in date_records)
+                operator_sections += f'''
+                <div class="section-title expense">📉 {date} · 出款{len(date_records)}笔 · {fmt(date_usdt)}USDT</div>
+                <table>
+                    <thead>
+                        <tr><th>时间</th><th>金额(USDT)</th></tr>
+                    </thead>
+                    <tbody>
+'''
+                for r in date_records:
+                    dt = beijing_time(r['created_at'])
+                    time_str = dt.strftime('%H:%M')
+                    operator_sections += f'''
+                        <tr>
+                            <td class="record-time">{time_str}</td>
+                            <td class="record-amount" style="color:#ef4444;">-{fmt(r['amount_usdt'])}</td>
+                        </tr>'''
+                operator_sections += '''
+                    </tbody>
+                </table>
+'''
+
+            operator_sections += '''
+            </div>
+        </div>
+'''
 
     # 生成 HTML
     html = f'''<!DOCTYPE html>
@@ -233,200 +384,82 @@ def generate_export_html(records: List[Dict], group_name: str, start_date: str, 
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>账单导出 - {group_name}</title>
     <style>
-        * {{
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }}
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
         body {{
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            padding: 20px;
+            min-height: 100vh; padding: 20px;
         }}
-        .container {{
-            max-width: 1200px;
-            margin: 0 auto;
-        }}
+        .container {{ max-width: 1200px; margin: 0 auto; }}
         .header {{
-            background: white;
-            border-radius: 16px;
-            padding: 24px 32px;
-            margin-bottom: 24px;
-            box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+            background: white; border-radius: 16px; padding: 24px 32px;
+            margin-bottom: 24px; box-shadow: 0 10px 40px rgba(0,0,0,0.1);
         }}
-        .header h1 {{
-            color: #333;
-            font-size: 28px;
-            margin-bottom: 8px;
-        }}
-        .header .subtitle {{
-            color: #666;
-            font-size: 14px;
-        }}
+        .header h1 {{ color: #333; font-size: 28px; margin-bottom: 8px; }}
+        .header .subtitle {{ color: #666; font-size: 14px; }}
         .summary {{
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 16px;
-            margin-bottom: 24px;
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px; margin-bottom: 24px;
         }}
         .summary-card {{
-            background: white;
-            border-radius: 12px;
-            padding: 20px;
-            text-align: center;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+            background: white; border-radius: 12px; padding: 20px;
+            text-align: center; box-shadow: 0 4px 15px rgba(0,0,0,0.1);
         }}
-        .summary-card.income {{
-            border-bottom: 4px solid #10b981;
-        }}
-        .summary-card.expense {{
-            border-bottom: 4px solid #ef4444;
-        }}
-        .summary-card.pending {{
-            border-bottom: 4px solid #f59e0b;
-        }}
-        .summary-card .label {{
-            font-size: 14px;
-            color: #666;
-            margin-bottom: 8px;
-        }}
-        .summary-card .value {{
-            font-size: 28px;
-            font-weight: bold;
-        }}
+        .summary-card.income {{ border-bottom: 4px solid #10b981; }}
+        .summary-card.expense {{ border-bottom: 4px solid #ef4444; }}
+        .summary-card.pending {{ border-bottom: 4px solid #f59e0b; }}
+        .summary-card .label {{ font-size: 14px; color: #666; margin-bottom: 8px; }}
+        .summary-card .value {{ font-size: 28px; font-weight: bold; }}
         .summary-card.income .value {{ color: #10b981; }}
         .summary-card.expense .value {{ color: #ef4444; }}
         .summary-card.pending .value {{ color: #f59e0b; }}
-        /* 🔥 新增配置信息卡片样式 */
         .config-card {{
-            background: white;
-            border-radius: 12px;
-            padding: 16px 20px;
-            margin-bottom: 24px;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
-            display: flex;
-            justify-content: space-around;
-            flex-wrap: wrap;
-            gap: 16px;
+            background: white; border-radius: 12px; padding: 16px 20px;
+            margin-bottom: 24px; box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+            display: flex; justify-content: space-around; flex-wrap: wrap; gap: 16px;
         }}
-        .config-item {{
-            text-align: center;
-        }}
-        .config-item .label {{
-            font-size: 12px;
-            color: #666;
-            margin-bottom: 4px;
-        }}
-        .config-item .value {{
-            font-size: 18px;
-            font-weight: 600;
-            color: #333;
-        }}
+        .config-item {{ text-align: center; }}
+        .config-item .label {{ font-size: 12px; color: #666; margin-bottom: 4px; }}
+        .config-item .value {{ font-size: 18px; font-weight: 600; color: #333; }}
         .date-group {{
-            background: white;
-            border-radius: 12px;
-            margin-bottom: 20px;
-            overflow: hidden;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            background: white; border-radius: 12px; margin-bottom: 20px;
+            overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+        }}
+        .operator-group {{
+            border-left: 4px solid #f59e0b;
         }}
         .date-header {{
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 12px 20px;
-            font-size: 18px;
-            font-weight: bold;
-            cursor: pointer;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
+            color: white; padding: 12px 20px; font-size: 18px; font-weight: bold;
+            cursor: pointer; display: flex; justify-content: space-between; align-items: center;
         }}
-        .date-header:hover {{
-            opacity: 0.95;
-        }}
-        .date-header .toggle-icon {{
-            transition: transform 0.3s;
-        }}
-        .date-header.collapsed .toggle-icon {{
-            transform: rotate(-90deg);
-        }}
-        .date-content {{
-            padding: 20px;
-            transition: all 0.3s;
-        }}
-        .date-content.collapsed {{
-            display: none;
-        }}
+        .date-header:hover {{ opacity: 0.95; }}
+        .date-header .toggle-icon {{ transition: transform 0.3s; }}
+        .date-header.collapsed .toggle-icon {{ transform: rotate(-90deg); }}
+        .date-content {{ padding: 20px; }}
+        .date-content.collapsed {{ display: none; }}
         .section-title {{
-            font-size: 16px;
-            font-weight: 600;
-            margin: 16px 0 12px 0;
-            padding-left: 8px;
-            border-left: 4px solid #10b981;
+            font-size: 16px; font-weight: 600; margin: 16px 0 12px 0;
+            padding-left: 8px; border-left: 4px solid #10b981;
         }}
-        .section-title.expense {{
-            border-left-color: #ef4444;
-        }}
-        table {{
-            width: 100%;
-            border-collapse: collapse;
-            margin-bottom: 16px;
-        }}
-        th, td {{
-            padding: 10px 12px;
-            text-align: left;
-            border-bottom: 1px solid #e5e7eb;
-        }}
-        th {{
-            background: #f9fafb;
-            font-weight: 600;
-            color: #374151;
-            font-size: 13px;
-        }}
-        td {{
-            font-size: 14px;
-        }}
-        .record-time {{
-            color: #6b7280;
-            font-family: monospace;
-            font-size: 12px;
-        }}
-        .record-amount {{
-            font-weight: 600;
-        }}
-        .record-amount.income {{
-            color: #10b981;
-        }}
-        .record-fee {{
-            color: #8b5cf6;
-            font-family: monospace;
-            font-size: 12px;
-        }}
+        .section-title.expense {{ border-left-color: #ef4444; }}
+        table {{ width: 100%; border-collapse: collapse; margin-bottom: 16px; }}
+        th, td {{ padding: 10px 12px; text-align: left; border-bottom: 1px solid #e5e7eb; }}
+        th {{ background: #f9fafb; font-weight: 600; color: #374151; font-size: 13px; }}
+        td {{ font-size: 14px; }}
+        .record-time {{ color: #6b7280; font-family: monospace; font-size: 12px; }}
+        .record-amount {{ font-weight: 600; }}
+        .record-amount.income {{ color: #10b981; }}
+        .record-fee {{ color: #8b5cf6; font-family: monospace; font-size: 12px; }}
         .subtotal {{
-            text-align: right;
-            padding: 8px 12px;
-            background: #f9fafb;
-            border-radius: 8px;
-            font-size: 14px;
-            font-weight: 500;
+            text-align: right; padding: 8px 12px; background: #f9fafb;
+            border-radius: 8px; font-size: 14px; font-weight: 500;
         }}
-        .footer {{
-            text-align: center;
-            padding: 24px;
-            color: rgba(255,255,255,0.8);
-            font-size: 12px;
-        }}
+        .footer {{ text-align: center; padding: 24px; color: rgba(255,255,255,0.8); font-size: 12px; }}
         @media (max-width: 768px) {{
-            .summary-card .value {{
-                font-size: 20px;
-            }}
-            th, td {{
-                padding: 6px 8px;
-                font-size: 12px;
-            }}
-            .config-item .value {{
-                font-size: 14px;
-            }}
+            .summary-card .value {{ font-size: 20px; }}
+            th, td {{ padding: 6px 8px; font-size: 12px; }}
+            .config-item .value {{ font-size: 14px; }}
         }}
     </style>
 </head>
@@ -437,7 +470,6 @@ def generate_export_html(records: List[Dict], group_name: str, start_date: str, 
             <div class="subtitle">日期范围：{start_date} 至 {end_date} | 生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</div>
         </div>
 
-        <!-- 🔥 新增配置信息卡片 -->
         <div class="config-card">
             <div class="config-item">
                 <div class="label">💰 手续费率</div>
@@ -470,7 +502,7 @@ def generate_export_html(records: List[Dict], group_name: str, start_date: str, 
         </div>
 '''
 
-    # 按日期显示详细账单（这部分保持不变）
+    # 按日期显示详细账单
     for date, data in sorted(records_by_date.items()):
         date_obj = datetime.strptime(date, '%Y-%m-%d')
         date_display = date_obj.strftime('%Y年%m月%d日')
@@ -482,14 +514,13 @@ def generate_export_html(records: List[Dict], group_name: str, start_date: str, 
 
         html += f'''
         <div class="date-group">
-            <div class="date-header" onclick="toggleDate(this)">
+            <div class="date-header" onclick="toggleSection(this)">
                 <span>📅 {date_display} ({income_count}笔入款 / {expense_count}笔出款)</span>
                 <span class="toggle-icon">▼</span>
             </div>
             <div class="date-content">
 '''
 
-        # 入款记录
         if data['income']:
             html += f'''
                 <div class="section-title">📈 入款记录</div>
@@ -502,46 +533,23 @@ def generate_export_html(records: List[Dict], group_name: str, start_date: str, 
             for r in data['income']:
                 dt = beijing_time(r['created_at'])
                 time_str = dt.strftime('%m-%d %H:%M')
-
-                # 获取费率和汇率
-                fee_rate = r.get('fee_rate', 0)
-                rate = r.get('rate', 0)
-
-                # 🔥 获取单笔费用（从记录中获取）
+                fee_rate_r = r.get('fee_rate', 0)
+                rate_r = r.get('rate', 0)
                 per_fee = r.get('per_transaction_fee', 0)
-
-                # 直接显示费率数字，不使用上标
-                if fee_rate == int(fee_rate):
-                    fee_display = int(fee_rate)
-                else:
-                    fee_display = fee_rate
-
-                # 格式化汇率显示
-                if rate == int(rate):
-                    rate_display = str(int(rate))
-                else:
-                    rate_display = f"{rate:.2f}"
-
-                # 格式化单笔费用显示
-                if per_fee > 0:
-                    if per_fee == int(per_fee):
-                        per_fee_display = f"{int(per_fee)}元"
-                    else:
-                        per_fee_display = f"{per_fee:.2f}元"
-                else:
-                    per_fee_display = "-"
-
+                fee_display = f"{fmt(fee_rate_r)}%" if fee_rate_r == int(fee_rate_r) else f"{fee_rate_r}%"
+                rate_display = fmt(rate_r) if rate_r == int(rate_r) else f"{rate_r:.2f}"
+                per_fee_display = f"{fmt(per_fee)}元" if per_fee > 0 else "-"
                 category = get_category_with_flag(r.get('category', '')) or '无'
                 operator = r.get('display_name', '未知')
 
                 html += f'''
                         <tr>
                             <td class="record-time">{time_str}</td>
-                            <td class="record-amount income">+{r['amount']:.2f}</td>
-                            <td class="record-fee">{fee_display}%</td>
+                            <td class="record-amount income">+{fmt(r['amount'])}</td>
+                            <td class="record-fee">{fee_display}</td>
                             <td>{rate_display}</td>
                             <td>{per_fee_display}</td>
-                            <td>{r['amount_usdt']:.2f}</td>
+                            <td>{fmt(r['amount_usdt'])}</td>
                             <td>{category}</td>
                             <td>{operator}</td>
                         </tr>
@@ -551,7 +559,6 @@ def generate_export_html(records: List[Dict], group_name: str, start_date: str, 
                 </table>
 '''
 
-        # 出款记录
         if data['expense']:
             html += f'''
                 <div class="section-title expense">📉 出款记录</div>
@@ -568,7 +575,7 @@ def generate_export_html(records: List[Dict], group_name: str, start_date: str, 
                 html += f'''
                         <tr>
                             <td class="record-time">{time_str}</td>
-                            <td class="record-amount" style="color:#ef4444;">-{r['amount_usdt']:.2f}</td>
+                            <td class="record-amount" style="color:#ef4444;">-{fmt(r['amount_usdt'])}</td>
                             <td>{operator}</td>
                         </tr>
 '''
@@ -577,7 +584,6 @@ def generate_export_html(records: List[Dict], group_name: str, start_date: str, 
                 </table>
 '''
 
-        # 本日小计
         html += f'''
                 <div class="subtotal">
                     本日小计：入款 {income_usdt:.2f} USDT / 出款 {expense_usdt:.2f} USDT
@@ -587,23 +593,31 @@ def generate_export_html(records: List[Dict], group_name: str, start_date: str, 
         </div>
 '''
 
+    # ========== 各操作人详细记录 ==========
+    if operator_sections:
+        html += f'''
+        <h2 style="color:white; margin: 24px 0 16px 0; font-size: 20px;">👤 各操作人详细记录</h2>
+        {operator_sections}
+'''
+
     html += f'''
         <div class="footer">
             本账单由 Telegram 记账机器人自动生成 | 共 {len(records)} 条记录
         </div>
     </div>
     <script>
-        function toggleDate(element) {{
+        function toggleSection(element) {{
             element.classList.toggle('collapsed');
-            const content = element.nextElementSibling;
-            content.classList.toggle('collapsed');
+            var content = element.nextElementSibling;
+            if (content) {{
+                content.classList.toggle('collapsed');
+            }}
         }}
     </script>
 </body>
 </html>
 '''
     return html
-
 
 class AccountingManager:
     """记账管理器"""
@@ -732,6 +746,20 @@ class AccountingManager:
                     last_name TEXT,
                     last_seen INTEGER NOT NULL,
                     PRIMARY KEY (group_id, user_id)
+                )
+            """)
+
+            # ========== ✅ 新增：用户个性化配置表 ==========
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS user_config (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    group_id TEXT NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    fee_rate REAL,
+                    exchange_rate REAL,
+                    per_transaction_fee REAL,
+                    updated_at INTEGER DEFAULT 0,
+                    UNIQUE(group_id, user_id)
                 )
             """)
 
@@ -1102,25 +1130,37 @@ class AccountingManager:
             session = self.get_or_create_session(group_id)
 
             if record_type == 'income':
-                # 使用临时汇率或当前汇率
-                actual_rate = temp_rate if temp_rate is not None else session['exchange_rate']
-                # 🔥 使用临时手续费或当前手续费
-                actual_fee_rate = temp_fee if temp_fee is not None else session['fee_rate']
+                # ✅ 获取用户的有效配置（优先使用个性化配置）
+                effective_config = self.get_effective_config(group_id, user_id)
+
+                # ✅ 添加调试日志
+                logger.info(f"[add_record] effective_config = {effective_config}")
+
+                # 使用临时汇率或有效配置中的汇率
+                actual_rate = temp_rate if temp_rate is not None else effective_config['exchange_rate']
+                # 使用临时手续费或有效配置中的手续费
+                actual_fee_rate = temp_fee if temp_fee is not None else effective_config['fee_rate']
+                # 使用有效配置中的单笔费用
+                actual_per_fee = effective_config['per_transaction_fee']
+
+                # ✅ 添加调试日志
+                logger.info(f"[add_record] actual_rate={actual_rate}, actual_fee_rate={actual_fee_rate}, actual_per_fee={actual_per_fee}")
+
                 # 1. 先扣除手续费
                 after_fee = amount * (1 - actual_fee_rate / 100)
                 # 2. 加上单笔费用
-                per_fee = session.get('per_transaction_fee', 0)
-                with_fee = after_fee + per_fee
+                with_fee = after_fee + actual_per_fee  # ✅ 使用 actual_per_fee
                 # 3. 除以汇率
                 amount_usdt = with_fee / actual_rate
 
-                # 保存当前手续费率到记录中（保存实际使用的值）
+                # 保存当前手续费率到记录中
                 current_fee_rate = actual_fee_rate
-                current_per_fee = per_fee
+                current_per_fee = actual_per_fee  # ✅ 使用 actual_per_fee
 
                 # 调试日志
                 logger.info(f"[记账计算] 金额: {amount}, 手续费率: {actual_fee_rate}%, "
-                           f"单笔费用: {per_fee}, 汇率: {actual_rate}, 结果: {amount_usdt:.4f} USDT")
+                       f"单笔费用: {actual_per_fee}, 汇率: {actual_rate}, 结果: {amount_usdt:.4f} USDT"
+                       + (f" (个性化配置)" if effective_config.get('is_personalized') else ""))
             else:
                 amount_usdt = amount
                 actual_rate = 0
@@ -1205,6 +1245,156 @@ class AccountingManager:
         except Exception as e:
             logger.error(f"设置单笔费用失败: {e}")
             return False
+
+    # ========== 用户个性化配置管理 ==========
+
+    def set_user_config(self, group_id: str, user_id: int, fee_rate: float = None, 
+                        exchange_rate: float = None, per_transaction_fee: float = None) -> bool:
+        """设置用户在指定群组的个性化配置"""
+        try:
+            with self._get_conn() as conn:
+                c = conn.cursor()
+                now = int(time.time())
+
+                c.execute(
+                    "SELECT id FROM user_config WHERE group_id = ? AND user_id = ?",
+                    (group_id, user_id)
+                )
+                existing = c.fetchone()
+
+                if existing:
+                    updates = []
+                    params = []
+                    # ✅ 使用 is not None 判断，因为 0 也是有效值
+                    if fee_rate is not None:
+                        updates.append("fee_rate = ?")
+                        params.append(fee_rate)
+                    if exchange_rate is not None:
+                        updates.append("exchange_rate = ?")
+                        params.append(exchange_rate)
+                    if per_transaction_fee is not None:
+                        updates.append("per_transaction_fee = ?")
+                        params.append(per_transaction_fee)
+
+                    if updates:
+                        updates.append("updated_at = ?")
+                        params.append(now)
+                        params.extend([group_id, user_id])
+                        c.execute(
+                            f"UPDATE user_config SET {', '.join(updates)} WHERE group_id = ? AND user_id = ?",
+                            params
+                        )
+                else:
+                    c.execute("""
+                        INSERT INTO user_config (group_id, user_id, fee_rate, exchange_rate, per_transaction_fee, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    """, (group_id, user_id, fee_rate, exchange_rate, per_transaction_fee, now))
+
+                conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"设置用户配置失败: {e}")
+            return False
+
+    def get_user_config(self, group_id: str, user_id: int) -> dict:
+        """获取用户在指定群组的个性化配置"""
+        try:
+            with self._get_conn() as conn:
+                c = conn.cursor()
+                c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='user_config'")
+                if not c.fetchone():
+                    return {"has_config": False}
+                c.execute(
+                    "SELECT fee_rate, exchange_rate, per_transaction_fee FROM user_config WHERE group_id = ? AND user_id = ?",
+                    (group_id, user_id)
+                )
+                row = c.fetchone()
+                if row:
+                    return {
+                        "fee_rate": row[0],
+                        "exchange_rate": row[1],
+                        "per_transaction_fee": row[2],
+                        "has_config": True
+                    }
+                return {"has_config": False}
+        except Exception as e:
+            logger.error(f"获取用户配置失败: {e}")
+            return {"has_config": False}
+
+    def delete_user_config(self, group_id: str, user_id: int) -> bool:
+        """删除用户在指定群组的个性化配置"""
+        try:
+            with self._get_conn() as conn:
+                c = conn.cursor()
+                c.execute(
+                    "DELETE FROM user_config WHERE group_id = ? AND user_id = ?",
+                    (group_id, user_id)
+                )
+                conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"删除用户配置失败: {e}")
+            return False
+
+    def get_all_user_configs(self, group_id: str) -> list:
+        """获取群组中所有用户的个性化配置"""
+        try:
+            with self._get_conn() as conn:
+                c = conn.cursor()
+                c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='user_config'")
+                if not c.fetchone():
+                    return []
+                c.execute("""
+                    SELECT uc.user_id, uc.fee_rate, uc.exchange_rate, uc.per_transaction_fee, 
+                           gu.first_name, gu.username
+                    FROM user_config uc
+                    LEFT JOIN group_users gu ON uc.group_id = gu.group_id AND uc.user_id = gu.user_id
+                    WHERE uc.group_id = ?
+                    ORDER BY uc.updated_at DESC
+                """, (group_id,))
+                rows = c.fetchall()
+                result = []
+                for r in rows:
+                    result.append({
+                        "user_id": r[0],
+                        "fee_rate": r[1],
+                        "exchange_rate": r[2],
+                        "per_transaction_fee": r[3],
+                        "first_name": r[4],
+                        "username": r[5],
+                    })
+                return result
+        except Exception as e:
+            logger.error(f"获取所有用户配置失败: {e}")
+            return []
+
+    def get_effective_config(self, group_id: str, user_id: int) -> dict:
+        """
+        获取用户的有效配置（优先使用个性化配置，否则使用群组默认配置）
+        """
+        session = self.get_or_create_session(group_id)
+
+        user_config = self.get_user_config(group_id, user_id)
+
+        if user_config.get("has_config"):
+            # ✅ 判断是否为 None（而不是判断真假），因为 0 也是有效值
+            fee_rate = user_config["fee_rate"] if user_config["fee_rate"] is not None else session["fee_rate"]
+            exchange_rate = user_config["exchange_rate"] if user_config["exchange_rate"] is not None else session["exchange_rate"]
+            per_transaction_fee = user_config["per_transaction_fee"] if user_config["per_transaction_fee"] is not None else session.get("per_transaction_fee", 0)
+
+            return {
+                "fee_rate": fee_rate,
+                "exchange_rate": exchange_rate,
+                "per_transaction_fee": per_transaction_fee,
+                "is_personalized": True
+            }
+
+        return {
+            "fee_rate": session["fee_rate"],
+            "exchange_rate": session["exchange_rate"],
+            "per_transaction_fee": session.get("per_transaction_fee", 0),
+            "is_personalized": False
+        }
 
     def get_today_stats(self, group_id: str) -> Dict:
         """获取今日统计"""
@@ -2967,8 +3157,12 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 )
                 stats = accounting_manager.get_address_stats(address)
 
-            first_time = datetime.fromtimestamp(stats['first_query']).strftime('%Y-%m-%d %H:%M') if stats['first_query'] else '首次'
-            last_time = datetime.fromtimestamp(stats['last_query']).strftime('%Y-%m-%d %H:%M') if stats['last_query'] else '刚刚'
+            if stats:
+                first_time = datetime.fromtimestamp(stats['first_query']).strftime('%Y-%m-%d %H:%M') if stats.get('first_query') else '首次'
+                last_time = datetime.fromtimestamp(stats['last_query']).strftime('%Y-%m-%d %H:%M') if stats.get('last_query') else '刚刚'
+            else:
+                first_time = '首次'
+                last_time = '刚刚'
 
             reply = (
                 f"💰 **USDT 地址查询结果**\n\n"
@@ -2982,20 +3176,88 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
             await status_msg.edit_text(f"❌ 查询失败：{error_msg}")
         return
 
-    # 追踪用户信息
+    # ========== 2. 追踪用户信息 ==========
     await handle_user_info_tracking(update, context)
 
     if not text:
         return
 
-    # 处理计算器功能
+    # ========== 3. 操作人管理（需要完整权限） ==========
+    # 回复消息方式添加/删除操作人
+    if message.reply_to_message and text in ['添加操作人', '删除操作人']:
+        if not is_authorized(message.from_user.id, require_full_access=True):
+            await message.reply_text("❌ 只有控制人或正式操作员才能管理操作人")
+            return
+
+        replied_user = message.reply_to_message.from_user
+
+        if text == '添加操作人':
+            result = await add_temp_operator(replied_user.id, message.from_user.id, context)
+            if result:
+                display_name = replied_user.first_name or replied_user.username or str(replied_user.id)
+                await message.reply_text(f"✅ 已添加临时操作人：{display_name}\n💡 临时操作人只能使用记账功能")
+            else:
+                await message.reply_text("❌ 添加失败，该用户可能已是操作人")
+        elif text == '删除操作人':
+            result = remove_temp_operator(replied_user.id)
+            if result:
+                display_name = replied_user.first_name or replied_user.username or str(replied_user.id)
+                await message.reply_text(f"✅ 已删除临时操作人：{display_name}")
+            else:
+                await message.reply_text("❌ 该用户不是临时操作人")
+        return
+
+    # @ 方式添加/删除操作人
+    if text.startswith('添加操作人') or text.startswith('删除操作人'):
+        await handle_operator_mention(update, context)
+        return
+
+    # ========== 4. 计算器（不需要权限） ==========
     await handle_calculator(update, context)
 
-    # 处理记账指令（需要权限）
+    # ========== 5. 权限检查（以下功能需要记账权限） ==========
     if not is_authorized(message.from_user.id, require_full_access=False):
         return
 
-    # 设置手续费
+    # ========== 6. 用户个性化配置（需要完整权限） ==========
+    if is_authorized(message.from_user.id, require_full_access=True):
+        if '设置' in text and ('手续费' in text or '汇率' in text or '单笔费用' in text) and ('@' in text or message.reply_to_message):
+            await handle_user_config_settings(update, context, text)
+            return
+
+        if text.startswith('删除') and '配置' in text and ('@' in text or message.reply_to_message):
+            await handle_delete_user_config(update, context, text)
+            return
+
+    # ========== 7. 查看配置 ==========
+    if text == '查看配置' or text == '查看设置':
+        await handle_view_config(update, context)
+        return
+
+    # ========== 8. 组合设置检测（必须在单独设置之前） ==========
+    settings_with_prefix = sum([
+        text.count('设置手续费'),
+        text.count('设置汇率'),
+        text.count('设置单笔费用')
+    ])
+    params_count = sum([1 for k in ['手续费', '汇率', '单笔费用'] if k in text])
+
+    if settings_with_prefix >= 2 or (text.startswith('设置') and params_count >= 2):
+        await handle_batch_settings(update, context, text)
+        return
+
+    # 额外检查：单独设置命令中如果包含其他参数关键字，转批量设置
+    if text.startswith('设置手续费') and ('汇率' in text or '单笔费用' in text):
+        await handle_batch_settings(update, context, text)
+        return
+    if text.startswith('设置汇率') and ('手续费' in text or '单笔费用' in text):
+        await handle_batch_settings(update, context, text)
+        return
+    if text.startswith('设置单笔费用') and ('手续费' in text or '汇率' in text):
+        await handle_batch_settings(update, context, text)
+        return
+
+    # ========== 9. 单独设置命令 ==========
     if text.startswith('设置手续费'):
         try:
             rate_str = text.replace('设置手续费', '').strip()
@@ -3006,7 +3268,6 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
             await message.reply_text("❌ 格式错误：设置手续费 数字（如：设置手续费5）")
         return
 
-    # 设置汇率
     elif text.startswith('设置汇率'):
         try:
             rate_str = text.replace('设置汇率', '').strip()
@@ -3017,127 +3278,85 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
             await message.reply_text("❌ 格式错误：设置汇率 数字（如：设置汇率7.2）")
         return
 
-    # 设置单笔费用
     elif text.startswith('设置单笔费用'):
         try:
             fee_str = text.replace('设置单笔费用', '').strip()
-            logger.debug(f"[DEBUG] 设置单笔费用 - 原始文本: '{text}'")
-            logger.debug(f"[DEBUG] 设置单笔费用 - 提取的字符串: '{fee_str}'")
-
             if not fee_str:
                 await message.reply_text("❌ 格式错误：设置单笔费用 数字（如：设置单笔费用10）")
                 return
-
             fee = float(fee_str)
-            logger.debug(f"[DEBUG] 设置单笔费用 - 转换后的数字: {fee}")
-
             await handle_set_per_transaction_fee(update, context, fee)
-            # 成功提示已经在 handle_set_per_transaction_fee 中发送，这里不需要再发送
-
-        except ValueError as e:
-            logger.debug(f"ValueError: {e}")
-            await message.reply_text("❌ 金额格式错误，请输入数字（如：设置单笔费用10 或 设置单笔费用2）")
+        except ValueError:
+            await message.reply_text("❌ 金额格式错误，请输入数字")
         except Exception as e:
-            logger.debug(f"其他异常: {e}")
             await message.reply_text(f"❌ 设置失败：{str(e)[:50]}")
         return
 
-    # 结束账单
+    # ========== 10. 账单命令 ==========
     elif text == '结束账单':
         await handle_end_bill(update, context)
         return
-
-    # 今日总
     elif text == '今日总':
         await handle_today_stats(update, context)
         return
-
-    # 总
     elif text == '总':
         await handle_total_stats(update, context)
         return
-
-    # 当前账单
     elif text == '当前账单':
         await handle_current_bill(update, context)
         return
-
-    # 查询账单
     elif text == '查询账单':
         await handle_query_bill(update, context)
         return
-
     elif text == '导出账单':
         await handle_export_bill(update, context)
         return
-
-    # 清理账单 / 清空账单
     elif text in ['清理账单', '清空账单']:
         await handle_clear_bill(update, context)
         return
-
-    # 清理总账单（所有账单）
     elif text in ['清理总账单', '清空总账单', '清空所有账单']:
         await handle_clear_all_bill(update, context)
         return
-
-    # 移除上一笔
     elif text == '移除上一笔' or text == '删除上一笔':
         await handle_remove_last_record(update, context)
         return
-
     elif text == '撤销账单':
         await handle_revoke_record(update, context)
         return
 
-    # +xxx 添加入款（支持备注、临时汇率、临时手续费）
+    # ========== 11. 入款 +金额 ==========
     elif text.startswith('+'):
         try:
             content = text[1:].strip()
-
-            # 解析格式：
-            # +金额*手续费%/汇率 备注
-            # +金额*手续费% 备注
-            # +金额/汇率 备注
-            # +金额 备注
-
             temp_rate = None
             temp_fee = None
             temp_per_fee = None
             category = ""
             amount_str = content
 
-            # 🔥 先检查是否包含 # 号（临时单笔费用）
             if '#' in content:
                 hash_index = content.index('#')
-                before_hash = content[:hash_index]  # # 前面的部分
-                after_hash = content[hash_index + 1:]  # # 后面的部分
-
-                # 提取单笔费用数字
+                before_hash = content[:hash_index]
+                after_hash = content[hash_index + 1:]
                 per_fee_match = re.match(r'^(\d+(?:\.\d+)?)', after_hash)
                 if per_fee_match:
                     temp_per_fee = float(per_fee_match.group(1))
-                    # # 后面剩余部分可能是备注
                     remaining = after_hash[per_fee_match.end():].strip()
                     if remaining:
                         category = remaining
                 else:
                     await update.message.reply_text("❌ 单笔费用格式错误：#数字 或 #数字 备注")
                     return
-
-                # 更新 content 为 # 前面的部分
                 content = before_hash.strip()
                 if not content:
                     await update.message.reply_text("❌ # 前面需要输入金额")
                     return
                 amount_str = content
 
-            # 检查是否包含 * 号（临时手续费）
             if '*' in content:
                 star_parts = content.split('*', 1)
                 amount_str = star_parts[0].strip()
                 rest = star_parts[1].strip()
-
                 if '/' in rest:
                     fee_part, rate_part = rest.split('/', 1)
                     temp_fee_str = fee_part.replace('%', '').strip()
@@ -3145,13 +3364,11 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                         temp_fee = float(temp_fee_str)
                     except ValueError:
                         pass
-
                     rate_part_clean = rate_part.split(' ', 1)[0].strip()
                     try:
                         temp_rate = float(rate_part_clean)
                     except ValueError:
                         pass
-
                     if ' ' in rate_part and not category:
                         category = rate_part.split(' ', 1)[1].strip()
                 else:
@@ -3161,16 +3378,12 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                         temp_fee = float(temp_fee_str)
                     except ValueError:
                         pass
-
                     if ' ' in rest and not category:
                         category = rest.split(' ', 1)[1].strip()
-
-            # 检查是否包含 / 汇率
             elif '/' in content:
                 parts = content.split('/', 1)
                 amount_str = parts[0].strip()
                 rest = parts[1].strip()
-
                 if ' ' in rest:
                     rate_part, cat = rest.split(' ', 1)
                     try:
@@ -3188,8 +3401,6 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                         if not category:
                             category = rest
                         temp_rate = None
-
-            # 提取备注（没有 * 和 / 和 # 的情况）
             else:
                 if ' ' in amount_str and not category:
                     parts = amount_str.split(' ', 1)
@@ -3198,7 +3409,6 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
             if amount_str:
                 amount = float(amount_str)
-
                 await handle_add_income(update, context, amount, is_correction=False, 
                                        category=category, temp_rate=temp_rate, 
                                        temp_fee=temp_fee, temp_per_fee=temp_per_fee)
@@ -3209,89 +3419,68 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
         except Exception as e:
             logger.error(f"解析入款失败: {e}")
             await update.message.reply_text("❌ 格式错误")
-            return
+        return
 
-    # -xxx 修正入款（支持备注、临时汇率、临时手续费）
+    # ========== 12. 修正入款 -金额 ==========
     elif text.startswith('-') and len(text) > 1:
         try:
             content = text[1:].strip()
-
             temp_rate = None
             temp_fee = None
             temp_per_fee = None
             category = ""
             amount_str = content
 
-            # 🔥 先检查是否包含 # 号（临时单笔费用）
             if '#' in content:
                 hash_index = content.index('#')
-                before_hash = content[:hash_index]  # # 前面的部分
-                after_hash = content[hash_index + 1:]  # # 后面的部分
-
-                # 提取单笔费用数字
+                before_hash = content[:hash_index]
+                after_hash = content[hash_index + 1:]
                 per_fee_match = re.match(r'^(\d+(?:\.\d+)?)', after_hash)
                 if per_fee_match:
                     temp_per_fee = float(per_fee_match.group(1))
-                    # # 后面剩余部分可能是备注
                     remaining = after_hash[per_fee_match.end():].strip()
                     if remaining:
                         category = remaining
                 else:
                     await update.message.reply_text("❌ 单笔费用格式错误：#数字 或 #数字 备注")
                     return
-
-                # 更新 content 为 # 前面的部分
                 content = before_hash.strip()
                 if not content:
                     await update.message.reply_text("❌ # 前面需要输入金额")
                     return
                 amount_str = content
 
-            # 检查是否包含 * 号（临时手续费）
             if '*' in content:
                 star_parts = content.split('*', 1)
                 amount_str = star_parts[0].strip()
                 rest = star_parts[1].strip()
-
-                # 检查是否包含 / 汇率
                 if '/' in rest:
                     fee_part, rate_part = rest.split('/', 1)
-                    # 解析手续费（去掉%号）
                     temp_fee_str = fee_part.replace('%', '').strip()
                     try:
                         temp_fee = float(temp_fee_str)
                     except ValueError:
                         temp_fee = None
-
-                    # 解析汇率
                     rate_part_clean = rate_part.split(' ', 1)[0].strip()
                     try:
                         temp_rate = float(rate_part_clean)
                     except ValueError:
                         temp_rate = None
-
-                    # 提取备注（汇率后面的部分）
                     if ' ' in rate_part and not category:
                         category = rate_part.split(' ', 1)[1].strip()
                 else:
-                    # 只有手续费，没有汇率
                     fee_part = rest.split(' ', 1)[0].strip()
                     temp_fee_str = fee_part.replace('%', '').strip()
                     try:
                         temp_fee = float(temp_fee_str)
                     except ValueError:
                         temp_fee = None
-
-                    # 提取备注
                     if ' ' in rest and not category:
                         category = rest.split(' ', 1)[1].strip()
-
-            # 检查是否包含 / 汇率（没有 * 号的情况）
             elif '/' in content:
                 parts = content.split('/', 1)
                 amount_str = parts[0].strip()
                 rest = parts[1].strip()
-
                 if ' ' in rest:
                     rate_part, cat = rest.split(' ', 1)
                     try:
@@ -3309,8 +3498,6 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                         if not category:
                             category = rest
                         temp_rate = None
-
-            # 提取备注（没有 * 和 / 和 # 的情况）
             else:
                 if ' ' in amount_str and not category:
                     parts = amount_str.split(' ', 1)
@@ -3319,20 +3506,19 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
             if amount_str:
                 amount = float(amount_str)
-
                 await handle_add_income(update, context, amount, is_correction=True, 
                                        category=category, temp_rate=temp_rate, 
                                        temp_fee=temp_fee, temp_per_fee=temp_per_fee)
             else:
-                await update.message.reply_text("❌ 格式错误：-金额 或 -金额#单笔费用 或 -金额*手续费% 或 -金额/汇率 或 -金额*手续费%/汇率#单笔费用 备注")
+                await update.message.reply_text("❌ 格式错误：-金额 或 -金额#单笔费用 备注")
         except ValueError:
             await update.message.reply_text("❌ 金额格式错误，请输入数字")
         except Exception as e:
             logger.error(f"解析修正入款失败: {e}")
-            await update.message.reply_text("❌ 格式错误：-金额 或 -金额#单笔费用 备注")
-            return
+            await update.message.reply_text("❌ 格式错误")
+        return
 
-    # 下发 xxxu 添加出款（正数）
+    # ========== 13. 出款 下发金额u ==========
     elif text.startswith('下发') and 'u' in text and not text.startswith('下发-'):
         try:
             amount_str = text.replace('下发', '').replace('u', '').strip()
@@ -3343,9 +3529,9 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 await message.reply_text("❌ 格式错误：下发金额u（如：下发100u）")
         except:
             await message.reply_text("❌ 格式错误：下发金额u（如：下发100u）")
-            return
+        return
 
-    # 下发- xxxu 修正出款（负数）
+    # ========== 14. 修正出款 下发-金额u ==========
     elif text.startswith('下发-') and 'u' in text:
         try:
             amount_str = text.replace('下发-', '').replace('u', '').strip()
@@ -3356,23 +3542,17 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 await message.reply_text("❌ 格式错误：下发-金额u（如：下发-50u）")
         except:
             await message.reply_text("❌ 格式错误：下发-金额u（如：下发-50u）")
-            return
+        return
 
-    # ========== 3. AI 对话（需要管理员或操作员权限） ==========
+    # ========== 15. AI 对话 ==========
     bot_username = context.bot.username
-
-    # 🔥 优化：只有当消息以 @机器人 开头或包含机器人用户名时才触发 AI
     is_at_bot = text.startswith(f"@{bot_username}") or f"@{bot_username}" in text
 
     if is_at_bot:
-        # 移除 @机器人 部分
         question = text.replace(f"@{bot_username}", "").strip()
-
-        # 如果去掉 @机器人 后没有内容，不处理
         if not question:
             return
 
-        # 权限检查
         if not is_authorized(message.from_user.id):
             try:
                 await context.bot.send_message(
@@ -3385,18 +3565,14 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 await message.reply_text("❌ 无权限使用 AI 对话")
             return
 
-        # 有权限，继续处理
         thinking_msg = await message.reply_text("🤔 思考中...")
         from handlers.ai_client import get_ai_client
         ai_client = get_ai_client()
-
-        # 使用工具调用版本
         reply = await ai_client.chat_with_data(
             prompt=question,
             group_id=str(chat.id),
             user_id=message.from_user.id
         )
-
         if len(reply) > 4000:
             reply = reply[:4000] + "...\n\n(回复过长已截断)"
         await thinking_msg.edit_text(reply)
@@ -4272,25 +4448,11 @@ def get_service_message_handler():
         handle_group_service_message
     )
 
-# ===== 在 accounting.py 文件末尾添加 =====
-
-# ---------- 美化 HTML 账单生成 ----------
-
 def generate_beautiful_bill_html(stats: Dict, records: List[Dict], title: str = "当前账单") -> str:
     """
     生成美化版 HTML 账单
-
-    Args:
-        stats: 统计信息字典
-        records: 记账记录列表
-        title: 账单标题
-    Returns:
-        HTML 字符串
     """
     from datetime import datetime
-    import json as _json
-    from datetime import timezone, timedelta
-    BEIJING_TZ = timezone(timedelta(hours=8))
 
     # 分离入款和出款
     income_records = [r for r in records if r['type'] == 'income']
@@ -4319,88 +4481,248 @@ def generate_beautiful_bill_html(stats: Dict, records: List[Dict], title: str = 
 
     now = datetime.now(BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S')
 
-    # 生成国旗显示
     def get_flag(cat):
         if not cat:
             return ''
-        try:
-            from constants import COUNTRY_FLAGS
-            cat_lower = cat.lower().strip()
-            if cat_lower in COUNTRY_FLAGS:
-                return COUNTRY_FLAGS[cat_lower]
-            for country, flag in COUNTRY_FLAGS.items():
-                if country in cat_lower or cat_lower in country:
-                    return flag
-        except:
-            pass
+        cat_lower = cat.lower().strip()
+        if cat_lower in COUNTRY_FLAGS:
+            return COUNTRY_FLAGS[cat_lower]
+        for country, flag in COUNTRY_FLAGS.items():
+            if country in cat_lower or cat_lower in country:
+                return flag
         return ''
 
-    # 格式化金额
     def fmt(num, decimals=2):
         if num == int(num):
             return str(int(num))
         return f"{num:.{decimals}f}"
 
-    # 生成表格行
+    # ========== 生成总体入款记录表格 ==========
     income_rows = ""
     for r in income_records:
-        dt = datetime.fromtimestamp(r['created_at'], tz=BEIJING_TZ)
-        time_str = dt.strftime('%m-%d %H:%M')
+        dt = beijing_time(r['created_at'])
+        date_str = dt.strftime('%Y-%m-%d')
+        time_str = dt.strftime('%H:%M')
         cat = r.get('category', '') or ''
         flag = get_flag(cat)
         cat_display = f"{flag} {cat}" if flag else (cat or '无')
-        fee_info = f"{fmt(r.get('fee_rate', 0))}% / {fmt(r.get('rate', 0))}"
+        fr = r.get('fee_rate', 0)
+        rate = r.get('rate', 0)
+        per_fee = r.get('per_transaction_fee', 0)
+        fee_display = f"{fmt(fr)}%" if fr == int(fr) else f"{fr}%"
+        rate_display = fmt(rate) if rate == int(rate) else f"{rate:.2f}"
+        per_fee_display = f"{fmt(per_fee)}元" if per_fee > 0 else "-"
         operator = r.get('display_name', r.get('username', '未知'))
         income_rows += f"""
         <tr>
-            <td>{time_str}</td>
+            <td>{date_str} {time_str}</td>
             <td class="income-amount">+{fmt(r['amount'])}</td>
-            <td>{fee_info}</td>
+            <td>{fee_display}</td>
+            <td>{rate_display}</td>
+            <td>{per_fee_display}</td>
             <td class="usdt-amount">{fmt(r['amount_usdt'])} USDT</td>
             <td>{cat_display}</td>
             <td>{operator}</td>
         </tr>"""
 
+    # ========== 生成总体出款记录表格 ==========
     expense_rows = ""
     for r in expense_records:
-        dt = datetime.fromtimestamp(r['created_at'], tz=BEIJING_TZ)
-        time_str = dt.strftime('%m-%d %H:%M')
+        dt = beijing_time(r['created_at'])
+        date_str = dt.strftime('%Y-%m-%d')
+        time_str = dt.strftime('%H:%M')
         operator = r.get('display_name', r.get('username', '未知'))
         expense_rows += f"""
         <tr>
-            <td>{time_str}</td>
+            <td>{date_str} {time_str}</td>
             <td class="expense-amount">-{fmt(r['amount_usdt'])} USDT</td>
             <td>{operator}</td>
         </tr>"""
 
-    # 分组统计
-    group_stats = ""
+    # ========== 按操作人分组 ==========
+    operator_income = {}
+    for r in income_records:
+        operator = r.get('display_name', r.get('username', '未知'))
+        user_id = r.get('user_id', 0)
+        key = f"op_{user_id}_{hash(operator) % 10000}"
+        if key not in operator_income:
+            operator_income[key] = {
+                'name': operator,
+                'user_id': user_id,
+                'records': [],
+                'total_cny': 0.0,
+                'total_usdt': 0.0,
+            }
+        operator_income[key]['records'].append(r)
+        operator_income[key]['total_cny'] += r['amount']
+        operator_income[key]['total_usdt'] += r['amount_usdt']
+
+    operator_expense = {}
+    for r in expense_records:
+        operator = r.get('display_name', r.get('username', '未知'))
+        user_id = r.get('user_id', 0)
+        key = f"op_{user_id}_{hash(operator) % 10000}"
+        if key not in operator_expense:
+            operator_expense[key] = {
+                'name': operator,
+                'user_id': user_id,
+                'records': [],
+                'total_usdt': 0.0,
+            }
+        operator_expense[key]['records'].append(r)
+        operator_expense[key]['total_usdt'] += r['amount_usdt']
+
+    # ========== 生成每个操作人的可折叠记录 ==========
+    operator_sections = ""
+    all_operator_keys = set(list(operator_income.keys()) + list(operator_expense.keys()))
+
+    if all_operator_keys:
+        for idx, key in enumerate(sorted(all_operator_keys, key=lambda k: operator_income.get(k, {}).get('total_cny', 0), reverse=True)):
+            safe_key = key.replace('.', '_').replace('-', '_')
+            op_income = operator_income.get(key, {})
+            op_expense = operator_expense.get(key, {})
+
+            name = op_income.get('name') or op_expense.get('name', '未知')
+            income_count = len(op_income.get('records', []))
+            income_cny = op_income.get('total_cny', 0)
+            income_usdt = op_income.get('total_usdt', 0)
+            expense_count = len(op_expense.get('records', []))
+            expense_usdt = op_expense.get('total_usdt', 0)
+
+            operator_sections += f"""
+        <div class="card operator-card">
+            <div class="operator-header" onclick="toggleSection('op_{safe_key}')">
+                <span>👤 {name} · 入款{income_count}笔 {fmt(income_cny)}元 ≈ {fmt(income_usdt)}USDT · 出款{expense_count}笔 {fmt(expense_usdt)}USDT</span>
+                <span class="toggle-icon" id="icon_op_{safe_key}">▼</span>
+            </div>
+            <div class="operator-content" id="op_{safe_key}">
+"""
+            if op_income.get('records'):
+                operator_sections += f"""
+                <div style="margin-bottom:12px;">
+                    <div class="section-label">📈 入款明细（{income_count}笔）</div>
+                    <div class="table-responsive">
+                        <table>
+                            <thead>
+                                <tr><th>日期时间</th><th>金额(元)</th><th>手续费</th><th>汇率</th><th>单笔费用</th><th>USDT</th><th>分类</th></tr>
+                            </thead>
+                            <tbody>
+"""
+                for r in op_income['records']:
+                    dt = beijing_time(r['created_at'])
+                    date_str = dt.strftime('%Y-%m-%d')
+                    time_str = dt.strftime('%H:%M')
+                    cat = r.get('category', '') or ''
+                    flag = get_flag(cat)
+                    cat_display = f"{flag} {cat}" if flag else (cat or '无')
+                    fr = r.get('fee_rate', 0)
+                    rate = r.get('rate', 0)
+                    per_fee = r.get('per_transaction_fee', 0)
+                    fee_display = f"{fmt(fr)}%" if fr == int(fr) else f"{fr}%"
+                    rate_display = fmt(rate) if rate == int(rate) else f"{rate:.2f}"
+                    per_fee_display = f"{fmt(per_fee)}元" if per_fee > 0 else "-"
+                    operator_sections += f"""
+                                <tr>
+                                    <td>{date_str} {time_str}</td>
+                                    <td class="income-amount">+{fmt(r['amount'])}</td>
+                                    <td>{fee_display}</td>
+                                    <td>{rate_display}</td>
+                                    <td>{per_fee_display}</td>
+                                    <td class="usdt-amount">{fmt(r['amount_usdt'])} USDT</td>
+                                    <td>{cat_display}</td>
+                                </tr>"""
+                operator_sections += """
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+"""
+            if op_expense.get('records'):
+                operator_sections += f"""
+                <div>
+                    <div class="section-label">📉 出款明细（{expense_count}笔）</div>
+                    <div class="table-responsive">
+                        <table>
+                            <thead>
+                                <tr><th>日期时间</th><th>金额(USDT)</th></tr>
+                            </thead>
+                            <tbody>
+"""
+                for r in op_expense['records']:
+                    dt = beijing_time(r['created_at'])
+                    date_str = dt.strftime('%Y-%m-%d')
+                    time_str = dt.strftime('%H:%M')
+                    operator_sections += f"""
+                                <tr>
+                                    <td>{date_str} {time_str}</td>
+                                    <td class="expense-amount">-{fmt(r['amount_usdt'])} USDT</td>
+                                </tr>"""
+                operator_sections += """
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+"""
+            operator_sections += """
+            </div>
+        </div>
+"""
+
+    # 分组统计 - 可折叠版（显示汇总+详细记录）
+    category_section = ""
     if categories:
+        category_section = """
+        <h2 style="color:white; margin: 24px 0 16px 0; font-size: 20px;">📊 入款分组统计</h2>
+"""
         for cat, group_records in categories.items():
             cat_cny = sum(r['amount'] for r in group_records)
             cat_usdt = sum(r['amount_usdt'] for r in group_records)
             flag = get_flag(cat)
             cat_display = f"{flag} {cat}" if flag else cat
-            group_stats += f"""
-            <tr>
-                <td>{cat_display}</td>
-                <td>{len(group_records)}笔</td>
-                <td>{fmt(cat_cny)} 元</td>
-                <td>{fmt(cat_usdt)} USDT</td>
-            </tr>"""
+            safe_cat = cat.replace('.', '_').replace('-', '_').replace(' ', '_')
 
-    category_section = ""
-    if group_stats:
-        category_section = f"""
-        <div class="card">
-            <h2>📊 入款分组统计</h2>
-            <table>
-                <thead>
-                    <tr><th>分类</th><th>笔数</th><th>金额(元)</th><th>金额(USDT)</th></tr>
-                </thead>
-                <tbody>{group_stats}</tbody>
-            </table>
-        </div>"""
+            category_section += f"""
+        <div class="card collapsible-card">
+            <div class="collapsible-header" onclick="toggleSection('cat_{safe_cat}')">
+                <span>📊 {cat_display} · {len(group_records)}笔 · {fmt(cat_cny)}元 ≈ {fmt(cat_usdt)}USDT</span>
+                <span class="toggle-icon" id="icon_cat_{safe_cat}">▼</span>
+            </div>
+            <div class="collapsible-content" id="cat_{safe_cat}">
+                <div class="table-responsive">
+                    <table>
+                        <thead>
+                            <tr><th>日期时间</th><th>金额(元)</th><th>手续费</th><th>汇率</th><th>单笔费用</th><th>USDT</th><th>操作人</th></tr>
+                        </thead>
+                        <tbody>
+    """
+            for r in group_records:
+                dt = beijing_time(r['created_at'])
+                date_str = dt.strftime('%Y-%m-%d')
+                time_str = dt.strftime('%H:%M')
+                fr = r.get('fee_rate', 0)
+                rate = r.get('rate', 0)
+                per_fee = r.get('per_transaction_fee', 0)
+                fee_display = f"{fmt(fr)}%" if fr == int(fr) else f"{fr}%"
+                rate_display = fmt(rate) if rate == int(rate) else f"{rate:.2f}"
+                per_fee_display = f"{fmt(per_fee)}元" if per_fee > 0 else "-"
+                operator = r.get('display_name', r.get('username', '未知'))
+                category_section += f"""
+                            <tr>
+                                <td>{date_str} {time_str}</td>
+                                <td class="income-amount">+{fmt(r['amount'])}</td>
+                                <td>{fee_display}</td>
+                                <td>{rate_display}</td>
+                                <td>{per_fee_display}</td>
+                                <td class="usdt-amount">{fmt(r['amount_usdt'])} USDT</td>
+                                <td>{operator}</td>
+                            </tr>"""
+            category_section += """
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+"""
 
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -4416,7 +4738,7 @@ def generate_beautiful_bill_html(stats: Dict, records: List[Dict], title: str = 
             min-height: 100vh;
             padding: 20px;
         }}
-        .container {{ max-width: 900px; margin: 0 auto; }}
+        .container {{ max-width: 1000px; margin: 0 auto; }}
         .header {{
             background: white;
             border-radius: 20px;
@@ -4479,11 +4801,83 @@ def generate_beautiful_bill_html(stats: Dict, records: List[Dict], title: str = 
             box-shadow: 0 2px 10px rgba(0,0,0,0.05);
         }}
         .card h2 {{
-            font-size: 18px;
+            font-size: 16px;
             color: #1e293b;
             margin-bottom: 16px;
             padding-bottom: 12px;
             border-bottom: 2px solid #f1f5f9;
+        }}
+        /* ===== 可折叠区域 ===== */
+        .collapsible-card {{
+            padding: 0;
+            overflow: hidden;
+        }}
+        .collapsible-header {{
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 14px 20px;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-weight: 600;
+            font-size: 15px;
+            user-select: none;
+            -webkit-tap-highlight-color: transparent;
+        }}
+        .collapsible-header:hover {{ opacity: 0.95; }}
+        .collapsible-header .toggle-icon {{
+            transition: transform 0.3s;
+            font-size: 14px;
+        }}
+        .collapsible-header.collapsed .toggle-icon {{
+            transform: rotate(-90deg);
+        }}
+        .collapsible-content {{
+            padding: 20px;
+        }}
+        .collapsible-content.collapsed {{
+            display: none;
+        }}
+        /* ===== 操作人卡片 ===== */
+        .operator-card {{
+            padding: 0;
+            overflow: hidden;
+        }}
+        .operator-header {{
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 14px 20px;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-weight: 600;
+            font-size: 15px;
+            user-select: none;
+            -webkit-tap-highlight-color: transparent;
+        }}
+        .operator-header:hover {{ opacity: 0.95; }}
+        .operator-header .toggle-icon {{
+            transition: transform 0.3s;
+            font-size: 14px;
+        }}
+        .operator-header.collapsed .toggle-icon {{
+            transform: rotate(-90deg);
+        }}
+        .operator-content {{
+            padding: 20px;
+        }}
+        .operator-content.collapsed {{
+            display: none;
+        }}
+        .section-label {{
+            font-size: 14px;
+            font-weight: 600;
+            color: #475569;
+            margin-bottom: 8px;
+            padding-left: 8px;
+            border-left: 4px solid #667eea;
         }}
         table {{
             width: 100%;
@@ -4518,6 +4912,7 @@ def generate_beautiful_bill_html(stats: Dict, records: List[Dict], title: str = 
             .header h1 {{ font-size: 20px; }}
             .summary-card .value {{ font-size: 18px; }}
             th, td {{ padding: 8px 6px; font-size: 11px; }}
+            .collapsible-header, .operator-header {{ font-size: 13px; padding: 12px 14px; }}
         }}
     </style>
 </head>
@@ -4564,39 +4959,71 @@ def generate_beautiful_bill_html(stats: Dict, records: List[Dict], title: str = 
 
         {category_section}
 
-        <div class="card">
-            <h2>📈 入款记录（{len(income_records)}笔）</h2>
-            <div class="table-responsive">
-                <table>
-                    <thead>
-                        <tr><th>日期时间</th><th>金额(元)</th><th>费率/汇率</th><th>到账(USDT)</th><th>分类</th><th>操作人</th></tr>
-                    </thead>
-                    <tbody>{income_rows if income_rows else '<tr><td colspan="6" style="text-align:center;color:#999;">暂无入款记录</td></tr>'}</tbody>
-                </table>
+        <!-- ===== 所有入款记录（可折叠） ===== -->
+        <div class="card collapsible-card">
+            <div class="collapsible-header" onclick="toggleSection('all_income')">
+                <span>📈 所有入款记录（{len(income_records)}笔）</span>
+                <span class="toggle-icon" id="icon_all_income">▼</span>
+            </div>
+            <div class="collapsible-content" id="all_income">
+                <div class="table-responsive">
+                    <table>
+                        <thead>
+                            <tr><th>日期时间</th><th>金额(元)</th><th>手续费</th><th>汇率</th><th>单笔费用</th><th>USDT</th><th>分类</th><th>操作人</th></tr>
+                        </thead>
+                        <tbody>{income_rows if income_rows else '<tr><td colspan="8" style="text-align:center;color:#999;">暂无入款记录</td></tr>'}</tbody>
+                    </table>
+                </div>
             </div>
         </div>
 
-        <div class="card">
-            <h2>📉 出款记录（{len(expense_records)}笔）</h2>
-            <div class="table-responsive">
-                <table>
-                    <thead>
-                        <tr><th>日期时间</th><th>金额(USDT)</th><th>操作人</th></tr>
-                    </thead>
-                    <tbody>{expense_rows if expense_rows else '<tr><td colspan="3" style="text-align:center;color:#999;">暂无出款记录</td></tr>'}</tbody>
-                </table>
+        <!-- ===== 所有出款记录（可折叠） ===== -->
+        <div class="card collapsible-card">
+            <div class="collapsible-header" onclick="toggleSection('all_expense')">
+                <span>📉 所有出款记录（{len(expense_records)}笔）</span>
+                <span class="toggle-icon" id="icon_all_expense">▼</span>
+            </div>
+            <div class="collapsible-content" id="all_expense">
+                <div class="table-responsive">
+                    <table>
+                        <thead>
+                            <tr><th>日期时间</th><th>金额(USDT)</th><th>操作人</th></tr>
+                        </thead>
+                        <tbody>{expense_rows if expense_rows else '<tr><td colspan="3" style="text-align:center;color:#999;">暂无出款记录</td></tr>'}</tbody>
+                    </table>
+                </div>
             </div>
         </div>
+
+        <!-- ===== 各操作人详细记录 ===== -->
+        <h2 style="color:white; margin: 24px 0 16px 0; font-size: 20px;">👤 各操作人详细记录</h2>
+        {operator_sections}
 
         <div class="footer">
             由 Telegram 记账机器人自动生成
         </div>
     </div>
+
+    <script>
+        function toggleSection(id) {{
+            var content = document.getElementById(id);
+            if (!content) return;
+            var header = content.previousElementSibling;
+            var icon = document.getElementById('icon_' + id);
+
+            if (content.classList.contains('collapsed')) {{
+                content.classList.remove('collapsed');
+                header.classList.remove('collapsed');
+            }} else {{
+                content.classList.add('collapsed');
+                header.classList.add('collapsed');
+            }}
+        }}
+    </script>
 </body>
 </html>"""
 
     return html
-
 
 # ---------- 内联按钮回调处理 ----------
 async def handle_view_current_bill(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4770,3 +5197,435 @@ async def handle_keyboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
         parse_mode='Markdown'
     )
+
+# ==================== 解析函数 ====================
+
+def parse_batch_settings(text: str):
+    """
+    解析组合设置文本，支持多种格式和任意顺序：
+    - 设置手续费2 设置汇率20 设置单笔费用15
+    - 设置汇率20 手续费3 单笔费用2
+    - 设置 @xxx 手续费5 汇率10 单笔费用12
+    """
+    import re
+
+    fee_rate = None
+    exchange_rate = None
+    per_transaction_fee = None
+
+    clean_text = re.sub(r'@\S+', '', text)
+
+    fee_match = re.search(r'(?:设置)?手续费\s*(\d+(?:\.\d+)?)', clean_text)
+    if fee_match:
+        fee_rate = float(fee_match.group(1))
+
+    rate_match = re.search(r'(?:设置)?汇率\s*(\d+(?:\.\d+)?)', clean_text)
+    if rate_match:
+        exchange_rate = float(rate_match.group(1))
+
+    fee_per_match = re.search(r'(?:设置)?单笔费用\s*(\d+(?:\.\d+)?)', clean_text)
+    if fee_per_match:
+        per_transaction_fee = float(fee_per_match.group(1))
+
+    return fee_rate, exchange_rate, per_transaction_fee
+
+
+# ==================== 批量设置 ====================
+
+async def handle_batch_settings(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
+    """处理组合设置：同时设置手续费、汇率、单笔费用"""
+    message = update.message
+    chat = update.effective_chat
+
+    if chat.type not in ['group', 'supergroup']:
+        await message.reply_text("❌ 此功能仅在群组中可用")
+        return
+
+    fee_rate, exchange_rate, per_transaction_fee = parse_batch_settings(text)
+
+    if fee_rate is None and exchange_rate is None and per_transaction_fee is None:
+        await message.reply_text(
+            "❌ 未识别到有效的设置参数\n\n"
+            "💡 用法示例：\n"
+            "`设置手续费2 设置汇率20 设置单笔费用15`\n"
+            "`设置汇率20 手续费3 单笔费用2`",
+            parse_mode="Markdown"
+        )
+        return
+
+    group_id = str(chat.id)
+
+    results = []
+
+    if fee_rate is not None:
+        success = accounting_manager.set_fee_rate(group_id, fee_rate)
+        fee_display = int(fee_rate) if fee_rate == int(fee_rate) else fee_rate
+        results.append(f"✅ 手续费率已设置为：{fee_display}%" if success else "❌ 手续费率设置失败")
+
+    if exchange_rate is not None:
+        success = accounting_manager.set_exchange_rate(group_id, exchange_rate)
+        rate_display = int(exchange_rate) if exchange_rate == int(exchange_rate) else exchange_rate
+        results.append(f"✅ 汇率已设置为：{rate_display}" if success else "❌ 汇率设置失败")
+
+    if per_transaction_fee is not None:
+        success = accounting_manager.set_per_transaction_fee(group_id, per_transaction_fee)
+        fee_display = int(per_transaction_fee) if per_transaction_fee == int(per_transaction_fee) else per_transaction_fee
+        results.append(f"✅ 单笔费用已设置为：{fee_display} 元" if success else "❌ 单笔费用设置失败")
+
+    reply = "⚙️ **组合设置结果**\n\n" + "\n".join(results)
+
+    if any("✅" in r for r in results):
+        session = accounting_manager.get_or_create_session(group_id)
+        reply += "\n\n📋 **当前默认配置**\n"
+        fee_display = int(session['fee_rate']) if session['fee_rate'] == int(session['fee_rate']) else session['fee_rate']
+        rate_display = int(session['exchange_rate']) if session['exchange_rate'] == int(session['exchange_rate']) else session['exchange_rate']
+        per_fee_display = int(session.get('per_transaction_fee', 0)) if session.get('per_transaction_fee', 0) == int(session.get('per_transaction_fee', 0)) else session.get('per_transaction_fee', 0)
+        reply += f"💰 手续费：{fee_display}%\n"
+        reply += f"💱 汇率：{rate_display}\n"
+        reply += f"📝 单笔费用：{per_fee_display} 元"
+
+    await message.reply_text(reply, parse_mode="Markdown")
+
+
+# ==================== 用户个性化配置 ====================
+
+async def handle_user_config_settings(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
+    """处理设置指定人的手续费/汇率/单笔费用"""
+    logger.info(f"[handle_user_config_settings] 被调用, text={text}")  # ✅ 添加这行
+    message = update.message
+    chat = update.effective_chat
+
+    if chat.type not in ['group', 'supergroup']:
+        await message.reply_text("❌ 此功能仅在群组中可用")
+        return
+
+    import re
+
+    target_user = None
+    target_username = None
+
+    if message.reply_to_message:
+        target_user = message.reply_to_message.from_user
+    else:
+        if message.entities:
+            for entity in message.entities:
+                if entity.type == "text_mention" and entity.user:
+                    target_user = entity.user
+                    break
+                elif entity.type == "mention":
+                    target_username = text[entity.offset:entity.offset + entity.length].lstrip('@')
+                    break
+
+    if not target_user and target_username:
+        group_id = str(chat.id)
+        try:
+            with accounting_manager._get_conn() as conn:
+                c = conn.cursor()
+                c.execute(
+                    "SELECT user_id, first_name, username FROM group_users WHERE username = ? LIMIT 1",
+                    (target_username,)
+                )
+                row = c.fetchone()
+                if row:
+                    target_user = type('User', (), {
+                        'id': row[0],
+                        'first_name': row[1] or target_username,
+                        'username': row[2] or target_username
+                    })()
+        except Exception as e:
+            logger.error(f"查找用户失败: {e}")
+
+    if not target_user:
+        if target_username:
+            await message.reply_text(f"❌ 未找到用户 @{target_username}\n\n💡 请确认该用户是否在群组中发过言")
+        else:
+            await message.reply_text("❌ 请使用 @用户名 指定用户，或回复用户消息来设置")
+        return
+
+    fee_rate, exchange_rate, per_transaction_fee = parse_batch_settings(text)
+
+    if fee_rate is None and exchange_rate is None and per_transaction_fee is None:
+        await message.reply_text(
+            "❌ 未识别到有效的设置参数\n\n"
+            "💡 用法示例：\n"
+            "• `设置 @用户名 手续费5`\n"
+            "• `设置 @用户名 手续费5 汇率10`\n"
+            "• `设置 @用户名 手续费5 汇率10 单笔费用12`\n"
+            "• 回复用户消息：`设置手续费5 汇率10`",
+            parse_mode="Markdown"
+        )
+        return
+
+    group_id = str(chat.id)
+
+    accounting_manager.update_user_info(group_id, target_user.id, target_user.username or "", 
+                        target_user.first_name or "", "")
+
+    display_name = target_user.first_name or target_user.username or str(target_user.id)
+
+    success = accounting_manager.set_user_config(
+        group_id, target_user.id,
+        fee_rate=fee_rate,
+        exchange_rate=exchange_rate,
+        per_transaction_fee=per_transaction_fee,
+    )
+
+    if success:
+        config = accounting_manager.get_effective_config(group_id, target_user.id)
+
+        reply = f"✅ 已为 {display_name} 设置个性化配置\n\n"
+        reply += f"💰 手续费：{config['fee_rate']}%\n"
+        reply += f"💱 汇率：{config['exchange_rate']}\n"
+        reply += f"📝 单笔费用：{config['per_transaction_fee']} 元\n\n"
+        reply += "💡 该用户记账时将自动使用以上配置"
+    else:
+        reply = f"❌ 为 {display_name} 设置配置失败"
+
+    await message.reply_text(reply, parse_mode="Markdown")
+
+
+async def handle_delete_user_config(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
+    """处理删除指定人的个性化配置"""
+    message = update.message
+    chat = update.effective_chat
+
+    if chat.type not in ['group', 'supergroup']:
+        await message.reply_text("❌ 此功能仅在群组中可用")
+        return
+
+    target_user = None
+
+    if message.reply_to_message:
+        target_user = message.reply_to_message.from_user
+    else:
+        if message.entities:
+            for entity in message.entities:
+                if entity.type == "text_mention" and entity.user:
+                    target_user = entity.user
+                    break
+                elif entity.type == "mention":
+                    username = text[entity.offset:entity.offset + entity.length].lstrip('@')
+                    group_id = str(chat.id)
+                    try:
+                        with accounting_manager._get_conn() as conn:
+                            c = conn.cursor()
+                            c.execute(
+                                "SELECT user_id, first_name, username FROM group_users WHERE username = ? LIMIT 1",
+                                (username,)
+                            )
+                            row = c.fetchone()
+                            if row:
+                                target_user = type('User', (), {
+                                    'id': row[0],
+                                    'first_name': row[1] or username,
+                                    'username': row[2] or username
+                                })()
+                    except Exception as e:
+                        logger.error(f"查找用户失败: {e}")
+                    break
+
+    if not target_user:
+        await message.reply_text("❌ 请使用 @用户名 或回复用户消息来指定要删除配置的用户")
+        return
+
+    group_id = str(chat.id)
+
+    config = accounting_manager.get_user_config(group_id, target_user.id)
+
+    if not config.get("has_config"):
+        display_name = target_user.first_name or target_user.username or str(target_user.id)
+        await message.reply_text(f"❌ {display_name} 没有个性化配置")
+        return
+
+    success = accounting_manager.delete_user_config(group_id, target_user.id)
+
+    if success:
+        display_name = target_user.first_name or target_user.username or str(target_user.id)
+        await message.reply_text(f"✅ 已删除 {display_name} 的个性化配置\n\n💡 该用户将使用群组默认配置")
+    else:
+        await message.reply_text("❌ 删除失败，请稍后重试")
+
+
+async def handle_view_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """查看群组的配置信息（包括个性化配置）"""
+    message = update.message
+    chat = update.effective_chat
+
+    if chat.type not in ['group', 'supergroup']:
+        await message.reply_text("❌ 此功能仅在群组中可用")
+        return
+
+    group_id = str(chat.id)
+
+    session = accounting_manager.get_or_create_session(group_id)
+
+    reply = "⚙️ **群组配置信息**\n\n"
+    reply += "📋 **默认配置**\n"
+    reply += f"💰 手续费：{session['fee_rate']}%\n"
+    reply += f"💱 汇率：{session['exchange_rate']}\n"
+    reply += f"📝 单笔费用：{session.get('per_transaction_fee', 0)} 元\n"
+
+    user_configs = accounting_manager.get_all_user_configs(group_id)
+
+    if user_configs:
+        reply += f"\n👥 **个性化配置**（{len(user_configs)}人）\n"
+        for config in user_configs[:20]:
+            display_name = config.get('first_name', '')
+            username = config.get('username', '')
+            if username and display_name:
+                display_name = f"{display_name} (@{username})"
+            elif username:
+                display_name = f"@{username}"
+            elif not display_name:
+                display_name = f"用户{config['user_id']}"
+
+            reply += f"\n👤 {display_name}\n"
+            if config['fee_rate'] is not None:
+                reply += f"   手续费：{config['fee_rate']}%\n"
+            if config['exchange_rate'] is not None:
+                reply += f"   汇率：{config['exchange_rate']}\n"
+            if config['per_transaction_fee'] is not None:
+                reply += f"   单笔费用：{config['per_transaction_fee']} 元\n"
+
+        if len(user_configs) > 20:
+            reply += f"\n... 还有 {len(user_configs) - 20} 人有配置"
+    else:
+        reply += "\n👥 **个性化配置**：暂无"
+
+    await message.reply_text(reply, parse_mode="Markdown")
+
+
+# ==================== 操作人管理 ====================
+
+async def handle_operator_mention(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理群组内通过 @ 添加/删除临时操作人"""
+    message = update.message
+    user = message.from_user
+    text = message.text.strip()
+    chat = update.effective_chat
+
+    if not is_authorized(user.id, require_full_access=True):
+        await message.reply_text("❌ 只有控制人或正式操作员才能管理操作人")
+        return
+
+    is_add = text.startswith('添加操作人')
+    is_remove = text.startswith('删除操作人')
+
+    mentioned_users = []
+    if message.entities:
+        for entity in message.entities:
+            if entity.type == "text_mention" and entity.user:
+                mentioned_users.append(entity.user)
+            elif entity.type == "mention":
+                username = text[entity.offset:entity.offset + entity.length].lstrip('@')
+                group_id = str(chat.id)
+                found = False
+                
+                # ✅ 直接从 group_users 表查询
+                try:
+                    with accounting_manager._get_conn() as conn:
+                        c = conn.cursor()
+                        c.execute(
+                            "SELECT user_id, first_name, username FROM group_users WHERE username = ? LIMIT 1",
+                            (username,)
+                        )
+                        row = c.fetchone()
+                        if row:
+                            mentioned_users.append(type('User', (), {
+                                'id': row[0],
+                                'first_name': row[1] or username,
+                                'username': row[2] or username
+                            })())
+                            found = True
+                except Exception as e:
+                    logger.error(f"查找用户失败: {e}")
+
+                if not found:
+                    mentioned_users.append(username)
+
+
+    if not mentioned_users:
+        await message.reply_text(
+            f"❌ 请使用 @ 指定用户\n\n"
+            f"用法示例：\n"
+            f"`添加操作人 @username1 @username2`\n"
+            f"`删除操作人 @username1 @username2`",
+            parse_mode="Markdown"
+        )
+        return
+
+    user_ids_to_process = []
+    user_info_list = []
+
+    for mentioned in mentioned_users:
+        if isinstance(mentioned, str):
+            user_info_list.append({
+                "id": None,
+                "name": f"@{mentioned}",
+                "unknown": True
+            })
+        else:
+            user_ids_to_process.append(mentioned.id)
+            user_info_list.append({
+                "id": mentioned.id,
+                "name": mentioned.first_name or mentioned.username or str(mentioned.id)
+            })
+
+    valid_ids = [u["id"] for u in user_info_list if u["id"] is not None and not u.get("unknown")]
+    unknown_users = [u for u in user_info_list if u.get("unknown")]
+
+    if is_add:
+        if not valid_ids:
+            if unknown_users:
+                await message.reply_text(
+                    f"❌ 无法找到以下用户：\n" + "\n".join([f"• {u['name']}" for u in unknown_users]) +
+                    "\n\n💡 该用户需要先在群组中发过言"
+                )
+            return
+
+        from auth import batch_add_temp_operators
+        results = await batch_add_temp_operators(valid_ids, user.id, context)
+
+        reply_parts = []
+        if results["success"]:
+            success_names = [next((u["name"] for u in user_info_list if u["id"] == uid), str(uid)) for uid in results["success"]]
+            reply_parts.append(f"✅ 已添加临时操作人：{', '.join(success_names)}")
+        if results["already_exists"]:
+            exists_names = [next((u["name"] for u in user_info_list if u["id"] == uid), str(uid)) for uid in results["already_exists"]]
+            reply_parts.append(f"⚠️ 以下用户已是操作人：{', '.join(exists_names)}")
+        if results["failed"]:
+            failed_names = [next((u["name"] for u in user_info_list if u["id"] == uid), str(uid)) for uid in results["failed"]]
+            reply_parts.append(f"❌ 添加失败：{', '.join(failed_names)}")
+        if unknown_users:
+            reply_parts.append(f"❓ 未找到：{', '.join([u['name'] for u in unknown_users])}")
+
+        reply = "\n".join(reply_parts)
+        reply += "\n\n💡 临时操作人只能使用记账功能"
+
+    elif is_remove:
+        if not valid_ids:
+            if unknown_users:
+                await message.reply_text(
+                    f"❌ 无法找到以下用户：\n" + "\n".join([f"• {u['name']}" for u in unknown_users])
+                )
+            return
+
+        from auth import batch_remove_temp_operators
+        results = batch_remove_temp_operators(valid_ids)
+
+        reply_parts = []
+        if results["success"]:
+            success_names = [next((u["name"] for u in user_info_list if u["id"] == uid), str(uid)) for uid in results["success"]]
+            reply_parts.append(f"✅ 已删除临时操作人：{', '.join(success_names)}")
+        if results["not_found"]:
+            notfound_names = [next((u["name"] for u in user_info_list if u["id"] == uid), str(uid)) for uid in results["not_found"]]
+            reply_parts.append(f"⚠️ 以下用户不是临时操作人：{', '.join(notfound_names)}")
+        if results["failed"]:
+            failed_names = [next((u["name"] for u in user_info_list if u["id"] == uid), str(uid)) for uid in results["failed"]]
+            reply_parts.append(f"❌ 删除失败：{', '.join(failed_names)}")
+        if unknown_users:
+            reply_parts.append(f"❓ 未找到：{', '.join([u['name'] for u in unknown_users])}")
+
+        reply = "\n".join(reply_parts)
+
+    await message.reply_text(reply)
