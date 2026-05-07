@@ -152,16 +152,15 @@ async def check_address_transactions(context: ContextTypes.DEFAULT_TYPE):
     # 并发执行所有检查任务
     await asyncio.gather(*[check_one(addr) for addr in addresses])
 
-
 async def _check_single_address(addr_info, bot):
-    """检查单个地址（无论通知开关，都会更新 last_check）"""
+    """检查单个地址（每个添加者独立通知）"""
     address = addr_info["address"]
     last_check = addr_info.get("last_check", 0)
     added_at = addr_info.get("added_at", 0)
     note = addr_info.get("note", "")
     added_by = addr_info.get("added_by")
 
-    # 获取用户通知偏好（但不影响检查流程）
+    # 获取用户通知偏好
     notify_enabled = True
     if added_by:
         prefs = get_user_preferences(added_by)
@@ -170,7 +169,7 @@ async def _check_single_address(addr_info, bot):
     # 确定查询起始时间
     if last_check == 0:
         min_timestamp = added_at * 1000
-        logger.info(f"新监控地址 {address[:8]}...，从添加时间开始检查")
+        logger.info(f"[{added_by}] 新监控地址 {address[:8]}...，从添加时间开始检查")
     else:
         min_timestamp = last_check * 1000
 
@@ -178,13 +177,13 @@ async def _check_single_address(addr_info, bot):
     txs = await get_trc20_transactions(address, min_timestamp)
 
     if not txs:
-        # 没有新交易，直接更新最后检查时间
+        # 没有新交易，直接更新最后检查时间（全局）
         update_address_last_check(address, int(time.time()))
         return
 
-    logger.info(f"地址 {address[:8]}... 发现 {len(txs)} 笔新交易")
+    logger.info(f"[{added_by}] 地址 {address[:8]}... 发现 {len(txs)} 笔新交易")
 
-    # 获取当前余额和月度统计（仅在需要发送通知时获取，以节省API调用）
+    # 获取当前余额和月度统计（在需要通知时才获取）
     current_balance = None
     monthly_stats = None
     if notify_enabled:
@@ -201,30 +200,19 @@ async def _check_single_address(addr_info, bot):
         amount = int(raw_amount) / 1_000_000 if raw_amount else 0
         timestamp = tx.get("block_timestamp", 0) / 1000
 
-        # 检查是否已通知过
-        if is_tx_notified(tx_id):
+        # 🔥 关键修改：检查该交易是否已通知给当前用户
+        if is_tx_notified(tx_id, user_id=added_by):
             continue
 
         # 跳过添加时间之前的历史交易
         if last_check == 0 and timestamp < added_at:
-            logger.debug(f"跳过添加前的历史交易: {tx_id[:10]}...")
-            mark_tx_notified(tx_id)
+            logger.debug(f"[{added_by}] 跳过添加前的历史交易: {tx_id[:10]}...")
+            mark_tx_notified(tx_id, user_id=added_by)
             continue
 
-        # 检查交易记录是否已存在
-        conn = get_db_connection()
-        c = conn.cursor()
-        c.execute("SELECT id, notified FROM address_transactions WHERE tx_id = ?", (tx_id,))
-        existing = c.fetchone()
-        conn.close()
-
-        if existing:
-            if existing[1] == 0:
-                mark_tx_notified(tx_id)
-            continue
-
-        # 记录交易
-        add_transaction_record(address, tx_id, from_addr, to_addr, amount, int(timestamp))
+        # 🔥 记录交易（传递 user_id）
+        add_transaction_record(address, tx_id, from_addr, to_addr, amount, 
+                               int(timestamp), user_id=added_by)
 
         # 发送通知（仅当用户开启通知时）
         if notify_enabled:
@@ -232,7 +220,6 @@ async def _check_single_address(addr_info, bot):
             short_from = f"{from_addr[:6]}...{from_addr[-6:]}" if len(from_addr) > 12 else from_addr
             short_to = f"{to_addr[:6]}...{to_addr[-6:]}" if len(to_addr) > 12 else to_addr
 
-            # 时间转换为北京时间
             utc_time = datetime.fromtimestamp(timestamp, tz=timezone.utc)
             beijing_time = utc_time.astimezone(BEIJING_TZ)
             time_str = beijing_time.strftime('%Y-%m-%d %H:%M:%S')
@@ -246,7 +233,6 @@ async def _check_single_address(addr_info, bot):
             else:
                 message += "\n"
 
-            # 如果余额和统计已获取，则显示；否则临时获取
             if current_balance is None:
                 current_balance = await get_address_balance(address)
             if monthly_stats is None:
@@ -267,14 +253,14 @@ async def _check_single_address(addr_info, bot):
 
             try:
                 await bot.send_message(chat_id=added_by, text=message, parse_mode="Markdown")
-                logger.info(f"已发送监控通知给用户 {added_by} (备注: {note or '无'})")
+                logger.info(f"[{added_by}] 已发送监控通知 (备注: {note or '无'})")
             except Exception as e:
-                logger.error(f"发送给用户 {added_by} 失败: {e}")
+                logger.error(f"[{added_by}] 发送通知失败: {e}")
 
-        # 无论是否发送通知，都标记为已通知，避免下次重复处理
-        mark_tx_notified(tx_id)
+        # 🔥 标记该用户已通知
+        mark_tx_notified(tx_id, user_id=added_by)
 
-    # 更新最后检查时间（无论通知开关与否）
+    # 更新最后检查时间
     update_address_last_check(address, current_time)
 
 async def monitor_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
