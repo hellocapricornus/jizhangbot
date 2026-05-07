@@ -116,6 +116,8 @@ class Calculator:
     def safe_eval(expr: str):
         """安全计算表达式"""
         try:
+            # 在这里添加：将中文括号替换为英文括号
+            expr = expr.replace('（', '(').replace('）', ')')
             # 预处理：替换 ^ 为 **
             expr = expr.replace('^', '**')
 
@@ -4190,6 +4192,9 @@ async def handle_calculator(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = update.message.text.strip()
 
+    # ✅ 在这里添加：将中文符号替换为英文符号
+    text = text.replace('（', '(').replace('）', ')')
+
     # 🔥 排除记账命令
     exclude_prefixes = ['设置手续费', '设置汇率', '设置单笔费用', '结束账单', '今日总', '总', 
                         '当前账单', '查询账单', '清理账单', '清空账单', '清理总账单', 
@@ -5520,7 +5525,7 @@ async def handle_operator_mention(update: Update, context: ContextTypes.DEFAULT_
                 username = text[entity.offset:entity.offset + entity.length].lstrip('@')
                 group_id = str(chat.id)
                 found = False
-                
+
                 # ✅ 直接从 group_users 表查询
                 try:
                     with accounting_manager._get_conn() as conn:
