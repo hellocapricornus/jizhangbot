@@ -313,6 +313,12 @@ def init_db():
     for cat in default_categories:
         c.execute("INSERT OR IGNORE INTO group_categories (category_name, created_at) VALUES (?, ?)", (cat, now))
 
+    try:
+        c.execute("SELECT notified FROM address_transactions LIMIT 1")
+    except:
+        # 表不存在时会自动创建，无需处理
+        pass
+
     # 数据库迁移：为现有群组添加 category 字段
     try:
         c.execute("SELECT category FROM groups LIMIT 1")
@@ -531,16 +537,96 @@ def update_address_last_check(address: str, last_check: int):
     conn.commit()
     conn.close()
 
+def is_tx_notified(tx_id: str, user_id: int = None) -> bool:
+    """
+    检查交易是否已通知给指定用户
+    如果 user_id 为 None，检查是否已通知过任何人
+    """
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT notified FROM address_transactions WHERE tx_id = ?", (tx_id,))
+    row = c.fetchone()
+    conn.close()
 
-def add_transaction_record(address: str, tx_id: str, from_addr: str, to_addr: str, amount: float, timestamp: int):
-    """添加交易记录"""
+    if not row:
+        return False
+
+    if user_id is None:
+        # 兼容旧逻辑：只要有记录就认为已通知
+        return True
+
+    # 检查该用户是否在已通知列表中
+    notified_str = row[0] or ""
+    notified_users = [uid.strip() for uid in notified_str.split(",") if uid.strip()]
+    return str(user_id) in notified_users
+
+
+def mark_tx_notified(tx_id: str, user_id: int = None):
+    """
+    标记交易为已通知给指定用户
+    如果 user_id 为 None，标记为已通知所有人（兼容旧逻辑）
+    """
+    conn = get_db_connection()
+    c = conn.cursor()
+
+    if user_id is None:
+        c.execute("UPDATE address_transactions SET notified = 'all' WHERE tx_id = ?", (tx_id,))
+    else:
+        c.execute("SELECT notified FROM address_transactions WHERE tx_id = ?", (tx_id,))
+        row = c.fetchone()
+
+        if row and row[0]:
+            notified_str = row[0]
+            if notified_str == 'all':
+                # 已通知所有人，无需更新
+                conn.close()
+                return
+            notified_users = [uid.strip() for uid in notified_str.split(",") if uid.strip()]
+        else:
+            notified_users = []
+
+        if str(user_id) not in notified_users:
+            notified_users.append(str(user_id))
+
+        c.execute("UPDATE address_transactions SET notified = ? WHERE tx_id = ?", 
+                  (",".join(notified_users), tx_id))
+
+    conn.commit()
+    conn.close()
+
+
+def add_transaction_record(address: str, tx_id: str, from_addr: str, to_addr: str, 
+                           amount: float, timestamp: int, user_id: int = None):
+    """
+    添加交易记录
+    新增 user_id 参数，初始化 notified 字段
+    """
     conn = get_db_connection()
     c = conn.cursor()
     try:
+        # 检查是否已存在
+        c.execute("SELECT id, notified FROM address_transactions WHERE tx_id = ?", (tx_id,))
+        existing = c.fetchone()
+
+        if existing:
+            # 已存在，更新 notified 列表
+            if user_id is not None:
+                notified_str = existing[1] or ""
+                if notified_str != 'all':
+                    notified_users = [uid.strip() for uid in notified_str.split(",") if uid.strip()]
+                    if str(user_id) not in notified_users:
+                        notified_users.append(str(user_id))
+                        c.execute("UPDATE address_transactions SET notified = ? WHERE id = ?",
+                                  (",".join(notified_users), existing[0]))
+                conn.commit()
+            return True
+
+        # 新增记录
+        initial_notified = str(user_id) if user_id else ""
         c.execute("""
             INSERT INTO address_transactions (address, tx_id, from_addr, to_addr, amount, timestamp, notified)
-            VALUES (?, ?, ?, ?, ?, ?, 0)
-        """, (address, tx_id, from_addr, to_addr, amount, timestamp))
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (address, tx_id, from_addr, to_addr, amount, timestamp, initial_notified))
         conn.commit()
         return True
     except Exception as e:
@@ -550,23 +636,6 @@ def add_transaction_record(address: str, tx_id: str, from_addr: str, to_addr: st
         conn.close()
 
 
-def is_tx_notified(tx_id: str) -> bool:
-    """检查交易是否已通知"""
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("SELECT notified FROM address_transactions WHERE tx_id = ?", (tx_id,))
-    row = c.fetchone()
-    conn.close()
-    return row is not None and row[0] == 1
-
-
-def mark_tx_notified(tx_id: str):
-    """标记交易为已通知"""
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("UPDATE address_transactions SET notified = 1 WHERE tx_id = ?", (tx_id,))
-    conn.commit()
-    conn.close()
 
 
 # ========== 原有函数保持不变 ==========
