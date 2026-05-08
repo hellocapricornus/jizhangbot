@@ -178,7 +178,7 @@ async def _check_single_address(addr_info, bot):
 
     if not txs:
         # 没有新交易，直接更新最后检查时间（全局）
-        update_address_last_check(address, int(time.time()))
+        update_address_last_check(address, int(time.time()), user_id=added_by)
         return
 
     logger.info(f"[{added_by}] 地址 {address[:8]}... 发现 {len(txs)} 笔新交易")
@@ -261,7 +261,7 @@ async def _check_single_address(addr_info, bot):
         mark_tx_notified(tx_id, user_id=added_by)
 
     # 更新最后检查时间
-    update_address_last_check(address, current_time)
+    update_address_last_check(address, int(time.time()), user_id=added_by)
 
 async def monitor_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """USDT 地址监控菜单"""
