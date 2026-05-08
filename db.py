@@ -529,19 +529,20 @@ def remove_monitored_address(address_id: int):
     return True
 
 
-def update_address_last_check(address: str, last_check: int):
+def update_address_last_check(address: str, last_check: int, user_id: int = None):
     """更新地址最后检查时间"""
     conn = get_db_connection()
     c = conn.cursor()
-    c.execute("UPDATE monitored_addresses SET last_check = ? WHERE address = ?", (last_check, address))
+    if user_id is not None:
+        c.execute("UPDATE monitored_addresses SET last_check = ? WHERE address = ? AND added_by = ?", 
+                  (last_check, address, user_id))
+    else:
+        c.execute("UPDATE monitored_addresses SET last_check = ? WHERE address = ?", 
+                  (last_check, address))
     conn.commit()
     conn.close()
 
 def is_tx_notified(tx_id: str, user_id: int = None) -> bool:
-    """
-    检查交易是否已通知给指定用户
-    如果 user_id 为 None，检查是否已通知过任何人
-    """
     conn = get_db_connection()
     c = conn.cursor()
     c.execute("SELECT notified FROM address_transactions WHERE tx_id = ?", (tx_id,))
@@ -552,20 +553,17 @@ def is_tx_notified(tx_id: str, user_id: int = None) -> bool:
         return False
 
     if user_id is None:
-        # 兼容旧逻辑：只要有记录就认为已通知
         return True
 
-    # 检查该用户是否在已通知列表中
     notified_str = row[0] or ""
+    if notified_str == 'all':
+        return True
+
     notified_users = [uid.strip() for uid in notified_str.split(",") if uid.strip()]
     return str(user_id) in notified_users
 
 
 def mark_tx_notified(tx_id: str, user_id: int = None):
-    """
-    标记交易为已通知给指定用户
-    如果 user_id 为 None，标记为已通知所有人（兼容旧逻辑）
-    """
     conn = get_db_connection()
     c = conn.cursor()
 
@@ -578,7 +576,6 @@ def mark_tx_notified(tx_id: str, user_id: int = None):
         if row and row[0]:
             notified_str = row[0]
             if notified_str == 'all':
-                # 已通知所有人，无需更新
                 conn.close()
                 return
             notified_users = [uid.strip() for uid in notified_str.split(",") if uid.strip()]
