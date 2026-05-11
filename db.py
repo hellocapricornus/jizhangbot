@@ -369,19 +369,52 @@ def init_db():
         c.execute("ALTER TABLE groups ADD COLUMN joined_at INTEGER DEFAULT 0")
         logger.info("已为 groups 表添加 joined_at 字段")
 
-    # 新增：交易记录表
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS address_transactions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            address TEXT NOT NULL,
-            tx_id TEXT NOT NULL,
-            from_addr TEXT,
-            to_addr TEXT,
-            amount REAL,
-            timestamp INTEGER NOT NULL,
-            notified INTEGER DEFAULT 0
-        )
-    """)
+    # 先检查旧表是否存在
+    c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='address_transactions'")
+    old_table_exists = c.fetchone()
+
+    if old_table_exists:
+        # 检查 notified 字段类型
+        c.execute("PRAGMA table_info(address_transactions)")
+        columns = {row[1]: row[2] for row in c.fetchall()}
+
+        if columns.get('notified', '').upper() == 'INTEGER':
+            # 需要迁移：重建表
+            logger.info("检测到 address_transactions 表 notified 字段为 INTEGER，正在迁移...")
+            c.execute("ALTER TABLE address_transactions RENAME TO address_transactions_old")
+            c.execute("""
+                CREATE TABLE address_transactions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    address TEXT NOT NULL,
+                    tx_id TEXT NOT NULL,
+                    from_addr TEXT,
+                    to_addr TEXT,
+                    amount REAL,
+                    timestamp INTEGER NOT NULL,
+                    notified TEXT DEFAULT ''
+                )
+            """)
+            c.execute("""
+                INSERT INTO address_transactions (id, address, tx_id, from_addr, to_addr, amount, timestamp, notified)
+                SELECT id, address, tx_id, from_addr, to_addr, amount, timestamp, CAST(notified AS TEXT)
+                FROM address_transactions_old
+            """)
+            c.execute("DROP TABLE address_transactions_old")
+            logger.info("address_transactions 表迁移完成")
+    else:
+        # 表不存在，直接创建
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS address_transactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                address TEXT NOT NULL,
+                tx_id TEXT NOT NULL,
+                from_addr TEXT,
+                to_addr TEXT,
+                amount REAL,
+                timestamp INTEGER NOT NULL,
+                notified TEXT DEFAULT ''
+            )
+        """)
 
     # 🔥 新增：记账记录表（确保存在）
     c.execute("""
@@ -424,7 +457,7 @@ def init_db():
             end_time INTEGER NOT NULL,
             date TEXT NOT NULL,
             fee_rate REAL DEFAULT 0.0,
-            exchang�e_rate REAL DEFAULT 1.0
+            exchange_rate REAL DEFAULT 1.0
         )
     """)
 
@@ -657,7 +690,7 @@ def add_transaction_record(address: str, tx_id: str, from_addr: str, to_addr: st
 def save_group(group_id: str, title: str, category: str = None):
     """保存或更新群组信息（支持自动分类）"""
     import time
-    conn = get_db�_connection()
+    conn = get_db_connection()
     c = conn.cursor()
 
     try:
@@ -916,7 +949,7 @@ def safe_db_connection(db_path: str = DB_PATH):
         conn.row_factory = sqlite3.Row
         yield conn
     except Exception as e:
-  �      logger.error(f"数据库操作失败: {e}")
+        logger.error(f"数据库操作失败: {e}")
         raise
     finally:
         if conn:
