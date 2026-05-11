@@ -18,7 +18,15 @@ PROFILE_MAIN = 1
 SET_SIGNATURE = 2
 FEEDBACK = 3
 EXPORT_DATA = 4
-
+# ========== 规则管理状态 ==========
+RULE_MENU = 5
+RULE_ADD_NAME = 6
+RULE_ADD_CONTENT = 7
+RULE_UPDATE_SELECT = 8
+RULE_UPDATE_CONTENT = 9
+RULE_DELETE_SELECT = 10
+RULE_TOGGLE_SELECT = 11
+RULE_VIEW = 12
 
 # ---------- 辅助：构建个人中心菜单 ----------
 async def _build_profile_menu(user_id: int, prefs: dict = None, display_name: str = "") -> tuple:
@@ -73,6 +81,13 @@ async def _build_profile_menu(user_id: int, prefs: dict = None, display_name: st
             status = "🟢 已开启" if report_enabled else "🔴 已关闭"
             keyboard.append([InlineKeyboardButton(f"📋 每日早报 {status}", callback_data="profile_report_toggle")])
         keyboard.append([InlineKeyboardButton("📈 数据分析导出", callback_data="profile_export")])
+
+    # ========== 规则管理（仅完整权限可见） ==========
+    if full_access:
+        from db import get_all_rules
+        rules = get_all_rules(active_only=True)
+        rule_count = len(rules)
+        keyboard.append([InlineKeyboardButton(f"📋 规则管理（{rule_count}个）", callback_data="profile_rules_menu")])
 
     keyboard.append([InlineKeyboardButton("◀️ 返回主菜单", callback_data="profile_back")])
 
@@ -881,3 +896,414 @@ async def profile_report_toggle(update: Update, context: ContextTypes.DEFAULT_TY
     prefs = get_user_preferences(user_id)
     text, markup = await _build_profile_menu(user_id, prefs, display_name)
     await query.message.edit_text(text, reply_markup=markup, parse_mode="Markdown")
+
+# ==================== 规则管理 ====================
+# ---- 规则管理主菜单 ----
+async def profile_rules_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """规则管理主菜单"""
+    query = update.callback_query
+    user_id = query.from_user.id
+    await query.answer()
+
+    from db import get_all_rules, get_rule_global_status
+    rules = get_all_rules(active_only=True)
+    rule_enabled = get_rule_global_status()
+
+    status_text = "🟢 已启用" if rule_enabled else "🔴 已停用"
+
+    text = "📋 **规则管理**\n\n"
+    text += f"⚙️ 规则功能状态：**{status_text}**\n\n"
+
+    if rules:
+        text += f"📊 当前已添加 **{len(rules)}** 个规则：\n"
+        for rule in rules[:10]:
+            text += f"  📌 {rule['rule_name']}\n"
+        if len(rules) > 10:
+            text += f"  ... 还有 {len(rules) - 10} 个\n"
+    else:
+        text += "📭 暂无规则\n"
+
+    text += "\n请选择操作："
+
+    keyboard = [
+        [InlineKeyboardButton("➕ 添加规则", callback_data="profile_rule_add")],
+    ]
+
+    if rules:
+        keyboard.append([InlineKeyboardButton("📖 查看所有规则", callback_data="profile_rule_view_all")])
+        keyboard.append([InlineKeyboardButton("✏️ 更新规则", callback_data="profile_rule_update_select")])
+        keyboard.append([InlineKeyboardButton("🗑️ 删除规则", callback_data="profile_rule_delete_select")])
+
+    # 全局开关按钮
+    toggle_text = "🔴 停用规则功能" if rule_enabled else "🟢 启用规则功能"
+    keyboard.append([InlineKeyboardButton(toggle_text, callback_data="profile_rule_global_toggle")])
+
+    keyboard.append([InlineKeyboardButton("◀️ 返回个人中心", callback_data="profile_back_to_menu")])
+
+    await query.message.edit_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+    return RULE_MENU
+
+# ---- 添加规则：输入名称 ----
+async def profile_rule_add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """添加规则 - 输入名称"""
+    query = update.callback_query
+    await query.answer()
+
+    context.user_data["profile_input_state"] = True
+    context.user_data["rule_action"] = "add_name"
+
+    keyboard = [[InlineKeyboardButton("◀️ 返回规则管理", callback_data="profile_rules_menu")]]
+
+    await query.message.edit_text(
+        "➕ **添加规则**\n\n"
+        "请输入规则名称（提示词）：\n"
+        "例如：德国、美国、BPay手续费 等\n\n"
+        "💡 群组内输入「发送名称规则」即可查询\n"
+        "例如输入：发送德国规则\n"
+        "❌ 发送 /cancel 取消",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+    return RULE_ADD_NAME
+
+async def profile_rule_add_name_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """接收规则名称"""
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
+
+    if text == '/cancel':
+        context.user_data.pop("profile_input_state", None)
+        context.user_data.pop("rule_action", None)
+        await update.message.reply_text("❌ 已取消添加")
+        prefs = get_user_preferences(user_id)
+        _, markup = await _build_profile_menu(user_id, prefs, 
+                                              update.effective_user.username or update.effective_user.first_name or "")
+        await update.message.reply_text("已返回个人中心", reply_markup=markup, parse_mode="Markdown")
+        return ConversationHandler.END
+
+    if len(text) < 1:
+        await update.message.reply_text("❌ 规则名称不能为空，请重新输入：")
+        return RULE_ADD_NAME
+
+    # 检查是否已存在
+    from db import get_rule
+    existing = get_rule(text)
+    if existing and existing['is_active']:
+        await update.message.reply_text(
+            f"⚠️ 规则「{text}」已存在\n"
+            f"内容：{existing['rule_content'][:100]}\n\n"
+            f"请使用其他名称，或先删除后再添加：\n"
+            f"❌ 发送 /cancel 取消"
+        )
+        return RULE_ADD_NAME
+
+    context.user_data["rule_name"] = text
+    context.user_data["rule_action"] = "add_content"
+
+    await update.message.reply_text(
+        f"📝 规则名称：**{text}**\n\n"
+        "请输入规则内容：\n"
+        "例如：手续费5%，汇率7.2，使用TRC20地址...\n\n"
+        "💡 支持 Markdown 格式\n"
+        "❌ 发送 /cancel 取消",
+        parse_mode="Markdown"
+    )
+    return RULE_ADD_CONTENT
+
+async def profile_rule_add_content_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """接收规则内容并保存"""
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
+
+    if text == '/cancel':
+        context.user_data.pop("profile_input_state", None)
+        context.user_data.pop("rule_action", None)
+        context.user_data.pop("rule_name", None)
+        await update.message.reply_text("❌ 已取消添加")
+        prefs = get_user_preferences(user_id)
+        _, markup = await _build_profile_menu(user_id, prefs, 
+                                              update.effective_user.username or update.effective_user.first_name or "")
+        await update.message.reply_text("已返回个人中心", reply_markup=markup, parse_mode="Markdown")
+        return ConversationHandler.END
+
+    rule_name = context.user_data.get("rule_name", "")
+    if not rule_name:
+        await update.message.reply_text("❌ 会话已过期，请重新添加")
+        context.user_data.pop("profile_input_state", None)
+        context.user_data.pop("rule_action", None)
+        return ConversationHandler.END
+
+    from db import add_rule
+    success = add_rule(rule_name, text, user_id)
+
+    if success:
+        await update.message.reply_text(
+            f"✅ 规则「**{rule_name}**」已添加成功！\n\n"
+            f"💡 有权限的人在群内发送「**发送{rule_name}规则**」即可查看该规则"
+        )
+    else:
+        await update.message.reply_text("❌ 添加失败，该规则可能已存在")
+
+    # 🔥 关键修复：在清除状态前，设置标记防止AI捕获
+    context.user_data["_message_handled"] = True
+
+    context.user_data.pop("profile_input_state", None)
+    context.user_data.pop("rule_action", None)
+    context.user_data.pop("rule_name", None)
+
+    prefs = get_user_preferences(user_id)
+    _, markup = await _build_profile_menu(user_id, prefs, 
+                                          update.effective_user.username or update.effective_user.first_name or "")
+    await update.message.reply_text("已返回个人中心", reply_markup=markup, parse_mode="Markdown")
+    return ConversationHandler.END
+
+# ---- 查看所有规则 ----
+async def profile_rule_view_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """查看所有规则列表（可点击查看详情）"""
+    query = update.callback_query
+    await query.answer()
+
+    from db import get_all_rules
+    rules = get_all_rules(active_only=True)
+
+    if not rules:
+        await query.message.edit_text("📭 暂无规则")
+        return RULE_MENU
+
+    text = "📖 **规则列表**\n\n"
+    text += f"共 **{len(rules)}** 个规则，点击查看详情：\n\n"
+
+    keyboard = []
+    for rule in rules:
+        # 显示规则名称和内容预览（前30个字符）
+        content_preview = rule['rule_content'][:40]
+        text += f"📌 **{rule['rule_name']}**\n"
+        text += f"   {content_preview}{'...' if len(rule['rule_content']) > 40 else ''}\n\n"
+
+        keyboard.append([InlineKeyboardButton(
+            f"📋 {rule['rule_name']}", 
+            callback_data=f"profile_rule_detail_{rule['rule_name']}"
+        )])
+
+    keyboard.append([InlineKeyboardButton("◀️ 返回规则管理", callback_data="profile_rules_menu")])
+
+    await query.message.edit_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+    return RULE_VIEW
+
+# ---- 更新规则：选择 ----
+async def profile_rule_update_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """选择要更新的规则"""
+    query = update.callback_query
+    await query.answer()
+
+    from db import get_all_rules
+    rules = get_all_rules(active_only=True)
+
+    if not rules:
+        await query.message.edit_text("📭 暂无规则可更新")
+        return RULE_MENU
+
+    text = "✏️ **选择要更新的规则**\n\n"
+    keyboard = []
+    for rule in rules:
+        text += f"📌 {rule['rule_name']}\n"
+        keyboard.append([InlineKeyboardButton(f"✏️ {rule['rule_name']}", callback_data=f"profile_rule_upd_{rule['rule_name']}")])
+
+    keyboard.append([InlineKeyboardButton("◀️ 返回规则管理", callback_data="profile_rules_menu")])
+
+    await query.message.edit_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+    return RULE_UPDATE_SELECT
+
+async def profile_rule_update_select_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理更新规则的选择"""
+    query = update.callback_query
+    await query.answer()
+
+    rule_name = query.data.replace("profile_rule_upd_", "")
+    context.user_data["rule_name"] = rule_name
+    context.user_data["profile_input_state"] = True
+    context.user_data["rule_action"] = "update_content"
+
+    from db import get_rule
+    rule = get_rule(rule_name)
+    current_content = rule['rule_content'] if rule else "无"
+
+    keyboard = [[InlineKeyboardButton("◀️ 返回规则管理", callback_data="profile_rules_menu")]]
+
+    await query.message.edit_text(
+        f"✏️ **更新规则**\n\n"
+        f"规则名称：**{rule_name}**\n"
+        f"当前内容：{current_content[:200]}{'...' if len(current_content) > 200 else ''}\n\n"
+        "请输入新的规则内容：\n\n"
+        "❌ 发送 /cancel 取消",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+    return RULE_UPDATE_CONTENT
+
+async def profile_rule_update_content_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """接收更新的规则内容"""
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
+
+    if text == '/cancel':
+        context.user_data.pop("profile_input_state", None)
+        context.user_data.pop("rule_action", None)
+        context.user_data.pop("rule_name", None)
+        await update.message.reply_text("❌ 已取消更新")
+        prefs = get_user_preferences(user_id)
+        _, markup = await _build_profile_menu(user_id, prefs, 
+                                              update.effective_user.username or update.effective_user.first_name or "")
+        await update.message.reply_text("已返回个人中心", reply_markup=markup, parse_mode="Markdown")
+        return ConversationHandler.END
+
+    rule_name = context.user_data.get("rule_name", "")
+
+    from db import update_rule
+    success = update_rule(rule_name, text)
+
+    if success:
+        await update.message.reply_text(f"✅ 规则「**{rule_name}**」已更新成功！")
+    else:
+        await update.message.reply_text("❌ 更新失败，请稍后重试")
+
+    # 🔥 关键修复：在清除状态前，设置标记防止AI捕获
+    context.user_data["_message_handled"] = True
+
+    context.user_data.pop("profile_input_state", None)
+    context.user_data.pop("rule_action", None)
+    context.user_data.pop("rule_name", None)
+
+    prefs = get_user_preferences(user_id)
+    _, markup = await _build_profile_menu(user_id, prefs, 
+                                          update.effective_user.username or update.effective_user.first_name or "")
+    await update.message.reply_text("已返回个人中心", reply_markup=markup, parse_mode="Markdown")
+    return ConversationHandler.END
+
+# ---- 删除规则：选择 ----
+async def profile_rule_delete_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """选择要删除的规则"""
+    query = update.callback_query
+    await query.answer()
+
+    from db import get_all_rules
+    rules = get_all_rules(active_only=True)
+
+    if not rules:
+        await query.message.edit_text("📭 暂无规则可删除")
+        return RULE_MENU
+
+    text = "🗑️ **选择要删除的规则**\n\n"
+    keyboard = []
+    for rule in rules:
+        text += f"📌 {rule['rule_name']}\n"
+        keyboard.append([InlineKeyboardButton(f"🗑️ {rule['rule_name']}", callback_data=f"profile_rule_del_{rule['rule_name']}")])
+
+    keyboard.append([InlineKeyboardButton("◀️ 返回规则管理", callback_data="profile_rules_menu")])
+
+    await query.message.edit_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+    return RULE_DELETE_SELECT
+
+async def profile_rule_delete_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """执行删除规则"""
+    query = update.callback_query
+    await query.answer()
+
+    rule_name = query.data.replace("profile_rule_del_", "")
+
+    from db import delete_rule
+    success = delete_rule(rule_name)
+
+    if success:
+        await query.message.edit_text(f"✅ 已删除规则「{rule_name}」")
+    else:
+        await query.message.edit_text("❌ 删除失败，请稍后重试")
+
+    return ConversationHandler.END
+
+async def profile_rule_global_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """切换规则功能的全局开关"""
+    query = update.callback_query
+    user_id = query.from_user.id
+    await query.answer()
+
+    from db import get_rule_global_status, set_rule_global_status
+
+    current_status = get_rule_global_status()
+    new_status = not current_status
+
+    success = set_rule_global_status(new_status)
+
+    if success:
+        status_text = "启用" if new_status else "停用"
+        await query.answer(f"✅ 已{status_text}规则功能", show_alert=True)
+    else:
+        await query.answer("❌ 操作失败", show_alert=True)
+
+    # 刷新菜单
+    return await profile_rules_menu(update, context)
+
+async def profile_rule_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """查看单个规则完整详情"""
+    query = update.callback_query
+    await query.answer()
+
+    rule_name = query.data.replace("profile_rule_detail_", "")
+
+    from db import get_rule
+    from datetime import datetime
+
+    rule = get_rule(rule_name)
+
+    if not rule:
+        await query.message.edit_text("❌ 规则不存在")
+        return RULE_VIEW
+
+    text = f"📋 **{rule['rule_name']}规则**\n\n"
+    text += f"{rule['rule_content']}\n\n"
+
+    created_time = datetime.fromtimestamp(rule['created_at']).strftime('%Y-%m-%d %H:%M')
+    updated_time = datetime.fromtimestamp(rule['updated_at']).strftime('%Y-%m-%d %H:%M')
+    text += f"📅 创建时间：{created_time}\n"
+    text += f"🔄 更新时间：{updated_time}\n"
+
+    keyboard = [
+        [InlineKeyboardButton("◀️ 返回规则列表", callback_data="profile_rule_view_all")],
+        [InlineKeyboardButton("◀️ 返回规则管理", callback_data="profile_rules_menu")],
+    ]
+
+    await query.message.edit_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+    return RULE_VIEW
+
+# ---- 返回个人中心 ----
+async def profile_back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """从规则管理返回个人中心"""
+    query = update.callback_query
+    user_id = query.from_user.id
+    await query.answer()
+
+    prefs = get_user_preferences(user_id)
+    display_name = query.from_user.username or query.from_user.first_name or ""
+    text, markup = await _build_profile_menu(user_id, prefs, display_name)
+    await query.message.edit_text(text, reply_markup=markup, parse_mode="Markdown")
+    return ConversationHandler.END
