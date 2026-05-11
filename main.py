@@ -38,8 +38,17 @@ from handlers.profile import (
     handle_profile, profile_stats, profile_addresses,
     profile_toggle_notify, profile_signature_start, profile_signature_input,
     profile_contact, profile_feedback_start, profile_feedback_input,
-    profile_export_data, profile_back, profile_report_toggle,   # 添加 profile_report_toggle
-    SET_SIGNATURE, FEEDBACK
+    profile_export_data, profile_back, profile_report_toggle, 
+    # ========== 规则管理导入 ==========
+    profile_rules_menu, profile_rule_add_start, profile_rule_add_name_input,
+    profile_rule_add_content_input, profile_rule_view_all,
+    profile_rule_update_select, profile_rule_update_select_handler,
+    profile_rule_update_content_input, profile_rule_delete_select,
+    profile_rule_delete_handler, profile_rule_global_toggle,
+    profile_back_to_menu, profile_rule_detail,
+    SET_SIGNATURE, FEEDBACK,
+    RULE_MENU, RULE_ADD_NAME, RULE_ADD_CONTENT, RULE_UPDATE_SELECT,
+    RULE_UPDATE_CONTENT, RULE_DELETE_SELECT, RULE_TOGGLE_SELECT, RULE_VIEW,
 )
 
 from datetime import datetime, timedelta, timezone
@@ -532,7 +541,16 @@ async def module_input_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if context.user_data.pop("profile_input_state", False):
         return ConversationHandler.END
 
+    # 🔥 新增：检查规则管理状态，直接拦截不往下传
+    if context.user_data.get("rule_action"):
+        context.user_data["_message_handled"] = True
+        return ConversationHandler.END  # ← 直接返回，不交给 AI
+
     text = update.message.text.strip() if update.message.text else ""
+    # 🔥 拦截以"规则"结尾的私聊消息（不是发送规则查询，不交给AI）
+    if text and text.endswith('规则') and not text.startswith('发送'):
+        context.user_data["_message_handled"] = True
+        return ConversationHandler.END
 
     # 如果是已知键盘按钮，不处理
     if text in ALL_KNOWN_BUTTONS:
@@ -610,11 +628,24 @@ async def ai_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.pop("profile_input_state", False):
         return
 
+    # 规则管理状态
+    if context.user_data.get("rule_action"):
+        logger.debug(f"规则管理状态中，跳过AI: rule_action={context.user_data.get('rule_action')}")
+        return
+
+    # 规则名称（添加规则时暂存）
+    if context.user_data.get("rule_name"):
+        logger.debug(f"规则名称存在，跳过AI: rule_name={context.user_data.get('rule_name')}")
+        return
+
     if context.user_data.get("_message_handled"):
         context.user_data.pop("_message_handled", None)
         return
 
     text = update.message.text.strip() if update.message.text else ""
+    # 🔥 排除以"规则"结尾的消息
+    if text and text.endswith('规则'):
+        return
 
     if text in ALL_KNOWN_BUTTONS or text.startswith('/'):
         return
@@ -1671,6 +1702,14 @@ def main():
             CallbackQueryHandler(profile_export_data, pattern="^profile_export$"),
             CallbackQueryHandler(profile_report_toggle, pattern="^profile_report_toggle$"),
             CallbackQueryHandler(profile_back, pattern="^profile_back$"),
+            # ========== 规则管理入口 ==========
+            CallbackQueryHandler(profile_rules_menu, pattern="^profile_rules_menu$"),
+            CallbackQueryHandler(profile_rule_add_start, pattern="^profile_rule_add$"),
+            CallbackQueryHandler(profile_rule_view_all, pattern="^profile_rule_view_all$"),
+            CallbackQueryHandler(profile_rule_update_select, pattern="^profile_rule_update_select$"),
+            CallbackQueryHandler(profile_rule_delete_select, pattern="^profile_rule_delete_select$"),
+            CallbackQueryHandler(profile_rule_global_toggle, pattern="^profile_rule_global_toggle$"),
+            CallbackQueryHandler(profile_back_to_menu, pattern="^profile_back_to_menu$"),
         ],
         states={
             SET_SIGNATURE: [
@@ -1679,6 +1718,38 @@ def main():
             FEEDBACK: [
                 MessageHandler(filters.TEXT, profile_feedback_input)
             ],
+            # ========== 规则管理状态 ==========
+            RULE_MENU: [
+                CallbackQueryHandler(profile_rule_add_start, pattern="^profile_rule_add$"),
+                CallbackQueryHandler(profile_rule_view_all, pattern="^profile_rule_view_all$"),
+                CallbackQueryHandler(profile_rule_update_select, pattern="^profile_rule_update_select$"),
+                CallbackQueryHandler(profile_rule_delete_select, pattern="^profile_rule_delete_select$"),
+                CallbackQueryHandler(profile_rule_global_toggle, pattern="^profile_rule_global_toggle$"),
+                CallbackQueryHandler(profile_back_to_menu, pattern="^profile_back_to_menu$"),
+            ],
+            RULE_ADD_NAME: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, profile_rule_add_name_input),
+                CallbackQueryHandler(profile_rules_menu, pattern="^profile_rules_menu$"),
+            ],
+            RULE_ADD_CONTENT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, profile_rule_add_content_input),
+            ],
+            RULE_UPDATE_SELECT: [
+                CallbackQueryHandler(profile_rule_update_select_handler, pattern="^profile_rule_upd_"),
+                CallbackQueryHandler(profile_rules_menu, pattern="^profile_rules_menu$"),
+            ],
+            RULE_UPDATE_CONTENT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, profile_rule_update_content_input),
+            ],
+            RULE_DELETE_SELECT: [
+                CallbackQueryHandler(profile_rule_delete_handler, pattern="^profile_rule_del_"),
+                CallbackQueryHandler(profile_rules_menu, pattern="^profile_rules_menu$"),
+            ],
+            RULE_VIEW: [  # ← 添加这个
+                CallbackQueryHandler(profile_rule_detail, pattern="^profile_rule_detail_"),
+                CallbackQueryHandler(profile_rules_menu, pattern="^profile_rules_menu$"),
+                CallbackQueryHandler(profile_rule_update_select_handler, pattern="^profile_rule_upd_"),
+            ],  
         },
         fallbacks=[CommandHandler("cancel", lambda u, c: ConversationHandler.END)],
         per_message=False,
@@ -1700,7 +1771,7 @@ def main():
     app.add_handler(MessageHandler(
         filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND,
         ai_chat_handler
-    ), group=2)
+    ), group=3)
 
     # 群组消息
     app.add_handler(MessageHandler(
