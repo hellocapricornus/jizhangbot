@@ -3217,6 +3217,28 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
     # ========== 4. 计算器（不需要权限） ==========
     await handle_calculator(update, context)
 
+    # ========== 规则查询（需要在 AI 对话之前） ==========
+    if text and text.startswith('发送') and text.endswith('规则') and len(text) >= 6:
+        if not is_authorized(message.from_user.id, require_full_access=False):
+            return  # 无权限静默处理
+
+        # 检查全局规则开关
+        from db import get_rule_global_status
+        if not get_rule_global_status():  # ← 不传 user_id
+            return  # 功能关闭，静默处理
+
+        rule_name = text[2:-2].strip()
+
+        if rule_name:
+            from db import search_rule
+            rule_content = search_rule(rule_name)
+            if rule_content:
+                await message.reply_text(
+                    f"📋 **{rule_name}规则**\n\n{rule_content}",
+                    parse_mode='Markdown'
+                )
+            return  # ← 关键：无论是否找到规则，都 return，不交给AI处理
+
     # ========== 5. 权限检查（以下功能需要记账权限） ==========
     if not is_authorized(message.from_user.id, require_full_access=False):
         return
@@ -4185,39 +4207,48 @@ async def generate_and_send_export(update: Update, context: ContextTypes.DEFAULT
     context.user_data.pop("export_days_page", None)
 
 async def handle_calculator(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理计算器功能（只识别完整的计算表达式）"""
+    """处理计算器功能（只识别完整的计算表达式，不匹配时静默处理）"""
     chat = update.effective_chat
     if chat.type not in ['group', 'supergroup']:
         return
 
     text = update.message.text.strip()
 
-    # ✅ 在这里添加：将中文符号替换为英文符号
+    # 将中文符号替换为英文符号
     text = text.replace('（', '(').replace('）', ')')
 
-    # 🔥 排除记账命令
-    exclude_prefixes = ['设置手续费', '设置汇率', '设置单笔费用', '结束账单', '今日总', '总', 
-                        '当前账单', '查询账单', '清理账单', '清空账单', '清理总账单', 
-                        '清空总账单', '清空所有账单', '下发', '+', '-']
+    # 🔥 排除记账命令和其他功能命令
+    exclude_prefixes = [
+        '设置手续费', '设置汇率', '设置单笔费用', '结束账单', 
+        '今日总', '总', '当前账单', '查询账单', '清理账单', 
+        '清空账单', '清理总账单', '清空总账单', '清空所有账单', 
+        '下发', '添加规则', '设置规则', '删除规则', '规则列表', '所有规则',
+        '添加操作人', '删除操作人', '查看配置', '导出账单', '移除上一笔', '删除上一笔',
+        '撤销账单',
+        '发送',  # ← 添加这个，防止规则查询被计算器误判
+    ]
 
     for prefix in exclude_prefixes:
         if text.startswith(prefix):
             return
 
-    # 🔥 只识别完整的计算表达式
-    # 规则：必须以数字或 ( 或函数名开头，以数字或 ) 结尾
-    # 且必须包含运算符
+    # 🔥 不以 + 或 - 开头（这些是记账命令）
+    if text.startswith('+') or text.startswith('-'):
+        return
 
-    # 检查是否是有效的计算表达式
+    # 🔥 只识别完整的计算表达式
+    # 规则：必须以数字或 ( 开头，且必须包含运算符
     def is_valid_expression(expr: str) -> bool:
         # 去除空格
         expr = expr.replace(' ', '')
         if not expr:
             return False
 
-        # 必须以数字、小数点、(、函数名开头
-        valid_starts = ('0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '(', '-', '+', 
-                       'sqrt', 'sin', 'cos', 'tan', 'log', 'abs', 'round', 'floor', 'ceil', 'pi', 'e')
+        # 必须以数字、小数点、(、-、+ 或函数名开头
+        valid_starts = ('0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 
+                       '(', '-', '+', '.',
+                       'sqrt', 'sin', 'cos', 'tan', 'log', 'abs', 'round', 
+                       'floor', 'ceil', 'pi', 'e')
         if not any(expr.startswith(s) for s in valid_starts):
             return False
 
@@ -4225,16 +4256,25 @@ async def handle_calculator(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not (expr[-1].isdigit() or expr[-1] == ')'):
             return False
 
-        # 必须包含运算符（+ - * / % ^）
+        # 必须包含运算符（+ - * / % ^）或纯函数调用
         operators = ['+', '-', '*', '/', '%', '^']
         has_operator = any(op in expr for op in operators)
-        if not has_operator:
+
+        # 或者包含数学函数
+        math_functions = ['sqrt', 'sin', 'cos', 'tan', 'log', 'abs', 'round', 'floor', 'ceil']
+        has_function = any(fn in expr for fn in math_functions)
+
+        if not has_operator and not has_function:
+            return False
+
+        # 排除纯数字（如 "100"）
+        if expr.replace('.', '').replace('-', '').isdigit():
             return False
 
         return True
 
     if not is_valid_expression(text):
-        return
+        return  # 🔥 静默处理，不做任何提示
 
     # 简单算式：如 100+200
     simple_pattern = r'^(-?\d+(?:\.\d+)?)\s*([+\-*/%])\s*(-?\d+(?:\.\d+)?)$'
@@ -4255,34 +4295,30 @@ async def handle_calculator(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 result = a_num * b_num
             elif op == '/':
                 if b_num == 0:
-                    await update.message.reply_text("❌ 除数不能为0")
-                    return
+                    return  # 🔥 除零错误也静默处理
                 result = a_num / b_num
             elif op == '%':
                 result = a_num % b_num
             else:
-                return
+                return  # 🔥 不支持的运算符静默处理
 
             result_str = str(int(result)) if result.is_integer() else f"{result:.2f}"
             await update.message.reply_text(f"🧮 {a}{op}{b} = {result_str}")
             return
-        except Exception as e:
-            await update.message.reply_text(f"❌ 计算错误：{str(e)[:50]}")
-            return
+        except Exception:
+            return  # 🔥 计算错误静默处理
 
     # 复杂计算
-    result = Calculator.safe_eval(text)
+    try:
+        result = Calculator.safe_eval(text)
 
-    if result is not None:
-        result_str = Calculator.format_result(result)
-        await update.message.reply_text(f"🧮 {text} = {result_str}")
-    else:
-        await update.message.reply_text(
-            "❌ 请输入完整计算格式\n"
-            "支持的运算符：+ - * / % ^ ( )\n"
-            "支持的函数：sqrt, sin, cos, tan, log, abs, round, floor, ceil\n"
-            "支持的常数：pi, e\n"
-        )
+        if result is not None:
+            result_str = Calculator.format_result(result)
+            await update.message.reply_text(f"🧮 {text} = {result_str}")
+        # 🔥 如果计算结果为 None，静默处理
+    except Exception:
+        # 🔥 任何异常都静默处理
+        pass
 
 
 async def handle_user_info_tracking(update: Update, context: ContextTypes.DEFAULT_TYPE):
