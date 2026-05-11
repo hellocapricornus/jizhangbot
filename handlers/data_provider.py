@@ -31,19 +31,21 @@ def timestamp_to_date(ts: int) -> str:
 
 
 def run_async(coro):
-    """运行异步函数（用于同步环境中调用异步函数）"""
+    """运行异步函数"""
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
-        loop = None
+        return asyncio.run(coro)
 
-    if loop and loop.is_running():
+    if loop.is_running():
+        # 在已有事件循环中运行
         import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor() as executor:
-            future = executor.submit(asyncio.run, coro)
+            # 注意：这里需要新的事件循环
+            future = executor.submit(lambda: asyncio.run(coro))
             return future.result()
     else:
-        return asyncio.run(coro)
+        return loop.run_until_complete(coro)
 
 
 class DataProvider:
