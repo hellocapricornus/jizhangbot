@@ -326,24 +326,6 @@ TOOLS = [
 ]
 
 # ========== 辅助函数 ==========
-def _get_date_range(period: str):
-    """获取时间范围的时间戳（秒）"""
-    from datetime import datetime, timedelta
-    now = datetime.now()
-    if period == "today":
-        start = int(now.replace(hour=0, minute=0, second=0).timestamp())
-        end = int(now.timestamp())
-    elif period == "week":
-        start = int((now - timedelta(days=7)).timestamp())
-        end = int(now.timestamp())
-    elif period == "month":
-        start = int(now.replace(day=1, hour=0, minute=0, second=0).timestamp())
-        end = int(now.timestamp())
-    else:
-        start = 0
-        end = int(now.timestamp())
-    return start, end
-
 def _get_date_range(period: str) -> Tuple[int, int]:
     """获取时间范围的时间戳（毫秒）"""
     now = datetime.now()
