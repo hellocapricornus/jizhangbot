@@ -96,6 +96,10 @@ async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🧑‍💻 临时操作员 ▫️ 仅记账、地址查询、计算器\n"
         "🙍 普通用户 ▫️ 查看帮助、个人中心、联系管理员\n\n"
 
+        "<blockquote><b>📋 规则查询</b></blockquote>\n"
+        "查看规则 ▫️ <code>发送德国规则</code>\n"
+        "查看规则 ▫️ <code>发送坦桑尼亚规则</code>\n\n"
+
         "💎 <code>▫️</code>后的文字可长按复制指令\n"
         "💎 使用 /start 返回主菜单"
     )
