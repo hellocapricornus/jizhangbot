@@ -5,6 +5,7 @@ import os
 import time
 import re
 from contextlib import contextmanager
+from typing import Optional, List, Dict, Any
 from logger import bot_logger as logger  # ✅ 新增
 
 DB_PATH = "bot.db"
@@ -423,9 +424,23 @@ def init_db():
             end_time INTEGER NOT NULL,
             date TEXT NOT NULL,
             fee_rate REAL DEFAULT 0.0,
-            exchange_rate REAL DEFAULT 1.0
+            exchang�e_rate REAL DEFAULT 1.0
         )
     """)
+
+    # ========== 规则管理表 ==========
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            rule_name TEXT NOT NULL,
+            rule_content TEXT NOT NULL,
+            created_by INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            is_active INTEGER DEFAULT 1
+        )
+    """)
+    c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_rules_name ON rules(rule_name)")
 
     c.execute("""
         CREATE TABLE IF NOT EXISTS user_preferences (
@@ -642,7 +657,7 @@ def add_transaction_record(address: str, tx_id: str, from_addr: str, to_addr: st
 def save_group(group_id: str, title: str, category: str = None):
     """保存或更新群组信息（支持自动分类）"""
     import time
-    conn = get_db_connection()
+    conn = get_db�_connection()
     c = conn.cursor()
 
     try:
@@ -901,7 +916,7 @@ def safe_db_connection(db_path: str = DB_PATH):
         conn.row_factory = sqlite3.Row
         yield conn
     except Exception as e:
-        logger.error(f"数据库操作失败: {e}")
+  �      logger.error(f"数据库操作失败: {e}")
         raise
     finally:
         if conn:
@@ -909,3 +924,246 @@ def safe_db_connection(db_path: str = DB_PATH):
                 conn.close()
             except Exception:
                 pass
+
+# ==================== 规则管理 ====================
+
+def add_rule(rule_name: str, rule_content: str, created_by: int) -> bool:
+    """添加新规则（如果已存在但被软删除，则恢复并更新）"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        now = int(time.time())
+
+        # 检查是否已存在（包括软删除的）
+        c.execute("SELECT id, is_active FROM rules WHERE rule_name = ?", (rule_name,))
+        existing = c.fetchone()
+
+        if existing:
+            if existing[1] == 1:
+                # 规则存在且启用中
+                logger.warning(f"规则「{rule_name}」已存在")
+                return False
+            else:
+                # 规则存在但已停用（软删除），恢复并更新内容
+                c.execute("""
+                    UPDATE rules 
+                    SET rule_content = ?, is_active = 1, updated_at = ?, created_by = ?
+                    WHERE rule_name = ?
+                """, (rule_content, now, created_by, rule_name))
+                conn.commit()
+                logger.info(f"已恢复并更新规则: {rule_name}")
+                return True
+
+        # 不存在，插入新规则
+        c.execute("""
+            INSERT INTO rules (rule_name, rule_content, created_by, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (rule_name, rule_content, created_by, now, now))
+        conn.commit()
+        logger.info(f"已添加规则: {rule_name}")
+        return True
+    except Exception as e:
+        logger.error(f"添加规则失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+def update_rule(rule_name: str, rule_content: str) -> bool:
+    """更新规则内容"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        now = int(time.time())
+        c.execute("""
+            UPDATE rules SET rule_content = ?, updated_at = ?
+            WHERE rule_name = ? AND is_active = 1
+        """, (rule_content, now, rule_name))
+        conn.commit()
+        if c.rowcount > 0:
+            logger.info(f"已更新规则: {rule_name}")
+            return True
+        logger.warning(f"未找到规则: {rule_name}")
+        return False
+    except Exception as e:
+        logger.error(f"更新规则失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+def delete_rule(rule_name: str) -> bool:
+    """软删除规则（设置 is_active = 0）"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        now = int(time.time())
+        c.execute("""
+            UPDATE rules SET is_active = 0, updated_at = ?
+            WHERE rule_name = ?
+        """, (now, rule_name))
+        conn.commit()
+        if c.rowcount > 0:
+            logger.info(f"已删除规则: {rule_name}")
+            return True
+        logger.warning(f"未找到规则: {rule_name}")
+        return False
+    except Exception as e:
+        logger.error(f"删除规则失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+def toggle_rule_status(rule_name: str, is_active: bool) -> bool:
+    """启用/停用规则"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        now = int(time.time())
+        status = 1 if is_active else 0
+        c.execute("""
+            UPDATE rules SET is_active = ?, updated_at = ?
+            WHERE rule_name = ?
+        """, (status, now, rule_name))
+        conn.commit()
+        if c.rowcount > 0:
+            status_text = "启用" if is_active else "停用"
+            logger.info(f"已{status_text}规则: {rule_name}")
+            return True
+        logger.warning(f"未找到规则: {rule_name}")
+        return False
+    except Exception as e:
+        logger.error(f"切换规则状态失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+def get_rule(rule_name: str) -> Optional[dict]:
+    """获取单个规则"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("""
+            SELECT id, rule_name, rule_content, created_by, created_at, updated_at, is_active
+            FROM rules
+            WHERE rule_name = ?
+        """, (rule_name,))
+        row = c.fetchone()
+        if row:
+            return {
+                "id": row[0],
+                "rule_name": row[1],
+                "rule_content": row[2],
+                "created_by": row[3],
+                "created_at": row[4],
+                "updated_at": row[5],
+                "is_active": row[6]
+            }
+        return None
+    except Exception as e:
+        logger.error(f"获取规则失败: {e}")
+        return None
+    finally:
+        conn.close()
+
+def get_all_rules(active_only: bool = True) -> list:
+    """获取所有规则"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        if active_only:
+            c.execute("""
+                SELECT rule_name, rule_content, created_by, created_at, updated_at, is_active
+                FROM rules
+                WHERE is_active = 1
+                ORDER BY rule_name
+            """)
+        else:
+            c.execute("""
+                SELECT rule_name, rule_content, created_by, created_at, updated_at, is_active
+                FROM rules
+                ORDER BY rule_name
+            """)
+        rows = c.fetchall()
+        return [
+            {
+                "rule_name": row[0],
+                "rule_content": row[1],
+                "created_by": row[2],
+                "created_at": row[3],
+                "updated_at": row[4],
+                "is_active": row[5]
+            }
+            for row in rows
+        ]
+    except Exception as e:
+        logger.error(f"获取所有规则失败: {e}")
+        return []
+    finally:
+        conn.close()
+
+def search_rule(rule_name: str) -> Optional[str]:
+    """搜索规则并返回内容（用于群组查询）"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("""
+            SELECT rule_content FROM rules
+            WHERE rule_name = ? AND is_active = 1
+        """, (rule_name,))
+        row = c.fetchone()
+        if row:
+            return row[0]
+        return None
+    except Exception as e:
+        logger.error(f"搜索规则失败: {e}")
+        return None
+    finally:
+        conn.close()
+        
+def get_rule_global_status() -> bool:
+    """获取规则功能的全局状态（默认开启）"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        # 使用一个特殊的系统设置表
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS system_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at INTEGER DEFAULT 0
+            )
+        """)
+        c.execute("SELECT value FROM system_settings WHERE key = 'rule_enabled'")
+        row = c.fetchone()
+        if row:
+            return row[0] == '1'
+        return True  # 默认开启
+    except Exception as e:
+        logger.error(f"获取规则状态失败: {e}")
+        return True
+    finally:
+        conn.close()
+
+def set_rule_global_status(enabled: bool) -> bool:
+    """设置规则功能的全局状态"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        now = int(time.time())
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS system_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at INTEGER DEFAULT 0
+            )
+        """)
+        c.execute("""
+            INSERT OR REPLACE INTO system_settings (key, value, updated_at)
+            VALUES ('rule_enabled', ?, ?)
+        """, ('1' if enabled else '0', now))
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"设置规则状态失败: {e}")
+        return False
+    finally:
+        conn.close()
