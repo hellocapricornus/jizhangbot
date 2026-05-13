@@ -18,6 +18,15 @@ if not os.path.isabs(DB_PATH):
 operators: Dict[int, dict] = {}
 temp_operators: Dict[int, dict] = {}
 
+def safe_escape_markdown(text: str) -> str:
+    """转义 Markdown 特殊字符，防止报错"""
+    if not text:
+        return text
+    escape_chars = r'_*[]()~`>#+-=|{}.!'
+    for char in escape_chars:
+        text = text.replace(char, f'\\{char}')
+    return text
+
 
 @contextmanager
 def _safe_db_connection(db_path: str = DB_PATH):
@@ -251,7 +260,7 @@ def get_operators_list_text() -> str:
                 display_name.append(info["last_name"])
             name_str = " ".join(display_name) if display_name else "未设置昵称"
             username_str = f"(@{info['username']})" if info.get("username") else ""
-            text += f"  👤 {name_str} {username_str}\n"
+            text += f"  👤 {safe_escape_markdown(name_str)} {safe_escape_markdown(username_str)}\n"
             text += f"     🆔 ID: `{user_id}`\n"
     else:
         text += "  📭 暂无正式操作人\n"
@@ -268,7 +277,7 @@ def get_operators_list_text() -> str:
                 display_name.append(info["last_name"])
             name_str = " ".join(display_name) if display_name else "未设置昵称"
             username_str = f"(@{info['username']})" if info.get("username") else ""
-            text += f"  👤 {name_str} {username_str}\n"
+            text += f"  👤 {safe_escape_markdown(name_str)} {safe_escape_markdown(username_str)}\n"
             text += f"     🆔 ID: `{user_id}`\n"
     else:
         text += "  📭 暂无临时操作人\n"
@@ -429,7 +438,7 @@ def get_temp_operators_list_text() -> str:
             display_name.append(info["last_name"])
         name_str = " ".join(display_name) if display_name else "未设置昵称"
         username_str = f"(@{info['username']})" if info.get("username") else ""
-        text += f"👤 {name_str} {username_str}\n"
+        text += f"👤 {safe_escape_markdown(name_str)} {safe_escape_markdown(username_str)}\n"
         text += f"🆔 ID: `{user_id}`\n"
         text += "━" * 20 + "\n"
 
