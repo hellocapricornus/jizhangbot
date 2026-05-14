@@ -6,7 +6,8 @@ import time
 import re
 from contextlib import contextmanager
 from typing import Optional, List, Dict, Any
-from logger import bot_logger as logger  # ✅ 新增
+from logger import bot_logger as logger
+from datetime import datetime, timezone, timedelta
 
 DB_PATH = "bot.db"
 if not os.path.isabs(DB_PATH):
@@ -474,6 +475,29 @@ def init_db():
         )
     """)
     c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_rules_name ON rules(rule_name)")
+
+    # ========== 业绩记录表 ==========
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS performance_records (
+            id INTEGER PRIMARY KEY,
+            country TEXT NOT NULL,
+            channel_income REAL NOT NULL,
+            customer_expense REAL NOT NULL,
+            profit REAL NOT NULL,
+            channel_group TEXT DEFAULT '',
+            customer_group TEXT DEFAULT '',
+            channel_employee_id INTEGER NOT NULL,
+            channel_employee_name TEXT DEFAULT '',
+            customer_employee_id INTEGER NOT NULL,
+            customer_employee_name TEXT DEFAULT '',
+            created_by INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            date TEXT NOT NULL
+        )
+    """)
+    c.execute("CREATE INDEX IF NOT EXISTS idx_perf_date ON performance_records(date)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_perf_channel_emp ON performance_records(channel_employee_id)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_perf_customer_emp ON performance_records(customer_employee_id)")
 
     c.execute("""
         CREATE TABLE IF NOT EXISTS user_preferences (
@@ -1198,5 +1222,223 @@ def set_rule_global_status(enabled: bool) -> bool:
     except Exception as e:
         logger.error(f"设置规则状态失败: {e}")
         return False
+    finally:
+        conn.close()
+
+# ==================== 业绩记录管理 ====================
+
+# db.py - 替换 add_performance_record 函数
+
+def add_performance_record(country: str, channel_income: float, customer_expense: float,
+                           channel_group: str, customer_group: str,
+                           channel_employee_id: int, channel_employee_name: str,
+                           customer_employee_id: int, customer_employee_name: str,
+                           created_by: int) -> bool:
+    """添加业绩记录"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        profit = channel_income + customer_expense
+        now = int(time.time())
+        date_str = datetime.fromtimestamp(now, tz=timezone(timedelta(hours=8))).strftime('%Y-%m-%d')
+
+        # 生成编号：年月日 + 序号（2651401 = 2026年5月14日第01条）
+        date_prefix = datetime.fromtimestamp(now, tz=timezone(timedelta(hours=8))).strftime('%y%m%d')
+        c.execute("SELECT COUNT(*) FROM performance_records WHERE date = ?", (date_str,))
+        count = c.fetchone()[0] + 1
+        record_id = int(f"{date_prefix}{count:02d}")
+
+        # 确保编号唯一
+        while True:
+            c.execute("SELECT id FROM performance_records WHERE id = ?", (record_id,))
+            if not c.fetchone():
+                break
+            count += 1
+            record_id = int(f"{date_prefix}{count:02d}")
+
+        c.execute("""
+            INSERT INTO performance_records 
+            (id, country, channel_income, customer_expense, profit, channel_group, customer_group,
+             channel_employee_id, channel_employee_name, customer_employee_id, customer_employee_name,
+             created_by, created_at, date)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (record_id, country, channel_income, customer_expense, profit, channel_group, customer_group,
+              channel_employee_id, channel_employee_name, customer_employee_id, customer_employee_name,
+              created_by, now, date_str))
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"添加业绩记录失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+def get_performance_records(year: int = None, month: int = None) -> list:
+    """获取业绩记录，可按年月筛选"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        if year and month:
+            date_prefix = f"{year}-{month:02d}"
+            c.execute("""
+                SELECT * FROM performance_records 
+                WHERE date LIKE ? 
+                ORDER BY created_at DESC
+            """, (f"{date_prefix}%",))
+        else:
+            c.execute("SELECT * FROM performance_records ORDER BY created_at DESC")
+
+        rows = c.fetchall()
+        return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(f"获取业绩记录失败: {e}")
+        return []
+    finally:
+        conn.close()
+        
+
+def get_performance_available_months() -> list:
+    """获取有业绩记录的月份列表"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("""
+            SELECT DISTINCT substr(date, 1, 7) as month 
+            FROM performance_records 
+            ORDER BY month DESC
+        """)
+        rows = c.fetchall()
+        return [row[0] for row in rows]
+    except Exception as e:
+        logger.error(f"获取业绩月份失败: {e}")
+        return []
+    finally:
+        conn.close()
+
+def get_performance_summary(year: int, month: int) -> dict:
+    """获取指定月份的业绩汇总"""
+    records = get_performance_records(year, month)
+
+    if not records:
+        return {"records": [], "total_profit": 0, "employee_commission": {}, "employee_performance": {}}
+
+    total_profit = sum(r['profit'] for r in records)
+
+    # 员工提成和业绩
+    employee_commission = {}
+    employee_performance = {}
+
+    for r in records:
+        profit = r['profit']
+        # 通道员工
+        ch_id = r['channel_employee_id']
+        ch_name = r['channel_employee_name'] or f"员工{ch_id}"
+        if ch_id not in employee_commission:
+            employee_commission[ch_id] = {"name": ch_name, "commission": 0}
+            employee_performance[ch_id] = {"name": ch_name, "performance": 0}
+        employee_commission[ch_id]["commission"] += profit * 0.1
+        employee_performance[ch_id]["performance"] += profit / 2
+
+        # 客户员工
+        cu_id = r['customer_employee_id']
+        cu_name = r['customer_employee_name'] or f"员工{cu_id}"
+        if cu_id not in employee_commission:
+            employee_commission[cu_id] = {"name": cu_name, "commission": 0}
+            employee_performance[cu_id] = {"name": cu_name, "performance": 0}
+        employee_commission[cu_id]["commission"] += profit * 0.1
+        employee_performance[cu_id]["performance"] += profit / 2
+
+    return {
+        "records": records,
+        "total_profit": total_profit,
+        "employee_commission": employee_commission,
+        "employee_performance": employee_performance
+    }
+
+def update_performance_record(record_id: int, country: str, channel_income: float, 
+                              customer_expense: float, channel_group: str, customer_group: str,
+                              channel_employee_id: int, channel_employee_name: str,
+                              customer_employee_id: int, customer_employee_name: str) -> bool:
+    """修改业绩记录"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        profit = channel_income + customer_expense
+        c.execute("""
+            UPDATE performance_records 
+            SET country=?, channel_income=?,          customer_expense=?, profit=?,
+                channel_group=?, customer_group=?,
+                channel_employee_id=?, channel_employee_name=?,
+                customer_employee_id=?, customer_employee_name=?
+            WHERE id=?
+        """, (country, channel_income, customer_expense, profit,
+              channel_group, customer_group,
+              channel_employee_id, channel_employee_name,
+              customer_employee_id, customer_employee_name,
+              record_id))
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"修改业绩记录失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def delete_performance_record(record_id: int) -> bool:
+    """删除业绩记录"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("DELETE FROM performance_records WHERE id=?", (record_id,))
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"删除业绩记录失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def get_performance_record_by_id(record_id: int):
+    """根据ID获取单条业绩记录"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("SELECT * FROM performance_records WHERE id=?", (record_id,))
+        row = c.fetchone()
+        return dict(row) if row else None
+    except Exception as e:
+        logger.error(f"获取业绩记录失败: {e}")
+        return None
+    finally:
+        conn.close()
+
+def refresh_performance_employee_names() -> int:
+    """根据操作员表更新业绩记录中的员工名称"""
+    from auth import operators as auth_operators
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        updated = 0
+        for uid, info in auth_operators.items():
+            name = info.get('first_name') or ''
+            c.execute("""
+                UPDATE performance_records 
+                SET channel_employee_name = ? 
+                WHERE channel_employee_id = ? AND (channel_employee_name = '' OR channel_employee_name IS NULL)
+            """, (name, uid))
+            updated += c.rowcount
+            c.execute("""
+                UPDATE performance_records 
+                SET customer_employee_name = ? 
+                WHERE customer_employee_id = ? AND (customer_employee_name = '' OR customer_employee_name IS NULL)
+            """, (name, uid))
+            updated += c.rowcount
+        conn.commit()
+        return updated
+    except Exception as e:
+        logger.error(f"刷新员工名称失败: {e}")
+        return 0
     finally:
         conn.close()
