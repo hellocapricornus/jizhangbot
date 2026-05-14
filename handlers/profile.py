@@ -28,6 +28,14 @@ RULE_DELETE_SELECT = 10
 RULE_TOGGLE_SELECT = 11
 RULE_VIEW = 12
 
+# ========== 业绩汇总状态 ==========
+PERFORMANCE_MENU = 17
+PERFORMANCE_RECORD = 18
+PERFORMANCE_VIEW = 19
+PERFORMANCE_MONTH_SELECT = 20
+PERFORMANCE_EDIT = 21
+PERFORMANCE_DELETE = 22
+
 # ---------- 辅助：构建个人中心菜单 ----------
 async def _build_profile_menu(user_id: int, prefs: dict = None, display_name: str = "") -> tuple:
     """返回 (消息文本, InlineKeyboardMarkup)"""
@@ -88,6 +96,10 @@ async def _build_profile_menu(user_id: int, prefs: dict = None, display_name: st
         rules = get_all_rules(active_only=True)
         rule_count = len(rules)
         keyboard.append([InlineKeyboardButton(f"📋 规则管理（{rule_count}个）", callback_data="profile_rules_menu")])
+
+    # ========== 业绩汇总（所有有权限的人可见） ==========
+    if full_access:
+        keyboard.append([InlineKeyboardButton("📊 业绩汇总", callback_data="profile_performance_menu")])
 
     keyboard.append([InlineKeyboardButton("◀️ 返回主菜单", callback_data="profile_back")])
 
@@ -1307,3 +1319,867 @@ async def profile_back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYP
     text, markup = await _build_profile_menu(user_id, prefs, display_name)
     await query.message.edit_text(text, reply_markup=markup, parse_mode="Markdown")
     return ConversationHandler.END
+
+# ==================== 业绩汇总 ====================
+async def profile_performance_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """业绩汇总 - 直接显示当前月业绩"""
+    query = update.callback_query
+    user_id = query.from_user.id
+    # 权限检查：仅正式操作员和管理员
+    if not is_authorized(user_id, require_full_access=True):
+        await query.answer("❌ 临时操作员不能使用业绩汇总功能", show_alert=True)
+        return
+    await query.answer()
+
+    from db import get_performance_available_months, get_performance_summary
+    from datetime import datetime
+
+    months = get_performance_available_months()
+
+    # 当前月份
+    now = datetime.now()
+    current_month = f"{now.year}-{now.month:02d}"
+
+    if not months:
+        text = "📊 **业绩汇总**\n\n📭 暂无业绩记录\n\n请选择操作："
+        keyboard = [
+            [InlineKeyboardButton("➕ 记录业绩", callback_data="profile_performance_record")],
+            [InlineKeyboardButton("◀️ 返回个人中心", callback_data="profile_return")],
+        ]
+        await query.message.edit_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+        return PERFORMANCE_MENU
+
+    # 默认显示当前月，如果没有则显示最近一个月
+    if current_month in months:
+        display_month = current_month
+    else:
+        display_month = months[0]
+
+    year, month = display_month.split('-')
+    year = int(year)
+    month = int(month)
+    summary = get_performance_summary(year, month)
+
+    # 标题
+    text = f"📊 **{year}年{month}月 业绩汇总**\n\n"
+    text += f"<blockquote><b>公司总利润：{summary['total_profit']:.2f} USDT</b></blockquote>\n\n"
+
+    if summary['records']:
+        text += f"`{'编号':<9}{'日期':<7}{'国家':<6}{'通道':>6}{'客户':>6}{'利润':>6}{'通道员工':<7}{'客户员工':<7}`\n"
+
+        for r in summary['records']:
+            date_str = r['date'][-5:] if r['date'] else ''
+            country = r['country'][:4]
+            ch_name = (r['channel_employee_name'] or f"ID{r['channel_employee_id']}")[:5]
+            cu_name = (r['customer_employee_name'] or f"ID{r['customer_employee_id']}")[:5]
+            text += f"`{r['id']:<9}{date_str:<7}{country:<6}{r['channel_income']:>6.0f}{r['customer_expense']:>6.0f}{r['profit']:>6.0f}{ch_name:<7}{cu_name:<7}`\n"
+
+    # 员工提成
+    text += "\n<blockquote><b>💰 员工提成汇总</b></blockquote>\n"
+    for emp_id, data in summary['employee_commission'].items():
+        perf = summary['employee_performance'].get(emp_id, {}).get('performance', 0)
+        text += f"• {data['name']}：{data['commission']:.2f} USDT（业绩 {perf:.2f} USDT）\n"
+
+    text += "\n💡 提成 = 利润×10% | 业绩 = 利润÷2"
+
+    keyboard = [
+        [InlineKeyboardButton("➕ 记录业绩", callback_data="profile_performance_record")],
+        [InlineKeyboardButton("📅 查看其他月份", callback_data="profile_performance_view")],
+        [InlineKeyboardButton("📥 导出HTML", callback_data="profile_performance_export_select")],
+    ]
+    from config import OWNER_ID
+    if user_id == OWNER_ID:
+        keyboard.append([
+            InlineKeyboardButton("✏️ 修改业绩", callback_data="profile_performance_edit"),
+            InlineKeyboardButton("🗑️ 删除业绩", callback_data="profile_performance_delete"),
+        ])
+        keyboard.append([InlineKeyboardButton("📝 记录追溯", callback_data="profile_performance_trace")])
+    keyboard.append([InlineKeyboardButton("◀️ 返回个人中心", callback_data="profile_return")])
+
+    await query.message.edit_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="HTML"
+    )
+    return PERFORMANCE_MENU
+    
+async def profile_performance_record_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """记录业绩 - 输入信息"""
+    query = update.callback_query
+    user_id = query.from_user.id
+
+    if not is_authorized(user_id, require_full_access=True):
+        await query.answer("❌ 无权限", show_alert=True)
+        return
+    await query.answer()
+
+    context.user_data["profile_input_state"] = True
+    context.user_data["perf_action"] = "record"
+
+    # 获取现有正式操作员列表
+    from auth import operators as auth_operators
+    employee_list = ""
+    if auth_operators:
+        employee_list = "\n\n📋 **现有员工列表：**\n"
+        for uid, info in auth_operators.items():
+            name = info.get('first_name') or ''
+            uname = f" @{info['username']}" if info.get('username') else ''
+            employee_list += f"• {name}{uname}（ID: `{uid}`）\n"
+    else:
+        employee_list = "\n\n⚠️ 暂无正式操作员，请先添加操作员"
+
+    keyboard = [[InlineKeyboardButton("◀️ 返回业绩菜单", callback_data="profile_performance_menu")]]
+
+    await query.message.edit_text(
+        "➕ **记录业绩**\n\n"
+        "请输入信息，用空格分隔：\n"
+        "`国家 通道收入 客户支出 通道群名 客户群名 @通道员工 @客户员工`\n\n"
+        "例如：\n"
+        "`德国 5000 -3000 德国通道群 德国客户群 @张三 @李四`\n\n"
+        "💡 **说明**：\n"
+        "• 通道收入填正数（如5000）\n"
+        "• 客户支出填负数（如-3000）\n"
+        "• 利润 = 通道收入 + 客户支出\n"
+        "• 员工用 @用户名 或 用户ID\n"
+        "• 只能选择正式操作员\n"
+        f"{employee_list}"
+        "\n❌ 发送 /cancel 取消",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+    return PERFORMANCE_RECORD
+
+
+async def profile_performance_record_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """接收业绩记录"""
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
+
+    if text == '/cancel':
+        context.user_data.pop("profile_input_state", None)
+        context.user_data.pop("perf_action", None)
+        await update.message.reply_text("❌ 已取消记录")
+        from handlers.menu import get_main_menu
+        await update.message.reply_text("请选择功能：", reply_markup=get_main_menu(user_id))
+        return ConversationHandler.END
+
+    # 🔥 关键修复：标记消息已处理，防止 AI 捕获
+    context.user_data["_message_handled"] = True
+
+    # 解析输入
+    import shlex
+    try:
+        parts = shlex.split(text)
+    except:
+        parts = text.split()
+
+    if len(parts) < 7:
+        await update.message.reply_text(
+            "❌ 格式错误，至少需要7个参数\n"
+            "格式：国家 通道收入 客户支出 通道群名 客户群名 通道员工 客户员工\n\n"
+            "请重新输入："
+        )
+        return PERFORMANCE_RECORD
+
+    country = parts[0]
+    try:
+        channel_income = float(parts[1])
+        customer_expense = float(parts[2])
+    except ValueError:
+        await update.message.reply_text("❌ 金额格式错误，请输入数字\n请重新输入：")
+        return PERFORMANCE_RECORD
+
+    channel_group = parts[3]
+    customer_group = parts[4]
+
+    # 解析员工
+    channel_employee_id = 0
+    channel_employee_name = ""
+    customer_employee_id = 0
+    customer_employee_name = ""
+
+    # 通道员工
+    ch_emp = parts[5]
+    if ch_emp.startswith('@'):
+        ch_username = ch_emp[1:]
+        # 从操作员中查找
+        from auth import operators as auth_operators
+        found = False
+        for oid, info in auth_operators.items():
+            if info.get('username') == ch_username:
+                channel_employee_id = oid
+                channel_employee_name = info.get('first_name') or ch_username
+                found = True
+                break
+        if not found:
+            await update.message.reply_text(f"❌ 未找到正式操作员：{ch_emp}\n请确认用户名正确\n请重新输入：")
+            return PERFORMANCE_RECORD
+    elif ch_emp.isdigit():
+        channel_employee_id = int(ch_emp)
+        from auth import operators as auth_operators
+        if channel_employee_id in auth_operators:
+            channel_employee_name = auth_operators[channel_employee_id].get('first_name') or str(channel_employee_id)
+        else:
+            await update.message.reply_text(f"❌ 未找到正式操作员ID：{ch_emp}\n请重新输入：")
+            return PERFORMANCE_RECORD
+    else:
+        await update.message.reply_text(f"❌ 员工格式错误：{ch_emp}\n请使用 @用户名 或 用户ID\n请重新输入：")
+        return PERFORMANCE_RECORD
+
+    # 客户员工
+    cu_emp = parts[6] if len(parts) > 6 else ""
+    if cu_emp.startswith('@'):
+        cu_username = cu_emp[1:]
+        from auth import operators as auth_operators
+        found = False
+        for oid, info in auth_operators.items():
+            if info.get('username') == cu_username:
+                customer_employee_id = oid
+                customer_employee_name = info.get('first_name') or cu_username
+                found = True
+                break
+        if not found:
+            await update.message.reply_text(f"❌ 未找到正式操作员：{cu_emp}\n请重新输入：")
+            return PERFORMANCE_RECORD
+    elif cu_emp.isdigit():
+        customer_employee_id = int(cu_emp)
+        from auth import operators as auth_operators
+        if customer_employee_id in auth_operators:
+            customer_employee_name = auth_operators[customer_employee_id].get('first_name') or str(customer_employee_id)
+        else:
+            await update.message.reply_text(f"❌ 未找到正式操作员ID：{cu_emp}\n请重新输入：")
+            return PERFORMANCE_RECORD
+    else:
+        await update.message.reply_text(f"❌ 员工格式错误：{cu_emp}\n请使用 @用户名 或 用户ID\n请重新输入：")
+        return PERFORMANCE_RECORD
+
+    # 保存记录
+    from db import add_performance_record
+
+    profit = channel_income + customer_expense
+    success = add_performance_record(
+        country, channel_income, customer_expense,
+        channel_group, customer_group,
+        channel_employee_id, channel_employee_name,
+        customer_employee_id, customer_employee_name,
+        user_id
+    )
+
+    if success:
+        ch_commission = profit * 0.1
+        cu_commission = profit * 0.1
+        ch_performance = profit / 2
+        cu_performance = profit / 2
+
+        reply = (
+            f"✅ **已记录业绩！**\n\n"
+            f"📋 **记录详情：**\n"
+            f"• 国家：{country}\n"
+            f"• 通道收入：{channel_income} USDT（群：{channel_group}）\n"
+            f"• 客户支出：{customer_expense} USDT（群：{customer_group}）\n"
+            f"• 利润：{profit} USDT\n\n"
+            f"👤 **通道员工：{channel_employee_name}**\n"
+            f"   提成：{ch_commission:.2f} USDT | 业绩：{ch_performance:.2f} USDT\n\n"
+            f"👤 **客户员工：{customer_employee_name}**\n"
+            f"   提成：{cu_commission:.2f} USDT | 业绩：{cu_performance:.2f} USDT"
+        )
+        if channel_employee_id == customer_employee_id:
+            reply += f"\n\n💡 通道和客户为同一人，提成 {ch_commission * 2:.2f} USDT，业绩 {ch_performance * 2:.2f} USDT"
+
+        await update.message.reply_text(reply, parse_mode="Markdown")
+    else:
+        await update.message.reply_text("❌ 记录失败，请稍后重试")
+
+    context.user_data.pop("profile_input_state", None)
+    context.user_data.pop("perf_action", None)
+
+    from handlers.menu import get_main_menu
+    await update.message.reply_text("请选择功能：", reply_markup=get_main_menu(user_id))
+    return ConversationHandler.END
+
+
+async def profile_performance_view_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """查看汇总 - 选择月份"""
+    query = update.callback_query
+    await query.answer()
+
+    from db import get_performance_available_months
+
+    months = get_performance_available_months()
+
+    if not months:
+        await query.message.edit_text("📭 暂无业绩记录")
+        return PERFORMANCE_MENU
+
+    keyboard = []
+    for m in months[:12]:
+        year, month = m.split('-')
+        keyboard.append([InlineKeyboardButton(
+            f"📅 {year}年{int(month)}月",
+            callback_data=f"perf_month_{m}"
+        )])
+
+    keyboard.append([InlineKeyboardButton("◀️ 返回业绩菜单", callback_data="profile_performance_menu")])
+
+    await query.message.edit_text(
+        "📊 **查看业绩汇总**\n\n请选择月份：",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+    return PERFORMANCE_MONTH_SELECT
+
+
+async def profile_performance_view_show(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """显示指定月份的业绩汇总"""
+    query = update.callback_query
+    await query.answer()
+
+    month_str = query.data.replace("perf_month_", "")
+    year, month = month_str.split('-')
+    year = int(year)
+    month = int(month)
+
+    from db import get_performance_summary
+    summary = get_performance_summary(year, month)
+
+    if not summary['records']:
+        await query.message.edit_text(f"📭 {year}年{month}月暂无业绩记录")
+        return PERFORMANCE_MONTH_SELECT
+
+    text = f"📊 **{year}年{month}月 业绩汇总**\n\n"
+    text += f"<blockquote><b>公司总利润：{summary['total_profit']:.2f} USDT</b></blockquote>\n\n"
+
+    if summary['records']:
+        text += f"`{'编号':<9}{'日期':<7}{'国家':<6}{'通道':>6}{'客户':>6}{'利润':>6}{'通道员工':<7}{'客户员工':<7}`\n"
+
+        for r in summary['records']:
+            date_str = r['date'][-5:] if r['date'] else ''
+            country = r['country'][:4]
+            ch_name = (r['channel_employee_name'] or f"ID{r['channel_employee_id']}")[:5]
+            cu_name = (r['customer_employee_name'] or f"ID{r['customer_employee_id']}")[:5]
+            text += f"`{r['id']:<9}{date_str:<7}{country:<6}{r['channel_income']:>6.0f}{r['customer_expense']:>6.0f}{r['profit']:>6.0f}{ch_name:<7}{cu_name:<7}`\n"
+
+    text += "\n<blockquote><b>💰 员工提成汇总</b></blockquote>\n"
+    for emp_id, data in summary['employee_commission'].items():
+        perf = summary['employee_performance'].get(emp_id, {}).get('performance', 0)
+        text += f"• {data['name']}：{data['commission']:.2f} USDT（业绩 {perf:.2f} USDT）\n"
+
+    text += "\n💡 提成 = 利润×10% | 业绩 = 利润÷2"
+
+    keyboard = [[InlineKeyboardButton("◀️ 返回月份选择", callback_data="profile_performance_view")]]
+    keyboard.append([InlineKeyboardButton("◀️ 返回业绩汇总", callback_data="profile_performance_menu")])
+
+    await query.message.edit_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="HTML"
+    )
+    return PERFORMANCE_VIEW
+
+# ---- 修改业绩 ----
+async def profile_performance_edit_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """修改业绩 - 输入信息"""
+    query = update.callback_query
+    user_id = query.from_user.id
+    from config import OWNER_ID
+    if user_id != OWNER_ID:
+        await query.answer("❌ 只有超级管理员才能修改业绩", show_alert=True)
+        return
+
+    await query.answer()
+    context.user_data["profile_input_state"] = True
+    context.user_data["perf_action"] = "edit"
+
+    from auth import operators as auth_operators
+    employee_list = ""
+    if auth_operators:
+        employee_list = "\n\n📋 **现有员工列表：**\n"
+        for uid, info in auth_operators.items():
+            name = info.get('first_name') or ''
+            uname = f" @{info['username']}" if info.get('username') else ''
+            employee_list += f"• {name}{uname}（ID: `{uid}`）\n"
+
+    keyboard = [[InlineKeyboardButton("◀️ 返回业绩菜单", callback_data="profile_performance_menu")]]
+
+    await query.message.edit_text(
+        "✏️ **修改业绩**\n\n"
+        "请输入信息，用空格分隔：\n"
+        "`编号 国家 通道收入 客户支出 通道群名 客户群名 @通道员工 @客户员工`\n\n"
+        "例如：\n"
+        "`1 德国 5000 -3000 德国通道群 德国客户群 @张三 @李四`\n\n"
+        "💡 编号是汇总列表中第一列的序号\n"
+        f"{employee_list}"
+        "\n❌ 发送 /cancel 取消",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+    return PERFORMANCE_EDIT
+
+
+async def profile_performance_edit_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """接收修改的业绩记录"""
+    user_id = update.effective_user.id
+    from config import OWNER_ID
+    if user_id != OWNER_ID:
+        await update.message.reply_text("❌ 只有超级管理员才能修改业绩")
+        context.user_data.pop("profile_input_state", None)
+        context.user_data.pop("perf_action", None)
+        return ConversationHandler.END
+    text = update.message.text.strip()
+
+    if text == '/cancel':
+        context.user_data.pop("profile_input_state", None)
+        context.user_data.pop("perf_action", None)
+        await update.message.reply_text("❌ 已取消修改")
+        from handlers.menu import get_main_menu
+        await update.message.reply_text("请选择功能：", reply_markup=get_main_menu(user_id))
+        return ConversationHandler.END
+
+    context.user_data["_message_handled"] = True
+
+    import shlex
+    try:
+        parts = shlex.split(text)
+    except:
+        parts = text.split()
+
+    if len(parts) < 8:
+        await update.message.reply_text("❌ 格式错误，至少需要8个参数\n请重新输入：")
+        return PERFORMANCE_EDIT
+
+    try:
+        record_id = int(parts[0])
+    except ValueError:
+        await update.message.reply_text("❌ 编号必须是数字\n请重新输入：")
+        return PERFORMANCE_EDIT
+
+    from db import get_performance_record_by_id
+    record = get_performance_record_by_id(record_id)
+    if not record:
+        await update.message.reply_text(f"❌ 未找到编号 {record_id} 的业绩记录\n请重新输入：")
+        return PERFORMANCE_EDIT
+
+    country = parts[1]
+    try:
+        channel_income = float(parts[2])
+        customer_expense = float(parts[3])
+    except ValueError:
+        await update.message.reply_text("❌ 金额格式错误\n请重新输入：")
+        return PERFORMANCE_EDIT
+
+    channel_group = parts[4]
+    customer_group = parts[5]
+
+    # 解析员工（和 record 一样的逻辑）
+    channel_employee_id = 0
+    channel_employee_name = ""
+    customer_employee_id = 0
+    customer_employee_name = ""
+
+    ch_emp = parts[6]
+    if ch_emp.startswith('@'):
+        ch_username = ch_emp[1:]
+        from auth import operators as auth_operators
+        for oid, info in auth_operators.items():
+            if info.get('username') == ch_username:
+                channel_employee_id = oid
+                channel_employee_name = info.get('first_name') or ch_username
+                break
+        if channel_employee_id == 0:
+            await update.message.reply_text(f"❌ 未找到正式操作员：{ch_emp}\n请重新输入：")
+            return PERFORMANCE_EDIT
+    elif ch_emp.isdigit():
+        channel_employee_id = int(ch_emp)
+        from auth import operators as auth_operators
+        if channel_employee_id in auth_operators:
+            channel_employee_name = auth_operators[channel_employee_id].get('first_name') or str(channel_employee_id)
+        else:
+            await update.message.reply_text(f"❌ 未找到正式操作员ID：{ch_emp}\n请重新输入：")
+            return PERFORMANCE_EDIT
+    else:
+        await update.message.reply_text(f"❌ 员工格式错误：{ch_emp}\n请重新输入：")
+        return PERFORMANCE_EDIT
+
+    cu_emp = parts[7]
+    if cu_emp.startswith('@'):
+        cu_username = cu_emp[1:]
+        from auth import operators as auth_operators
+        for oid, info in auth_operators.items():
+            if info.get('username') == cu_username:
+                customer_employee_id = oid
+                customer_employee_name = info.get('first_name') or cu_username
+                break
+        if customer_employee_id == 0:
+            await update.message.reply_text(f"❌ 未找到正式操作员：{cu_emp}\n请重新输入：")
+            return PERFORMANCE_EDIT
+    elif cu_emp.isdigit():
+        customer_employee_id = int(cu_emp)
+        from auth import operators as auth_operators
+        if customer_employee_id in auth_operators:
+            customer_employee_name = auth_operators[customer_employee_id].get('first_name') or str(customer_employee_id)
+        else:
+            await update.message.reply_text(f"❌ 未找到正式操作员ID：{cu_emp}\n请重新输入：")
+            return PERFORMANCE_EDIT
+    else:
+        await update.message.reply_text(f"❌ 员工格式错误：{cu_emp}\n请重新输入：")
+        return PERFORMANCE_EDIT
+
+    from db import update_performance_record
+    profit = channel_income + customer_expense
+    success = update_performance_record(
+        record_id, country, channel_income, customer_expense,
+        channel_group, customer_group,
+        channel_employee_id, channel_employee_name,
+        customer_employee_id, customer_employee_name
+    )
+
+    if success:
+        await update.message.reply_text(f"✅ 已修改编号 {record_id} 的业绩记录")
+    else:
+        await update.message.reply_text("❌ 修改失败")
+
+    context.user_data.pop("profile_input_state", None)
+    context.user_data.pop("perf_action", None)
+
+    from handlers.menu import get_main_menu
+    await update.message.reply_text("请选择功能：", reply_markup=get_main_menu(user_id))
+    return ConversationHandler.END
+
+
+# ---- 删除业绩 ----
+async def profile_performance_delete_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """删除业绩 - 输入编号"""
+    query = update.callback_query
+    user_id = query.from_user.id
+    from config import OWNER_ID
+    if user_id != OWNER_ID:
+        await query.answer("❌ 只有超级管理员才能删除业绩", show_alert=True)
+        return
+
+    await query.answer()
+    context.user_data["profile_input_state"] = True
+    context.user_data["perf_action"] = "delete"
+
+    keyboard = [[InlineKeyboardButton("◀️ 返回业绩菜单", callback_data="profile_performance_menu")]]
+
+    await query.message.edit_text(
+        "🗑️ **删除业绩**\n\n"
+        "请输入要删除的业绩编号：\n"
+        "例如：`1`\n\n"
+        "💡 编号是汇总列表中第一列的序号\n"
+        "❌ 发送 /cancel 取消",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+    return PERFORMANCE_DELETE
+
+
+async def profile_performance_delete_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """接收删除编号"""
+    user_id = update.effective_user.id
+    from config import OWNER_ID
+    if user_id != OWNER_ID:
+        await update.message.reply_text("❌ 只有超级管理员才能删除业绩")
+        context.user_data.pop("profile_input_state", None)
+        context.user_data.pop("perf_action", None)
+        return ConversationHandler.END
+    text = update.message.text.strip()
+
+    if text == '/cancel':
+        context.user_data.pop("profile_input_state", None)
+        context.user_data.pop("perf_action", None)
+        await update.message.reply_text("❌ 已取消删除")
+        from handlers.menu import get_main_menu
+        await update.message.reply_text("请选择功能：", reply_markup=get_main_menu(user_id))
+        return ConversationHandler.END
+
+    context.user_data["_message_handled"] = True
+
+    if not text.isdigit():
+        await update.message.reply_text("❌ 请输入数字编号\n请重新输入：")
+        return PERFORMANCE_DELETE
+
+    record_id = int(text)
+
+    from db import get_performance_record_by_id, delete_performance_record
+    record = get_performance_record_by_id(record_id)
+    if not record:
+        await update.message.reply_text(f"❌ 未找到编号 {record_id} 的业绩记录\n请重新输入：")
+        return PERFORMANCE_DELETE
+
+    if delete_performance_record(record_id):
+        await update.message.reply_text(f"✅ 已删除编号 {record_id} 的业绩记录")
+    else:
+        await update.message.reply_text("❌ 删除失败")
+
+    context.user_data.pop("profile_input_state", None)
+    context.user_data.pop("perf_action", None)
+
+    from handlers.menu import get_main_menu
+    await update.message.reply_text("请选择功能：", reply_markup=get_main_menu(user_id))
+    return ConversationHandler.END
+
+async def profile_performance_export_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """导出业绩 - 选择月份"""
+    query = update.callback_query
+    await query.answer()
+
+    from db import get_performance_available_months
+
+    months = get_performance_available_months()
+    if not months:
+        await query.message.edit_text("📭 暂无业绩记录可导出")
+        return PERFORMANCE_MENU
+
+    keyboard = []
+    for m in months[:12]:
+        year, month = m.split('-')
+        keyboard.append([InlineKeyboardButton(
+            f"📅 {year}年{int(month)}月",
+            callback_data=f"perf_export_{m}"
+        )])
+
+    keyboard.append([InlineKeyboardButton("📥 导出全部", callback_data="perf_export_all")])
+    keyboard.append([InlineKeyboardButton("◀️ 返回业绩汇总", callback_data="profile_performance_menu")])
+
+    await query.message.edit_text(
+        "📥 **导出业绩汇总**\n\n请选择要导出的月份，或导出全部：",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+    return PERFORMANCE_MONTH_SELECT
+
+async def profile_performance_export_do(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """执行导出"""
+    query = update.callback_query
+    data = query.data
+
+    if data == "perf_export_all":
+        # 导出全部
+        from db import get_performance_records
+        records = get_performance_records()
+        if not records:
+            await query.answer("暂无业绩记录", show_alert=True)
+            return
+        year_str = "全部"
+        month_str = ""
+        total_profit = sum(r['profit'] for r in records)
+
+        # 按员工汇总
+        employee_commission = {}
+        employee_performance = {}
+        for r in records:
+            profit = r['profit']
+            for emp_id, emp_name, key_prefix in [
+                (r['channel_employee_id'], r['channel_employee_name'], 'ch'),
+                (r['customer_employee_id'], r['customer_employee_name'], 'cu')
+            ]:
+                if emp_id not in employee_commission:
+                    employee_commission[emp_id] = {"name": emp_name or f"ID{emp_id}", "commission": 0}
+                    employee_performance[emp_id] = {"name": emp_name or f"ID{emp_id}", "performance": 0}
+                employee_commission[emp_id]["commission"] += profit * 0.1
+                employee_performance[emp_id]["performance"] += profit / 2
+    else:
+        month_str = data.replace("perf_export_", "")
+        year, month = month_str.split('-')
+        year = int(year)
+        month = int(month)
+        year_str = f"{year}年{month}月"
+
+        from db import get_performance_summary
+        summary = get_performance_summary(year, month)
+        records = summary['records']
+        total_profit = summary['total_profit']
+        employee_commission = summary['employee_commission']
+        employee_performance = summary['employee_performance']
+
+    await query.answer("正在生成HTML...")
+
+    # 生成HTML（和之前一样，用 records、total_profit、employee_commission、employee_performance）
+    html = generate_performance_html(records, total_profit, employee_commission, employee_performance, year_str, month_str)
+
+    import tempfile, os
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.html', encoding='utf-8', delete=False) as f:
+        f.write(html)
+        temp_path = f.name
+
+    try:
+        with open(temp_path, 'rb') as f:
+            await query.message.reply_document(
+                document=f,
+                filename=f"业绩汇总_{year_str}.html",
+                caption=f"📊 {year_str}业绩汇总已导出"
+            )
+    finally:
+        os.unlink(temp_path)
+
+
+def generate_performance_html(records, total_profit, employee_commission, employee_performance, title, subtitle=""):
+    """生成业绩HTML"""
+    html = f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>{title} 业绩汇总</title>
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #0f172a, #1e3a5f);
+            min-height: 100vh; padding: 40px 20px; color: #e2e8f0;
+        }}
+        .container {{ max-width: 1000px; margin: 0 auto; }}
+        .header {{
+            text-align: center; padding: 30px; background: rgba(255,255,255,0.05);
+            border-radius: 20px; margin-bottom: 30px; backdrop-filter: blur(10px);
+        }}
+        .header h1 {{ font-size: 28px; background: linear-gradient(135deg, #f59e0b, #ef4444); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }}
+        .header .profit {{ font-size: 36px; font-weight: bold; color: #10b981; margin-top: 10px; }}
+        .table-container {{
+            background: rgba(255,255,255,0.05); border-radius: 16px; padding: 20px;
+            margin-bottom: 30px; backdrop-filter: blur(10px); overflow-x: auto;
+        }}
+        table {{ width: 100%; border-collapse: collapse; font-size: 14px; }}
+        th {{
+            background: rgba(245,158,11,0.2); padding: 14px 12px; text-align: left;
+            font-weight: 600; color: #f59e0b; border-bottom: 2px solid rgba(245,158,11,0.3);
+            white-space: nowrap;
+        }}
+        td {{ padding: 12px; border-bottom: 1px solid rgba(255,255,255,0.06); }}
+        tr:hover {{ background: rgba(255,255,255,0.03); }}
+        .income {{ color: #10b981; }}
+        .expense {{ color: #ef4444; }}
+        .profit-cell {{ color: #f59e0b; font-weight: 600; }}
+        .employee-section {{
+            background: rgba(255,255,255,0.05); border-radius: 16px; padding: 24px;
+            margin-bottom: 30px; backdrop-filter: blur(10px);
+        }}
+        .employee-section h2 {{ color: #f59e0b; margin-bottom: 16px; }}
+        .employee-card {{
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 16px; margin-bottom: 10px; background: rgba(255,255,255,0.03);
+            border-radius: 12px; border: 1px solid rgba(255,255,255,0.06);
+        }}
+        .employee-name {{ font-size: 16px; font-weight: 600; }}
+        .employee-commission {{ color: #10b981; font-size: 18px; font-weight: bold; }}
+        .employee-perf {{ color: #94a3b8; font-size: 14px; margin-left: 10px; }}
+        .footer {{ text-align: center; color: #64748b; font-size: 12px; padding: 20px; }}
+    </style>
+</head>
+<body>
+<div class="container">
+    <div class="header">
+        <h1>📊 {title} 业绩汇总</h1>
+        <div class="profit">公司总利润：{total_profit:.2f} USDT</div>
+    </div>
+    <div class="table-container">
+        <table>
+            <thead>
+                <tr>
+                    <th>编号</th><th>日期</th><th>国家</th><th>通道收入</th><th>客户支出</th><th>利润</th><th>通道员工</th><th>客户员工</th>
+                </tr>
+            </thead>
+            <tbody>
+"""
+    for r in records:
+        ch_name = r.get('channel_employee_name') or f"ID{r.get('channel_employee_id')}"
+        cu_name = r.get('customer_employee_name') or f"ID{r.get('customer_employee_id')}"
+        html += f"""                <tr>
+                    <td>{r.get('id', '')}</td><td>{r.get('date', '')}</td><td>{r.get('country', '')}</td>
+                    <td class="income">{r.get('channel_income', 0):.0f}</td>
+                    <td class="expense">{r.get('customer_expense', 0):.0f}</td>
+                    <td class="profit-cell">{r.get('profit', 0):.0f}</td>
+                    <td>{ch_name}</td><td>{cu_name}</td>
+                </tr>
+"""
+    html += """            </tbody>
+        </table>
+    </div>
+    <div class="employee-section">
+        <h2>💰 员工提成汇总</h2>
+"""
+    for emp_id, data in employee_commission.items():
+        perf = employee_performance.get(emp_id, {}).get('performance', 0)
+        html += f"""        <div class="employee-card">
+            <span class="employee-name">{data['name']}</span>
+            <span>
+                <span class="employee-commission">{data['commission']:.2f} USDT</span>
+                <span class="employee-perf">业绩 {perf:.2f} USDT</span>
+            </span>
+        </div>
+"""
+    html += """    </div>
+    <div class="footer">由记账机器人自动生成 · 提成=利润×10% · 业绩=利润÷2</div>
+</div>
+</body>
+</html>"""
+    return html
+
+async def profile_performance_trace(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """记录追溯 - 显示本月操作日志"""
+    query = update.callback_query
+    user_id = query.from_user.id
+
+    from config import OWNER_ID
+    if user_id != OWNER_ID:
+        await query.answer("❌ 只有超级管理员才能查看", show_alert=True)
+        return
+
+    await query.answer()
+
+    from db import get_performance_records
+    from datetime import datetime, timezone, timedelta
+    from auth import operators as auth_operators
+
+    beijing_tz = timezone(timedelta(hours=8))
+    now = datetime.now(beijing_tz)
+    current_month = now.strftime('%Y-%m')
+
+    all_records = get_performance_records()
+    # 筛选本月记录
+    month_records = [r for r in all_records if r.get('date', '').startswith(current_month)]
+
+    if not month_records:
+        await query.message.edit_text(
+            f"📝 **记录追溯 - {now.strftime('%Y年%m月')}**\n\n📭 本月暂无记录",
+            parse_mode="Markdown"
+        )
+        return
+
+    # 按时间倒序
+    month_records.sort(key=lambda x: x.get('created_at', 0), reverse=True)
+
+    # 获取操作人名称
+    def get_user_name(uid):
+        if uid in auth_operators:
+            name = auth_operators[uid].get('first_name', '')
+            uname = auth_operators[uid].get('username', '')
+            return f"{name}(@{uname})" if uname else name or str(uid)
+        return f"ID{uid}"
+
+    text = f"📝 **记录追溯 - {now.strftime('%Y年%m月')}**\n"
+    text += f"共 **{len(month_records)}** 条记录\n\n"
+
+    for i, r in enumerate(month_records, 1):
+        created_time = datetime.fromtimestamp(r['created_at'], tz=beijing_tz).strftime('%m-%d %H:%M')
+        operator = get_user_name(r['created_by'])
+        ch_name = r.get('channel_employee_name') or f"ID{r['channel_employee_id']}"
+        cu_name = r.get('customer_employee_name') or f"ID{r['customer_employee_id']}"
+        profit = r['channel_income'] + r['customer_expense']
+
+        text += f"`{i:<3} {created_time}`\n"
+        text += f"   编号：`{r['id']}` | {r['country']} | 通道:{r['channel_income']:.0f} | 客户:{r['customer_expense']:.0f} | 利润:{profit:.0f}\n"
+        text += f"   通道员工：{ch_name} | 客户员工：{cu_name}\n"
+        text += f"   操作人：{operator}\n\n"
+
+    keyboard = [[InlineKeyboardButton("◀️ 返回业绩汇总", callback_data="profile_performance_menu")]]
+
+    await query.message.edit_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
