@@ -370,6 +370,7 @@ async def send_transfer_page(update: Update, context: ContextTypes.DEFAULT_TYPE,
 async def handle_transfer_pagination(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    user_id = query.from_user.id
 
     data = query.data
     if data.startswith("trans_page_"):
@@ -390,6 +391,7 @@ async def handle_transfer_pagination(update: Update, context: ContextTypes.DEFAU
 # --- 取消 ---
 async def cancel_transfer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """取消互转查询"""
+    user_id = update.effective_user.id
     context.user_data.pop("active_module", None)
     context.user_data.pop("transfer_results", None)
     context.user_data.pop("current_page", None)
@@ -441,6 +443,8 @@ async def transfer_back_to_main(update: Update, context: ContextTypes.DEFAULT_TY
     query = update.callback_query
     await query.answer()
 
+    user_id = query.from_user.id
+
     # 清除所有互转查询相关的状态
     context.user_data.pop("transfer_results", None)
     context.user_data.pop("current_page", None)
@@ -457,6 +461,7 @@ async def transfer_back_to_main(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def cancel_transfer_from_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """从消息中取消互转查询（处理 /cancel 命令）"""
+    user_id = update.effective_user.id
     # 清除所有互转查询相关的状态
     context.user_data.pop("transfer_results", None)
     context.user_data.pop("current_page", None)
