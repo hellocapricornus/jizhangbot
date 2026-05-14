@@ -49,6 +49,16 @@ from handlers.profile import (
     SET_SIGNATURE, FEEDBACK,
     RULE_MENU, RULE_ADD_NAME, RULE_ADD_CONTENT, RULE_UPDATE_SELECT,
     RULE_UPDATE_CONTENT, RULE_DELETE_SELECT, RULE_TOGGLE_SELECT, RULE_VIEW,
+    profile_performance_menu, profile_performance_record_start,
+    profile_performance_record_input, profile_performance_view_start,
+    profile_performance_view_show,
+    PERFORMANCE_MENU, PERFORMANCE_RECORD, PERFORMANCE_VIEW, PERFORMANCE_MONTH_SELECT,
+    profile_performance_edit_start, profile_performance_edit_input,
+    profile_performance_delete_start, profile_performance_delete_input,
+    PERFORMANCE_EDIT, PERFORMANCE_DELETE,
+    profile_performance_export_select,
+    profile_performance_export_do,
+    profile_performance_trace,
 )
 
 from datetime import datetime, timedelta, timezone
@@ -541,16 +551,7 @@ async def module_input_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if context.user_data.pop("profile_input_state", False):
         return ConversationHandler.END
 
-    # 🔥 新增：检查规则管理状态，直接拦截不往下传
-    if context.user_data.get("rule_action"):
-        context.user_data["_message_handled"] = True
-        return ConversationHandler.END  # ← 直接返回，不交给 AI
-
     text = update.message.text.strip() if update.message.text else ""
-    # 🔥 拦截以"规则"结尾的私聊消息（不是发送规则查询，不交给AI）
-    if text and text.endswith('规则') and not text.startswith('发送'):
-        context.user_data["_message_handled"] = True
-        return ConversationHandler.END
 
     # 如果是已知键盘按钮，不处理
     if text in ALL_KNOWN_BUTTONS:
@@ -611,6 +612,20 @@ async def module_input_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         context.user_data["_message_handled"] = True
         return ConversationHandler.END
 
+    # 🔥 检查业绩汇总状态
+    if context.user_data.get("perf_action"):
+        return ConversationHandler.END
+
+    # 🔥 新增：检查规则管理状态，直接拦截不往下传
+    if context.user_data.get("rule_action"):
+        context.user_data["_message_handled"] = True
+        return ConversationHandler.END  # ← 直接返回，不交给 AI
+
+    # 🔥 拦截以"规则"结尾的私聊消息（不是发送规则查询，不交给AI）
+    if text and text.endswith('规则') and not text.startswith('发送'):
+        context.user_data["_message_handled"] = True
+        return ConversationHandler.END
+
     # 不是任何模块的输入，返回 None 让 ai_chat_handler 处理
     return None
 
@@ -626,6 +641,10 @@ async def ai_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 检查个人中心输入标志
     if context.user_data.pop("profile_input_state", False):
+        return
+
+    # 业绩汇总状态
+    if context.user_data.get("perf_action"):
         return
 
     # 规则管理状态
@@ -1710,6 +1729,9 @@ def main():
             CallbackQueryHandler(profile_rule_delete_select, pattern="^profile_rule_delete_select$"),
             CallbackQueryHandler(profile_rule_global_toggle, pattern="^profile_rule_global_toggle$"),
             CallbackQueryHandler(profile_back_to_menu, pattern="^profile_back_to_menu$"),
+            CallbackQueryHandler(profile_performance_menu, pattern="^profile_performance_menu$"),
+            CallbackQueryHandler(profile_performance_record_start, pattern="^profile_performance_record$"),
+            CallbackQueryHandler(profile_performance_view_start, pattern="^profile_performance_view$"),
         ],
         states={
             SET_SIGNATURE: [
@@ -1749,7 +1771,34 @@ def main():
                 CallbackQueryHandler(profile_rule_detail, pattern="^profile_rule_detail_"),
                 CallbackQueryHandler(profile_rules_menu, pattern="^profile_rules_menu$"),
                 CallbackQueryHandler(profile_rule_update_select_handler, pattern="^profile_rule_upd_"),
-            ],  
+            ],
+            PERFORMANCE_MENU: [
+                CallbackQueryHandler(profile_performance_record_start, pattern="^profile_performance_record$"),
+                CallbackQueryHandler(profile_performance_view_start, pattern="^profile_performance_view$"),
+                CallbackQueryHandler(profile_performance_edit_start, pattern="^profile_performance_edit$"),
+                CallbackQueryHandler(profile_performance_delete_start, pattern="^profile_performance_delete$"),
+                CallbackQueryHandler(profile_performance_export_select, pattern="^profile_performance_export_select$"),
+                CallbackQueryHandler(profile_back, pattern="^profile_return$"),
+                CallbackQueryHandler(profile_performance_trace, pattern="^profile_performance_trace$"),
+            ],
+            PERFORMANCE_RECORD: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, profile_performance_record_input),
+            ],
+            PERFORMANCE_VIEW: [
+                CallbackQueryHandler(profile_performance_view_start, pattern="^profile_performance_view$"),
+                CallbackQueryHandler(profile_performance_menu, pattern="^profile_performance_menu$"),
+            ],
+            PERFORMANCE_MONTH_SELECT: [
+                CallbackQueryHandler(profile_performance_view_show, pattern="^perf_month_"),
+                CallbackQueryHandler(profile_performance_export_do, pattern="^perf_export_"),
+                CallbackQueryHandler(profile_performance_menu, pattern="^profile_performance_menu$"),
+            ],
+            PERFORMANCE_EDIT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, profile_performance_edit_input),
+            ],
+            PERFORMANCE_DELETE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, profile_performance_delete_input),
+            ],
         },
         fallbacks=[CommandHandler("cancel", lambda u, c: ConversationHandler.END)],
         per_message=False,
