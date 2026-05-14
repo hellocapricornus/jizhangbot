@@ -2080,7 +2080,7 @@ def generate_performance_html(records, total_profit, employee_commission, employ
         <table>
             <thead>
                 <tr>
-                    <th>编号</th><th>日期</th><th>国家</th><th>通道收入</th><th>客户支出</th><th>利润</th><th>通道员工</th><th>客户员工</th>
+                    <th>编号</th><th>日期</th><th>国家</th><th>通道群名</th><th>客户群名</th><th>通道收入</th><th>客户支出</th><th>利润</th><th>通道员工</th><th>客户员工</th>
                 </tr>
             </thead>
             <tbody>
@@ -2090,6 +2090,7 @@ def generate_performance_html(records, total_profit, employee_commission, employ
         cu_name = r.get('customer_employee_name') or f"ID{r.get('customer_employee_id')}"
         html += f"""                <tr>
                     <td>{r.get('id', '')}</td><td>{r.get('date', '')}</td><td>{r.get('country', '')}</td>
+                    <td>{r.get('channel_group', '')}</td><td>{r.get('customer_group', '')}</td>
                     <td class="income">{r.get('channel_income', 0):.0f}</td>
                     <td class="expense">{r.get('customer_expense', 0):.0f}</td>
                     <td class="profit-cell">{r.get('profit', 0):.0f}</td>
