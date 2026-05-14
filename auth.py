@@ -319,6 +319,12 @@ async def update_all_operators_info(context: ContextTypes.DEFAULT_TYPE):
             failed_count += 1
             logger.error(f"更新失败 ID {user_id}: {e}")
 
+    # 同步更新业绩记录中的员工名称
+    from db import refresh_performance_employee_names
+    refreshed = refresh_performance_employee_names()
+    if refreshed > 0:
+        logger.info(f"已同步更新 {refreshed} 条业绩记录中的员工名称")
+    
     logger.info(f"更新完成！成功: {updated_count}, 失败: {failed_count}")
     return updated_count
 
