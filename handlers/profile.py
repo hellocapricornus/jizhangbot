@@ -1369,14 +1369,20 @@ async def profile_performance_menu(update: Update, context: ContextTypes.DEFAULT
     text += f"<blockquote><b>公司总利润：{summary['total_profit']:.2f} USDT</b></blockquote>\n\n"
 
     if summary['records']:
+        display_records = summary['records'][:20]
+
+        # 表头
         text += f"`{'编号':<9}{'日期':<7}{'国家':<6}{'通道':>6}{'客户':>6}{'利润':>6}{'通道员工':<7}{'客户员工':<7}`\n"
 
-        for r in summary['records']:
+        for r in display_records:
             date_str = r['date'][-5:] if r['date'] else ''
             country = r['country'][:4]
             ch_name = (r['channel_employee_name'] or f"ID{r['channel_employee_id']}")[:5]
             cu_name = (r['customer_employee_name'] or f"ID{r['customer_employee_id']}")[:5]
             text += f"`{r['id']:<9}{date_str:<7}{country:<6}{r['channel_income']:>6.0f}{r['customer_expense']:>6.0f}{r['profit']:>6.0f}{ch_name:<7}{cu_name:<7}`\n"
+
+        if len(summary['records']) > 20:
+            text += f"\n`... 仅显示20条，共 {len(summary['records'])} 条（导出HTML查看全部）`\n"
 
     # 员工提成
     text += "\n<blockquote><b>💰 员工提成汇总</b></blockquote>\n"
@@ -1654,14 +1660,20 @@ async def profile_performance_view_show(update: Update, context: ContextTypes.DE
     text += f"<blockquote><b>公司总利润：{summary['total_profit']:.2f} USDT</b></blockquote>\n\n"
 
     if summary['records']:
+        display_records = summary['records'][:20]
+
+        # 表头
         text += f"`{'编号':<9}{'日期':<7}{'国家':<6}{'通道':>6}{'客户':>6}{'利润':>6}{'通道员工':<7}{'客户员工':<7}`\n"
 
-        for r in summary['records']:
+        for r in display_records:
             date_str = r['date'][-5:] if r['date'] else ''
             country = r['country'][:4]
             ch_name = (r['channel_employee_name'] or f"ID{r['channel_employee_id']}")[:5]
             cu_name = (r['customer_employee_name'] or f"ID{r['customer_employee_id']}")[:5]
             text += f"`{r['id']:<9}{date_str:<7}{country:<6}{r['channel_income']:>6.0f}{r['customer_expense']:>6.0f}{r['profit']:>6.0f}{ch_name:<7}{cu_name:<7}`\n"
+
+        if len(summary['records']) > 20:
+            text += f"\n`... 仅显示20条，共 {len(summary['records'])} 条（导出HTML查看全部）`\n"
 
     text += "\n<blockquote><b>💰 员工提成汇总</b></blockquote>\n"
     for emp_id, data in summary['employee_commission'].items():
