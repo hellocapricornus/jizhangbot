@@ -36,6 +36,19 @@ PERFORMANCE_MONTH_SELECT = 20
 PERFORMANCE_EDIT = 21
 PERFORMANCE_DELETE = 22
 
+def _is_keyboard_button(text: str) -> bool:
+    """检查是否是键盘按钮"""
+    keyboard_buttons = {
+        "◀️ 返回主菜单", "📒 记账", "🔔 USDT监控", "📢 群发", "💰 USDT查询",
+        "👤 操作人管理", "🔄 互转查询", "📁 群组管理", "📖 使用说明", "👤 个人中心",
+        "➕ 添加操作人", "➖ 删除操作人", "📋 操作人列表", "🔄 更新操作人信息", "👥 临时操作人",
+        "➕ 添加临时操作人", "➖ 删除临时操作人", "📋 临时操作人列表", "◀️ 返回操作人管理",
+        "➕ 添加监控地址", "📋 监控列表", "📊 月度统计", "❌ 删除监控地址",
+        "📊 群组统计", "📁 查看分类", "➕ 创建分类", "🏷️ 设置群组分类", "🗑️ 删除分类",
+        "🔍 转账查询", "🕸️ 转账分析",
+    }
+    return text in keyboard_buttons
+    
 # ---------- 辅助：构建个人中心菜单 ----------
 async def _build_profile_menu(user_id: int, prefs: dict = None, display_name: str = "") -> tuple:
     """返回 (消息文本, InlineKeyboardMarkup)"""
@@ -987,14 +1000,30 @@ async def profile_rule_add_name_input(update: Update, context: ContextTypes.DEFA
     user_id = update.effective_user.id
     text = update.message.text.strip()
 
+    # ✅ 检查是否是键盘按钮
+    if _is_keyboard_button(text):
+        # 清理所有状态
+        context.user_data.pop("profile_input_state", None)
+        context.user_data.pop("rule_action", None)
+        context.user_data.pop("rule_name", None)
+        # 显示主菜单
+        from handlers.menu import get_main_menu
+        await update.message.reply_text(
+            "请选择功能：",
+            reply_markup=get_main_menu(user_id)
+        )
+        return ConversationHandler.END
+
     if text == '/cancel':
         context.user_data.pop("profile_input_state", None)
         context.user_data.pop("rule_action", None)
+        context.user_data.pop("rule_name", None)
         await update.message.reply_text("❌ 已取消添加")
-        prefs = get_user_preferences(user_id)
-        _, markup = await _build_profile_menu(user_id, prefs, 
-                                              update.effective_user.username or update.effective_user.first_name or "")
-        await update.message.reply_text("已返回个人中心", reply_markup=markup, parse_mode="Markdown")
+        from handlers.menu import get_main_menu
+        await update.message.reply_text(
+            "请选择功能：",
+            reply_markup=get_main_menu(user_id)
+        )
         return ConversationHandler.END
 
     if len(text) < 1:
@@ -1031,17 +1060,30 @@ async def profile_rule_add_content_input(update: Update, context: ContextTypes.D
     user_id = update.effective_user.id
     text = update.message.text.strip()
 
+    # ✅ 先检查是否是键盘按钮
+    if _is_keyboard_button(text):
+        context.user_data.pop("profile_input_state", None)
+        context.user_data.pop("rule_action", None)
+        context.user_data.pop("rule_name", None)
+        from handlers.menu import get_main_menu
+        await update.message.reply_text(
+            "请选择功能：",
+            reply_markup=get_main_menu(user_id)
+        )
+        return ConversationHandler.END
+
     if text == '/cancel':
         context.user_data.pop("profile_input_state", None)
         context.user_data.pop("rule_action", None)
         context.user_data.pop("rule_name", None)
         await update.message.reply_text("❌ 已取消添加")
-        prefs = get_user_preferences(user_id)
-        _, markup = await _build_profile_menu(user_id, prefs, 
-                                              update.effective_user.username or update.effective_user.first_name or "")
-        await update.message.reply_text("已返回个人中心", reply_markup=markup, parse_mode="Markdown")
+        from handlers.menu import get_main_menu
+        await update.message.reply_text(
+            "请选择功能：",
+            reply_markup=get_main_menu(user_id)
+        )
         return ConversationHandler.END
-
+        
     rule_name = context.user_data.get("rule_name", "")
     if not rule_name:
         await update.message.reply_text("❌ 会话已过期，请重新添加")
@@ -1170,15 +1212,28 @@ async def profile_rule_update_content_input(update: Update, context: ContextType
     user_id = update.effective_user.id
     text = update.message.text.strip()
 
+    # ✅ 先检查是否是键盘按钮
+    if _is_keyboard_button(text):
+        context.user_data.pop("profile_input_state", None)
+        context.user_data.pop("rule_action", None)
+        context.user_data.pop("rule_name", None)
+        from handlers.menu import get_main_menu
+        await update.message.reply_text(
+            "请选择功能：",
+            reply_markup=get_main_menu(user_id)
+        )
+        return ConversationHandler.END
+
     if text == '/cancel':
         context.user_data.pop("profile_input_state", None)
         context.user_data.pop("rule_action", None)
         context.user_data.pop("rule_name", None)
         await update.message.reply_text("❌ 已取消更新")
-        prefs = get_user_preferences(user_id)
-        _, markup = await _build_profile_menu(user_id, prefs, 
-                                              update.effective_user.username or update.effective_user.first_name or "")
-        await update.message.reply_text("已返回个人中心", reply_markup=markup, parse_mode="Markdown")
+        from handlers.menu import get_main_menu
+        await update.message.reply_text(
+            "请选择功能：",
+            reply_markup=get_main_menu(user_id)
+        )
         return ConversationHandler.END
 
     rule_name = context.user_data.get("rule_name", "")
@@ -1465,12 +1520,26 @@ async def profile_performance_record_input(update: Update, context: ContextTypes
     user_id = update.effective_user.id
     text = update.message.text.strip()
 
+    # ✅ 检查是否是键盘按钮
+    if _is_keyboard_button(text):
+        context.user_data.pop("profile_input_state", None)
+        context.user_data.pop("perf_action", None)
+        from handlers.menu import get_main_menu
+        await update.message.reply_text(
+            "请选择功能：",
+            reply_markup=get_main_menu(user_id)
+        )
+        return ConversationHandler.END
+
     if text == '/cancel':
         context.user_data.pop("profile_input_state", None)
         context.user_data.pop("perf_action", None)
         await update.message.reply_text("❌ 已取消记录")
         from handlers.menu import get_main_menu
-        await update.message.reply_text("请选择功能：", reply_markup=get_main_menu(user_id))
+        await update.message.reply_text(
+            "请选择功能：",
+            reply_markup=get_main_menu(user_id)
+        )
         return ConversationHandler.END
 
     # ✅ 如果输入看起来不像业绩记录（太短，不含数字），可能是想退出
@@ -1478,7 +1547,10 @@ async def profile_performance_record_input(update: Update, context: ContextTypes
         context.user_data.pop("profile_input_state", None)
         context.user_data.pop("perf_action", None)
         from handlers.menu import get_main_menu
-        await update.message.reply_text("已返回主菜单", reply_markup=get_main_menu(user_id))
+        await update.message.reply_text(
+            "已取消业绩记录\n\n请选择功能：",
+            reply_markup=get_main_menu(user_id)
+        )
         return ConversationHandler.END
 
     # 🔥 关键修复：标记消息已处理，防止 AI 捕获
@@ -1751,20 +1823,23 @@ async def profile_performance_edit_input(update: Update, context: ContextTypes.D
         return ConversationHandler.END
     text = update.message.text.strip()
 
+    # ✅ 检查是否是键盘按钮
+    if _is_keyboard_button(text):
+        context.user_data.pop("profile_input_state", None)
+        context.user_data.pop("perf_action", None)
+        from handlers.menu import get_main_menu
+        await update.message.reply_text(
+            "请选择功能：",
+            reply_markup=get_main_menu(user_id)
+        )
+        return ConversationHandler.END
+
     if text == '/cancel':
         context.user_data.pop("profile_input_state", None)
         context.user_data.pop("perf_action", None)
         await update.message.reply_text("❌ 已取消修改")
         from handlers.menu import get_main_menu
         await update.message.reply_text("请选择功能：", reply_markup=get_main_menu(user_id))
-        return ConversationHandler.END
-
-    # ✅ 如果输入看起来不像业绩记录（太短，不含数字），可能是想退出
-    if len(text.split()) < 3 and not any(c.isdigit() for c in text):
-        context.user_data.pop("profile_input_state", None)
-        context.user_data.pop("perf_action", None)
-        from handlers.menu import get_main_menu
-        await update.message.reply_text("已返回主菜单", reply_markup=get_main_menu(user_id))
         return ConversationHandler.END
 
     context.user_data["_message_handled"] = True
@@ -2221,14 +2296,19 @@ async def profile_performance_trace(update: Update, context: ContextTypes.DEFAUL
         parse_mode="Markdown"
     )
 
-async def profile_performance_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """取消业绩操作"""
+async def profile_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """取消所有个人中心相关操作"""
     user_id = update.effective_user.id
-    context.user_data.pop("profile_input_state", None)
-    context.user_data.pop("perf_action", None)
-    context.user_data["_message_handled"] = True
 
-    await update.message.reply_text("❌ 已取消操作")
+    # 清除所有相关状态
+    context.user_data.pop("profile_input_state", None)
+    context.user_data.pop("rule_action", None)
+    context.user_data.pop("rule_name", None)
+    context.user_data.pop("perf_action", None)
+    context.user_data.pop("_message_handled", None)
+
+    await update.message.reply_text("❌ 已取消")
+
     from handlers.menu import get_main_menu
     await update.message.reply_text("请选择功能：", reply_markup=get_main_menu(user_id))
     return ConversationHandler.END
