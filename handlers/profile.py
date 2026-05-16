@@ -1473,6 +1473,14 @@ async def profile_performance_record_input(update: Update, context: ContextTypes
         await update.message.reply_text("请选择功能：", reply_markup=get_main_menu(user_id))
         return ConversationHandler.END
 
+    # ✅ 如果输入看起来不像业绩记录（太短，不含数字），可能是想退出
+    if len(text.split()) < 3 and not any(c.isdigit() for c in text):
+        context.user_data.pop("profile_input_state", None)
+        context.user_data.pop("perf_action", None)
+        from handlers.menu import get_main_menu
+        await update.message.reply_text("已返回主菜单", reply_markup=get_main_menu(user_id))
+        return ConversationHandler.END
+
     # 🔥 关键修复：标记消息已处理，防止 AI 捕获
     context.user_data["_message_handled"] = True
 
@@ -1751,6 +1759,14 @@ async def profile_performance_edit_input(update: Update, context: ContextTypes.D
         await update.message.reply_text("请选择功能：", reply_markup=get_main_menu(user_id))
         return ConversationHandler.END
 
+    # ✅ 如果输入看起来不像业绩记录（太短，不含数字），可能是想退出
+    if len(text.split()) < 3 and not any(c.isdigit() for c in text):
+        context.user_data.pop("profile_input_state", None)
+        context.user_data.pop("perf_action", None)
+        from handlers.menu import get_main_menu
+        await update.message.reply_text("已返回主菜单", reply_markup=get_main_menu(user_id))
+        return ConversationHandler.END
+
     context.user_data["_message_handled"] = True
 
     import shlex
@@ -1907,6 +1923,14 @@ async def profile_performance_delete_input(update: Update, context: ContextTypes
         await update.message.reply_text("❌ 已取消删除")
         from handlers.menu import get_main_menu
         await update.message.reply_text("请选择功能：", reply_markup=get_main_menu(user_id))
+        return ConversationHandler.END
+
+    # ✅ 如果输入看起来不像业绩记录（太短，不含数字），可能是想退出
+    if len(text.split()) < 3 and not any(c.isdigit() for c in text):
+        context.user_data.pop("profile_input_state", None)
+        context.user_data.pop("perf_action", None)
+        from handlers.menu import get_main_menu
+        await update.message.reply_text("已返回主菜单", reply_markup=get_main_menu(user_id))
         return ConversationHandler.END
 
     context.user_data["_message_handled"] = True
@@ -2196,3 +2220,15 @@ async def profile_performance_trace(update: Update, context: ContextTypes.DEFAUL
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown"
     )
+
+async def profile_performance_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """取消业绩操作"""
+    user_id = update.effective_user.id
+    context.user_data.pop("profile_input_state", None)
+    context.user_data.pop("perf_action", None)
+    context.user_data["_message_handled"] = True
+
+    await update.message.reply_text("❌ 已取消操作")
+    from handlers.menu import get_main_menu
+    await update.message.reply_text("请选择功能：", reply_markup=get_main_menu(user_id))
+    return ConversationHandler.END
