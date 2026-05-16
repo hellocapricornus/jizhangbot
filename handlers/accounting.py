@@ -4265,14 +4265,10 @@ async def handle_calculator(update: Update, context: ContextTypes.DEFAULT_TYPE):
         has_function = any(fn in expr for fn in math_functions)
 
         if not has_operator and not has_function:
-            return False
-
-        # 排除纯数字（如 "100"）
-        if expr.replace('.', '').replace('-', '').isdigit():
-            return False
-
+            if expr.replace('.', '').replace('-', '').isdigit():
+                return False
         return True
-
+        
     if not is_valid_expression(text):
         return  # 🔥 静默处理，不做任何提示
 
