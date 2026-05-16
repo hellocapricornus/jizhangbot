@@ -59,6 +59,7 @@ from handlers.profile import (
     profile_performance_export_select,
     profile_performance_export_do,
     profile_performance_trace,
+    profile_performance_cancel,
 )
 
 from datetime import datetime, timedelta, timezone
@@ -1783,6 +1784,9 @@ def main():
             ],
             PERFORMANCE_RECORD: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, profile_performance_record_input),
+                CommandHandler("cancel", profile_performance_cancel),
+                CallbackQueryHandler(profile_performance_menu, pattern="^profile_performance_menu$"),
+                CallbackQueryHandler(profile_back, pattern="^profile_return$"),
             ],
             PERFORMANCE_VIEW: [
                 CallbackQueryHandler(profile_performance_view_start, pattern="^profile_performance_view$"),
@@ -1795,9 +1799,15 @@ def main():
             ],
             PERFORMANCE_EDIT: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, profile_performance_edit_input),
+                CommandHandler("cancel", profile_performance_cancel),
+                CallbackQueryHandler(profile_performance_menu, pattern="^profile_performance_menu$"),
+                CallbackQueryHandler(profile_back, pattern="^profile_return$"),
             ],
             PERFORMANCE_DELETE: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, profile_performance_delete_input),
+                CommandHandler("cancel", profile_performance_cancel),
+                CallbackQueryHandler(profile_performance_menu, pattern="^profile_performance_menu$"),
+                CallbackQueryHandler(profile_back, pattern="^profile_return$"),
             ],
         },
         fallbacks=[CommandHandler("cancel", lambda u, c: ConversationHandler.END)],
