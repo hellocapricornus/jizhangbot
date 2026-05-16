@@ -59,7 +59,7 @@ from handlers.profile import (
     profile_performance_export_select,
     profile_performance_export_do,
     profile_performance_trace,
-    profile_performance_cancel,
+    profile_cancel,
 )
 
 from datetime import datetime, timedelta, timezone
@@ -138,6 +138,7 @@ ALL_KNOWN_BUTTONS = {
     "📒 记账", "🔔 USDT监控", "📢 群发", "💰 USDT查询",
     "➕ 添加机器人到群组",
     "👤 操作人管理", "🔄 互转查询", "📁 群组管理",
+    "📖 使用说明", "👤 个人中心",
     # 监控
     "➕ 添加监控地址", "📋 监控列表", "📊 月度统计", "❌ 删除监控地址",
     # 操作人
@@ -151,7 +152,6 @@ ALL_KNOWN_BUTTONS = {
     "🔍 转账查询", "🕸️ 转账分析",
     # 返回
     "◀️ 返回主菜单",
-    "📖 使用说明", "👤 个人中心",
 }
 
 
@@ -189,12 +189,17 @@ async def keyboard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ==================== 返回主菜单 ====================
     if text == "◀️ 返回主菜单":
-        # 清除所有状态
+        # ✅ 清除所有可能的输入状态
         keys_to_clear = [
             "active_module", "usdt_session", "monitor_action", "monitor_temp",
             "current_action", "transfer_results", "current_page", "query_type",
             "in_broadcast", "selecting_group", "group_list", "filter_type",
             "selected_group_id",
+            "perf_action",        # ✅ 添加业绩记录状态
+            "rule_action",        # ✅ 添加规则管理状态
+            "rule_name",          # ✅ 添加规则名称暂存
+            "profile_input_state",
+            "_message_handled",
         ]
         for key in keys_to_clear:
             context.user_data.pop(key, None)
@@ -202,6 +207,13 @@ async def keyboard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         from handlers.group_manager import user_states
         if user_id in user_states:
             del user_states[user_id]
+
+        # ✅ 清除 _ai_task 如果存在
+        ai_task = context.user_data.get("_ai_task")
+        if ai_task and not ai_task.done():
+            ai_task.cancel()
+        context.user_data.pop("_ai_task", None)
+        context.user_data.pop("_ai_thinking_msg_id", None)
 
         await update.message.reply_text(
             "请选择功能：",
@@ -548,11 +560,29 @@ async def module_input_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if chat.type != 'private':
         return
 
+    text = update.message.text.strip() if update.message.text else ""
+
+    # ✅ 如果是键盘按钮，清理所有状态并返回主菜单
+    from handlers.menu import get_main_menu
+    keyboard_buttons = ["◀️ 返回主菜单", "📒 记账", "🔔 USDT监控", "📢 群发", "💰 USDT查询",
+                        "👤 操作人管理", "🔄 互转查询", "📁 群组管理", "📖 使用说明", "👤 个人中心"]
+    if text in keyboard_buttons:
+        # 清理所有状态
+        context.user_data.pop("profile_input_state", None)
+        context.user_data.pop("perf_action", None)
+        context.user_data.pop("rule_action", None)
+        context.user_data.pop("rule_name", None)
+        context.user_data.pop("active_module", None)
+        context.user_data.pop("monitor_action", None)
+        context.user_data.pop("current_action", None)
+        context.user_data.pop("_message_handled", None)
+
+        # 让 keyboard_handler 处理具体按钮
+        return None
+
     # 检查个人中心输入标志，有则拦截并清除标志
     if context.user_data.pop("profile_input_state", False):
         return ConversationHandler.END
-
-    text = update.message.text.strip() if update.message.text else ""
 
     # 如果是已知键盘按钮，不处理
     if text in ALL_KNOWN_BUTTONS:
@@ -1784,7 +1814,7 @@ def main():
             ],
             PERFORMANCE_RECORD: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, profile_performance_record_input),
-                CommandHandler("cancel", profile_performance_cancel),
+                CommandHandler("cancel", profile_cancel),
                 CallbackQueryHandler(profile_performance_menu, pattern="^profile_performance_menu$"),
                 CallbackQueryHandler(profile_back, pattern="^profile_return$"),
             ],
@@ -1799,18 +1829,18 @@ def main():
             ],
             PERFORMANCE_EDIT: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, profile_performance_edit_input),
-                CommandHandler("cancel", profile_performance_cancel),
+                CommandHandler("cancel", profile_cancel),
                 CallbackQueryHandler(profile_performance_menu, pattern="^profile_performance_menu$"),
                 CallbackQueryHandler(profile_back, pattern="^profile_return$"),
             ],
             PERFORMANCE_DELETE: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, profile_performance_delete_input),
-                CommandHandler("cancel", profile_performance_cancel),
+                CommandHandler("cancel", profile_cancel),
                 CallbackQueryHandler(profile_performance_menu, pattern="^profile_performance_menu$"),
                 CallbackQueryHandler(profile_back, pattern="^profile_return$"),
             ],
         },
-        fallbacks=[CommandHandler("cancel", lambda u, c: ConversationHandler.END)],
+        fallbacks=[CommandHandler("cancel", profile_cancel)],
         per_message=False,
         allow_reentry=True,
     )
