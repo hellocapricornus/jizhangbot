@@ -52,7 +52,7 @@ async def group_manager_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if not is_authorized(user_id, require_full_access=True):
         await query.answer("❌ 无权限", show_alert=True)
-        await query.message.reply_text("❌ 管理人/操作员才能使用，如需使用请联系 @ChinaEdward")
+        await query.message.reply_text("❌ 管理人/操作员才能使用")
         return
 
     await query.answer()
@@ -624,39 +624,6 @@ async def handle_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await add_category_name(update, context)
     elif action == "add_category_desc":
         await add_category_desc(update, context)
-
-async def add_category_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """接收分类名称"""
-    user_id = update.effective_user.id
-    message = update.message
-    text = message.text.strip()
-
-    # 🔥 处理 /cancel（双重保险）
-    if text == "/cancel":
-        if user_id in user_states:
-            del user_states[user_id]
-        await message.reply_text("❌ 已取消创建分类")
-        from handlers.menu import get_main_menu
-        await message.reply_text("请选择功能：", reply_markup=get_main_menu(user_id))
-        return
-
-    # 验证分类名称
-    if len(text) < 2:
-        await message.reply_text("❌ 分类名称至少2个字符，请重新输入：\n\n输入 /cancel 取消")
-        return
-
-    categories = get_all_categories()
-    if any(cat['name'] == text for cat in categories):
-        await message.reply_text(f"❌ 分类「{text}」已存在，请使用其他名称：\n\n输入 /cancel 取消")
-        return
-
-    # 保存临时数据
-    user_states[user_id] = {"action": "add_category_desc", "name": text}
-    await message.reply_text(
-        f"📝 分类名称：{text}\n\n"
-        "请输入分类描述（可选，直接发送 /skip 跳过）：\n\n"
-        "❌ 输入 /cancel 取消"
-    )
 
 async def add_category_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """接收分类描述"""
