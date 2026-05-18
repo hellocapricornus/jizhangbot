@@ -426,7 +426,7 @@ async def show_transfer_menu_keyboard(update: Update, context: ContextTypes.DEFA
     user_id = update.effective_user.id
 
     if not is_authorized(user_id, require_full_access=True):
-        await update.message.reply_text("❌ 管理人/操作员才能使用，如需使用请联系 @ChinaEdward")
+        await update.message.reply_text("❌ 管理人/操作员才能使用")
         return
 
     context.user_data.pop("transfer_results", None)
