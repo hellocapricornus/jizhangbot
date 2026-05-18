@@ -3581,7 +3581,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
             try:
                 await context.bot.send_message(
                     chat_id=message.chat_id,
-                    text="❌ AI 对话功能仅限管理员和操作员使用\n\n如需使用，请联系 @ChinaEdward 申请权限",
+                    text="❌ AI 对话功能仅限管理员和操作员使用\n\n如需使用",
                     reply_to_message_id=message.message_id
                 )
             except Exception as e:
@@ -4214,8 +4214,12 @@ async def handle_calculator(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = update.message.text.strip()
 
+    # 🔥 添加调试
+    logger.info(f"[计算器] 收到消息: '{text}'")
+
     # 将中文符号替换为英文符号
     text = text.replace('（', '(').replace('）', ')')
+    logger.info(f"[计算器] 替换后: '{text}'")
 
     # 🔥 排除记账命令和其他功能命令
     exclude_prefixes = [
@@ -4230,16 +4234,20 @@ async def handle_calculator(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     for prefix in exclude_prefixes:
         if text.startswith(prefix):
+            logger.info(f"[计算器] 被前缀 '{prefix}' 拦截")
             return
+
+    logger.info(f"[计算器] 通过前缀检查")
 
     # 🔥 不以 + 或 - 开头（这些是记账命令）
     if text.startswith('+') or text.startswith('-'):
         return
+    logger.info(f"[计算器] 通过记账命令检查")
 
     # 🔥 只识别完整的计算表达式
     # 规则：必须以数字或 ( 开头，且必须包含运算符
     def is_valid_expression(expr: str) -> bool:
-        # 去除空格
+        logger.info(f"[计算器] is_valid_expression 检查: '{expr}'")
         expr = expr.replace(' ', '')
         if not expr:
             return False
@@ -4268,9 +4276,11 @@ async def handle_calculator(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if expr.replace('.', '').replace('-', '').isdigit():
                 return False
         return True
-        
+
     if not is_valid_expression(text):
+        logger.info(f"[计算器] is_valid_expression 返回 False")
         return  # 🔥 静默处理，不做任何提示
+    logger.info(f"[计算器] is_valid_expression 返回 True，开始计算")
 
     # 简单算式：如 100+200
     simple_pattern = r'^(-?\d+(?:\.\d+)?)\s*([+\-*/%])\s*(-?\d+(?:\.\d+)?)$'
