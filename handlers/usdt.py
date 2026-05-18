@@ -15,7 +15,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 完整权限检查（禁止临时操作人）
     if not is_authorized(query.from_user.id, require_full_access=True):
         await query.answer("❌ 无权限", show_alert=True)
-        await query.message.reply_text("❌ 管理人/操作员才能使用，如需使用请联系 @ChinaEdward")
+        await query.message.reply_text("❌ 管理人/操作员才能使用")
         return
 
     await query.answer()
