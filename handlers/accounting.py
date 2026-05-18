@@ -3136,7 +3136,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
     text = message.text.strip() if message.text else ""
 
-    # ========== 1. 优先处理 USDT 地址查询（不需要权限） ==========
+    # ========== 1. 优先处理 USDT 地址查询 ==========
     is_addr, address, chain_type = is_valid_address(text)
     if is_addr:
         user = message.from_user
@@ -3152,30 +3152,44 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
         if result.get('success'):
             balance = result['balance']
 
+            # 记录查询统计
             if accounting_manager:
                 accounting_manager.record_address_query(
                     group_id, address, chain_type, user.id,
                     user.username or user.first_name, balance
                 )
-                stats = accounting_manager.get_address_stats(address)
 
-            if stats:
-                first_time = datetime.fromtimestamp(stats['first_query']).strftime('%Y-%m-%d %H:%M') if stats.get('first_query') else '首次'
-                last_time = datetime.fromtimestamp(stats['last_query']).strftime('%Y-%m-%d %H:%M') if stats.get('last_query') else '刚刚'
-            else:
-                first_time = '首次'
-                last_time = '刚刚'
+            # 生成防伪图片
+            image_bytes = None
+            try:
+                from handlers.address_image import generate_address_image
+                image_bytes = generate_address_image(address=address, chain_type=chain_type)
+            except Exception as e:
+                logger.error(f"[地址查询] 图片生成失败: {e}")
 
-            reply = (
+            # 删除"查询中"的状态消息
+            await status_msg.delete()
+
+            # 构建文字标题
+            caption = (
                 f"💰 **USDT 地址查询结果**\n\n"
                 f"📌 地址：`{address}`\n"
                 f"⛓️ 网络：{chain_type}\n"
-                f"💵 余额：**{balance:.2f} USDT**\n"
+                f"💵 余额：**{balance:.2f} USDT**"
             )
-            await status_msg.edit_text(reply, parse_mode='Markdown')
+
+            # 发送图片 + 文字标题（同一条消息）
+            if image_bytes:
+                await message.reply_photo(
+                    photo=image_bytes,
+                    caption=caption,
+                    parse_mode='Markdown'
+                )
+            else:
+                # 图片生成失败，只发文字
+                await message.reply_text(caption, parse_mode='Markdown')
         else:
-            error_msg = result.get('error', '查询失败，请稍后重试')
-            await status_msg.edit_text(f"❌ 查询失败：{error_msg}")
+            await status_msg.edit_text(f"❌ 查询失败：{result.get('error', '未知错误')}")
         return
 
     # ========== 2. 追踪用户信息 ==========
