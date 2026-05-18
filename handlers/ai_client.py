@@ -89,7 +89,7 @@ class AIClient:
 
         # 权限检查
         if not is_authorized(user_id, require_full_access=True):
-            return "❌ AI 对话功能仅限管理员和操作员使用\n\n如需使用"
+            return "❌ AI 对话功能仅限管理员和操作员使用"
 
         prompt_lower = prompt.lower()
 
