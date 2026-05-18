@@ -32,7 +32,7 @@ from handlers.group_manager import (
 )
 from handlers.menu import get_main_menu
 from handlers.accounting import get_service_message_handler
-from handlers.ai_client import get_ai_client
+from handlers.ai_client import get_ai_client, cleanup_expired_conversations
 from handlers.help import handle_help
 from handlers.profile import (
     handle_profile, profile_stats, profile_addresses,
@@ -225,21 +225,21 @@ async def keyboard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "📒 记账":
         context.user_data.clear()
         if not is_authorized(user_id, require_full_access=False):
-            await update.message.reply_text("❌ 记账功能仅限管理员/操作员/临时操作员才能使用\n\n如需使用，请联系 @ChinaEdward 申请权限", reply_markup=get_main_menu(user_id))
+            await update.message.reply_text("❌ 记账功能仅限管理员/操作员/临时操作员才能使用\n\n如需使用", reply_markup=get_main_menu(user_id))
             return
         await accounting.handle_keyboard(update, context)
         return
 
     elif text == "🔔 USDT监控":
         if not is_authorized(user_id, require_full_access=True):
-            await update.message.reply_text("❌ 管理人/操作员才能使用，如需使用请联系 @ChinaEdward", reply_markup=get_main_menu(user_id))
+            await update.message.reply_text("❌ 管理人/操作员才能使用", reply_markup=get_main_menu(user_id))
             return
         await show_monitor_menu(update, context)
         return
 
     elif text == "📢 群发":
         if not is_authorized(user_id, require_full_access=True):
-            await update.message.reply_text("❌ 管理人/操作员才能使用，如需使用请联系 @ChinaEdward", reply_markup=get_main_menu(user_id))
+            await update.message.reply_text("❌ 管理人/操作员才能使用", reply_markup=get_main_menu(user_id))
             return
         # 发送启动广播的内联按钮，让用户点击后进入广播流程
         keyboard = [
@@ -255,28 +255,28 @@ async def keyboard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif text == "💰 USDT查询":
         if not is_authorized(user_id, require_full_access=True):
-            await update.message.reply_text("❌ 管理人/操作员才能使用，如需使用请联系 @ChinaEdward", reply_markup=get_main_menu(user_id))
+            await update.message.reply_text("❌ 管理人/操作员才能使用", reply_markup=get_main_menu(user_id))
             return
         await start_usdt_query(update, context)
         return
 
     elif text == "👤 操作人管理":
         if not is_authorized(user_id, require_full_access=True):
-            await update.message.reply_text("❌ 管理人/操作员才能使用，如需使用请联系 @ChinaEdward", reply_markup=get_main_menu(user_id))
+            await update.message.reply_text("❌ 管理人/操作员才能使用", reply_markup=get_main_menu(user_id))
             return
         await show_operator_menu(update, context)
         return
 
     elif text == "🔄 互转查询":
         if not is_authorized(user_id, require_full_access=True):
-            await update.message.reply_text("❌ 管理人/操作员才能使用，如需使用请联系 @ChinaEdward", reply_markup=get_main_menu(user_id))
+            await update.message.reply_text("❌ 管理人/操作员才能使用", reply_markup=get_main_menu(user_id))
             return
         await show_transfer_menu(update, context)
         return
 
     elif text == "📁 群组管理":
         if not is_authorized(user_id, require_full_access=True):
-            await update.message.reply_text("❌ 管理人/操作员才能使用，如需使用请联系 @ChinaEdward", reply_markup=get_main_menu(user_id))
+            await update.message.reply_text("❌ 管理人/操作员才能使用", reply_markup=get_main_menu(user_id))
             return
         await show_group_manager_menu(update, context)
         return
@@ -757,7 +757,7 @@ async def ai_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"进入 AI 对话: {text[:50]}")
 
     if not is_authorized(user_id, require_full_access=True):
-        await update.message.reply_text("❌ AI 对话功能仅限管理员和操作员使用\n\n如需使用，请联系 @ChinaEdward 申请权限")
+        await update.message.reply_text("❌ AI 对话功能仅限管理员和操作员使用\n\n如需使用")
         return
 
     thinking_msg = await update.message.reply_text("🤔 思考中...")
@@ -1881,6 +1881,7 @@ def main():
         await auto_classify_all_groups_on_startup(app)
         asyncio.create_task(daily_report_loop(app))
         asyncio.create_task(cleanup_expired_states())
+        asyncio.create_task(cleanup_expired_conversations())
         async def monitor_check_loop():
             await asyncio.sleep(10)
             class ContextWrapper:
