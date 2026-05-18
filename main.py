@@ -225,7 +225,7 @@ async def keyboard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "📒 记账":
         context.user_data.clear()
         if not is_authorized(user_id, require_full_access=False):
-            await update.message.reply_text("❌ 记账功能仅限管理员/操作员/临时操作员才能使用\n\n如需使用", reply_markup=get_main_menu(user_id))
+            await update.message.reply_text("❌ 记账功能仅限管理员/操作员/临时操作员才能使用", reply_markup=get_main_menu(user_id))
             return
         await accounting.handle_keyboard(update, context)
         return
