@@ -1013,8 +1013,8 @@ async def analyze_transfer_relation(addr_a: str, addr_b: str) -> str:
     """分析地址关系"""
     from handlers.transfer import get_trc20_transfers, extract_counterparties
 
-    history_a = get_trc20_transfers(addr_a, limit=200)
-    history_b = get_trc20_transfers(addr_b, limit=200)
+    history_a = await get_trc20_transfers(addr_a, limit=200)
+    history_b = await get_trc20_transfers(addr_b, limit=200)
 
     set_a = extract_counterparties(history_a, addr_a)
     set_b = extract_counterparties(history_b, addr_b)
@@ -1043,7 +1043,7 @@ async def get_transfer_volume(addr_a: str, addr_b: str) -> str:
     """两地址间交易总额"""
     from handlers.transfer import get_trc20_transfers_sync
 
-    history = get_trc20_transfers(addr_a, limit=200)
+    history = await get_trc20_transfers(addr_a, limit=200)
 
     total = 0.0
     count = 0
