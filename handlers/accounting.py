@@ -3581,7 +3581,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
             try:
                 await context.bot.send_message(
                     chat_id=message.chat_id,
-                    text="❌ AI 对话功能仅限管理员和操作员使用\n\n如需使用",
+                    text="❌ AI 对话功能仅限管理员和操作员使用",
                     reply_to_message_id=message.message_id
                 )
             except Exception as e:
