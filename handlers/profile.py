@@ -305,7 +305,7 @@ async def profile_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     await query.message.edit_text(
-        f"📞 管理员：@ChinaEdward\n"
+        f"📞 管理员：@ChineseNo1\n"
         f"或直接私聊 [点击联系](tg://user?id={OWNER_ID})",
         parse_mode="Markdown",
         disable_web_page_preview=True
