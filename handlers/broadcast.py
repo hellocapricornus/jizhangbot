@@ -73,7 +73,7 @@ async def start_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 完整权限检查（禁止临时操作人）
     if not is_authorized(user_id, require_full_access=True):
         await query.answer("❌ 无权限", show_alert=True)
-        await query.message.reply_text("❌ 管理人/操作员才能使用，如需使用请联系 @ChinaEdward")
+        await query.message.reply_text("❌ 管理人/操作员才能使用")
         return
 
     # 🔥 设置广播状态标记
@@ -1070,6 +1070,7 @@ async def bc_fallback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def bc_force_cleanup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """强制清理广播状态"""
     query = update.callback_query
+    user_id = query.from_user.id
     await query.answer()
 
     # 清理所有数据
@@ -1090,26 +1091,26 @@ async def bc_force_cleanup(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
     return ConversationHandler.END
 
-# 🔥 添加统一的取消命令处理器
-# broadcast.py - 修复 bc_cancel_command
-
 async def bc_cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """统一的取消命令处理器"""
-    print(f"[DEBUG] bc_cancel_command 被调用")
-    print(f"[DEBUG] 清理前 context.user_data: {context.user_data}")
+    # ✅ 优先从 callback_query 获取 user_id，否则从 effective_user
+    if update.callback_query:
+        user_id = update.callback_query.from_user.id
+    else:
+        user_id = update.effective_user.id
+
+    logger.debug(f"[BC] bc_cancel_command 被调用, user_id={user_id}")
+    logger.debug(f"[BC] 清理前 context.user_data keys: {list(context.user_data.keys())}")
 
     # 清理所有数据
     keys = ["bc_all_groups", "bc_selected_ids", "bc_message_content", "bc_temp_target_ids",
             "bc_selected_category", "bc_batches", "bc_current_batch", "bc_batch_results",
             "bc_waiting_for_next", "bc_current_state", "in_broadcast", "bc_current_page"]
     for k in keys:
-        if k in context.user_data:
-            context.user_data.pop(k, None)
+        context.user_data.pop(k, None)
 
-    print(f"[DEBUG] 清理后 context.user_data: {context.user_data}")
+    logger.debug(f"[BC] 清理后 context.user_data keys: {list(context.user_data.keys())}")
 
-    # 🔥 重要：清除 ConversationHandler 的状态
-    # 通过返回 ConversationHandler.END 来结束对话
     from handlers.menu import get_main_menu
 
     try:
@@ -1130,10 +1131,8 @@ async def bc_cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"取消操作失败: {e}")
 
-    print(f"[DEBUG] bc_cancel_command 返回 ConversationHandler.END")
+    logger.debug(f"[BC] bc_cancel_command 返回 ConversationHandler.END")
     return ConversationHandler.END
-
-# broadcast.py - 确保有这个函数
 
 async def bc_cancel_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """作为 ConversationHandler fallback 的取消处理"""
@@ -1245,7 +1244,7 @@ async def start_broadcast_keyboard(update: Update, context: ContextTypes.DEFAULT
     user_id = update.effective_user.id
 
     if not is_authorized(user_id, require_full_access=True):
-        await update.message.reply_text("❌ 管理人/操作员才能使用，如需使用请联系 @ChinaEdward")
+        await update.message.reply_text("❌ 管理人/操作员才能使用")
         return
 
     # 模拟点击群发按钮，触发原有的 inline 流程
