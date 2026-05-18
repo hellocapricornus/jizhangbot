@@ -7,6 +7,7 @@ import re
 import time
 from typing import List, Dict, Optional
 from datetime import datetime, timedelta
+import asyncio as _asyncio_for_cleanup
 
 from config import (
     DEEPSEEK_API_KEY,
@@ -58,7 +59,6 @@ HISTORY_TIMEOUT = 600   # 10 分钟无活动则清除历史
 CONVERSATION_CACHE = {}
 CACHE_TIMEOUT = 300
 
-
 class AIClient:
     """多 API 自动切换客户端 - 智能回答版（支持上下文记忆）"""
 
@@ -89,7 +89,7 @@ class AIClient:
 
         # 权限检查
         if not is_authorized(user_id, require_full_access=True):
-            return "❌ AI 对话功能仅限管理员和操作员使用\n\n如需使用，请联系 @ChinaEdward 申请权限"
+            return "❌ AI 对话功能仅限管理员和操作员使用\n\n如需使用"
 
         prompt_lower = prompt.lower()
 
@@ -1198,3 +1198,35 @@ def get_ai_client() -> AIClient:
     if ai_client is None:
         ai_client = AIClient()
     return ai_client
+
+async def cleanup_expired_conversations():
+    """定期清理过期的对话缓存，防止内存泄漏"""
+    while True:
+        await _asyncio_for_cleanup.sleep(300)  # 每 5 分钟清理一次
+        now = time.time()
+
+        # 清理对话历史
+        expired_users = []
+        for user_id, history in list(CONVERSATION_HISTORY.items()):
+            if history:
+                last_activity = history[-1].get('timestamp', 0)
+                if now - last_activity > HISTORY_TIMEOUT:
+                    expired_users.append(user_id)
+            else:
+                expired_users.append(user_id)
+
+        for user_id in expired_users:
+            CONVERSATION_HISTORY.pop(user_id, None)
+            logger.debug(f"已清理用户 {user_id} 的对话历史")
+
+        # 清理导出缓存
+        expired_cache = []
+        for user_id, cached in list(CONVERSATION_CACHE.items()):
+            if now - cached.get("timestamp", 0) > CACHE_TIMEOUT:
+                expired_cache.append(user_id)
+
+        for user_id in expired_cache:
+            CONVERSATION_CACHE.pop(user_id, None)
+            logger.debug(f"已清理用户 {user_id} 的导出缓存")
+
+__all__ = ['AIClient', 'get_ai_client', 'cleanup_expired_conversations']
