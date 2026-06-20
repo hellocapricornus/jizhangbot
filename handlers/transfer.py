@@ -19,27 +19,56 @@ TRANSFER_ANALYSIS_WAIT_ADDR = 2
 
 # --- 辅助函数 ---
 async def get_trc20_transfers(address: str, limit: int = 200) -> list:
-    """获取指定地址的 TRC20 转账记录"""
+    """获取指定地址的 TRC20 转账记录（支持获取所有交易）"""
     url = f"{TRON_GRID_API}/v1/accounts/{address}/transactions/trc20"
-    params = {
-        "limit": limit,
-        "contract_address": USDT_CONTRACT
-    }
+
+    # 如果 limit 小于等于 0，表示获取所有交易
+    fetch_all = limit <= 0
+    batch_limit = 200  # 每次请求获取的数量
+
+    all_transfers = []
+    offset = 0
+
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params,
-                                   timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return data.get("data", [])
-                logger.warning(f"TronGrid API 返回状态码: {resp.status}")
-                return []
+            while True:
+                # 根据是否获取所有来决定请求数量
+                params = {
+                    "limit": batch_limit if fetch_all else limit,
+                    "contract_address": USDT_CONTRACT,
+                    "offset": offset
+                }
+
+                async with session.get(url, params=params,
+                                       timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        transfers = data.get("data", [])
+
+                        if not transfers:
+                            break
+
+                        all_transfers.extend(transfers)
+
+                        # 如果不是获取所有，或者当前批次不足 batch_limit，说明已经获取完了
+                        if not fetch_all or len(transfers) < batch_limit:
+                            break
+
+                        offset += batch_limit
+
+                        # 安全限制：最多获取10000条交易
+                        if offset >= 10000:
+                            logger.warning(f"地址 {address} 交易过多，已限制获取10000条")
+                            break
+                    else:
+                        logger.warning(f"TronGrid API 返回状态码: {resp.status}")
+                        break
     except asyncio.TimeoutError:
         logger.error(f"请求超时: {address}")
-        return []
     except Exception as e:
         logger.error(f"API 错误: {e}")
-        return []
+
+    return all_transfers
 
 
 def get_trc20_transfers_sync(address: str, limit: int = 200) -> list:
@@ -117,9 +146,9 @@ async def process_transfer_query(update: Update, context: ContextTypes.DEFAULT_T
 
     await update.message.reply_text("⏳ 正在查询链上数据，请稍候...")
 
-    # 获取交易记录
-    history_a = await get_trc20_transfers(addr_a, limit=200)
-    history_b = await get_trc20_transfers(addr_b, limit=200)
+    # 获取所有交易记录（limit=0 表示获取所有）
+    history_a = await get_trc20_transfers(addr_a, limit=0)
+    history_b = await get_trc20_transfers(addr_b, limit=0)
 
     matches = []
     for tx in history_a:
@@ -203,9 +232,9 @@ async def process_transfer_analysis(update: Update, context: ContextTypes.DEFAUL
 
     await update.message.reply_text("⏳ 正在深度分析链上关系，这可能需要一点时间...")
 
-    # 获取交易记录
-    history_a = await get_trc20_transfers(addr_a, limit=200)
-    history_b = await get_trc20_transfers(addr_b, limit=200)
+    # 获取所有交易记录（limit=0 表示获取所有）
+    history_a = await get_trc20_transfers(addr_a, limit=0)
+    history_b = await get_trc20_transfers(addr_b, limit=0)
 
     set_a = extract_counterparties(history_a, addr_a)
     set_b = extract_counterparties(history_b, addr_b)
