@@ -255,10 +255,25 @@ def ensure_country_category(country_name: str) -> bool:
     return True
 
 def get_db_connection():
-    """获取数据库连接"""
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row  # 添加这行，使返回结果支持字典访问
-    conn.execute("PRAGMA journal_mode=WAL")
+    """获取数据库连接，带重试机制和超时设置"""
+    max_retries = 3
+    retry_delay = 0.1  # 100ms
+
+    for attempt in range(max_retries):
+        try:
+            conn = sqlite3.connect(DB_PATH, timeout=30.0)
+            conn.row_factory = sqlite3.Row  # 添加这行，使返回结果支持字典访问
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=30000")  # 30秒忙等待超时
+            return conn
+        except sqlite3.OperationalError as e:
+            if "database is locked" in str(e) and attempt < max_retries - 1:
+                logger.warning(f"数据库锁定，第{attempt + 1}次重试...")
+                time.sleep(retry_delay)
+                retry_delay *= 2  # 指数退避
+            else:
+                raise
+
     return conn
 
 def init_db():
@@ -348,7 +363,7 @@ def init_db():
             note TEXT DEFAULT ''
         )
     """)
-    
+
     # 迁移：删除旧的唯一约束（如果存在）
     try:
         c.execute("DROP INDEX IF EXISTS sqlite_autoindex_monitored_addresses_1")
@@ -499,6 +514,103 @@ def init_db():
     c.execute("CREATE INDEX IF NOT EXISTS idx_perf_channel_emp ON performance_records(channel_employee_id)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_perf_customer_emp ON performance_records(customer_employee_id)")
 
+    # ========== 亏损记录表 ==========
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS loss_records (
+            id TEXT PRIMARY KEY,
+            amount REAL NOT NULL,
+            country TEXT NOT NULL,
+            channel_bear REAL DEFAULT 0,
+            customer_bear REAL DEFAULT 0,
+            company_bear REAL DEFAULT 0,
+            channel_employee_id INTEGER NOT NULL,
+            channel_employee_name TEXT DEFAULT '',
+            customer_employee_id INTEGER NOT NULL,
+            customer_employee_name TEXT DEFAULT '',
+            reason TEXT DEFAULT '',
+            created_by INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            date TEXT NOT NULL
+        )
+    """)
+
+    # 迁移：添加缺失的字段
+    try:
+        c.execute("SELECT channel_bear FROM loss_records LIMIT 1")
+    except sqlite3.OperationalError:
+        c.execute("ALTER TABLE loss_records ADD COLUMN channel_bear REAL DEFAULT 0")
+        c.execute("ALTER TABLE loss_records ADD COLUMN customer_bear REAL DEFAULT 0")
+        c.execute("ALTER TABLE loss_records ADD COLUMN company_bear REAL DEFAULT 0")
+        logger.info("已为 loss_records 表添加分摊字段")
+
+    c.execute("CREATE INDEX IF NOT EXISTS idx_loss_date ON loss_records(date)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_loss_channel_emp ON loss_records(channel_employee_id)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_loss_customer_emp ON loss_records(customer_employee_id)")
+
+    # ========== 比例设置表 ==========
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS performance_settings (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            commission_rate REAL DEFAULT 0.1,
+            channel_commission_rate REAL DEFAULT 0.1,
+            customer_commission_rate REAL DEFAULT 0.1,
+            channel_loss_rate REAL DEFAULT 0.25,
+            customer_loss_rate REAL DEFAULT 0.25,
+            company_loss_rate REAL DEFAULT 0.50,
+            updated_by INTEGER,
+            updated_at INTEGER
+        )
+    """)
+
+    # 迁移：添加新的提成比例字段（必须在 INSERT 之前执行）
+    try:
+        c.execute("SELECT channel_commission_rate FROM performance_settings LIMIT 1")
+    except sqlite3.OperationalError:
+        c.execute("ALTER TABLE performance_settings ADD COLUMN channel_commission_rate REAL DEFAULT 0.1")
+        c.execute("ALTER TABLE performance_settings ADD COLUMN customer_commission_rate REAL DEFAULT 0.1")
+        logger.info("已为 performance_settings 表添加分别提成比例字段")
+
+    # 初始化默认设置
+    c.execute("INSERT OR IGNORE INTO performance_settings (id, commission_rate, channel_commission_rate, customer_commission_rate, channel_loss_rate, customer_loss_rate, company_loss_rate) VALUES (1, 0.1, 0.1, 0.1, 0.25, 0.25, 0.50)")
+
+    # ========== 操作日志表（记录追溯） ==========
+    # 先检查表是否存在
+    c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='performance_logs'")
+    table_exists = c.fetchone() is not None
+
+    if not table_exists:
+        c.execute("""
+            CREATE TABLE performance_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                record_type TEXT NOT NULL,
+                record_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                old_data TEXT,
+                new_data TEXT,
+                operated_by INTEGER NOT NULL,
+                operated_at INTEGER NOT NULL,
+                date TEXT
+            )
+        """)
+    else:
+        # 迁移：添加缺失的列
+        try:
+            c.execute("SELECT record_type FROM performance_logs LIMIT 1")
+        except sqlite3.OperationalError:
+            c.execute("ALTER TABLE performance_logs ADD COLUMN record_type TEXT NOT NULL DEFAULT 'performance'")
+            logger.info("已为 performance_logs 表添加 record_type 字段")
+
+        # 迁移：添加 date 字段
+        try:
+            c.execute("SELECT date FROM performance_logs LIMIT 1")
+        except sqlite3.OperationalError:
+            c.execute("ALTER TABLE performance_logs ADD COLUMN date TEXT")
+            logger.info("已为 performance_logs 表添加 date 字段")
+
+    c.execute("CREATE INDEX IF NOT EXISTS idx_perf_logs_type ON performance_logs(record_type)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_perf_logs_id ON performance_logs(record_id)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_perf_logs_time ON performance_logs(operated_at)")
+
     c.execute("""
         CREATE TABLE IF NOT EXISTS user_preferences (
             user_id INTEGER PRIMARY KEY,
@@ -527,8 +639,6 @@ def init_db():
     logger.info("正在创建数据库索引...")
 
     # 记账记录表的索引
-    c.execute("CREATE INDEX IF NOT EXISTS idx_records_group_id ON accounting_records(group_id)")
-    c.execute("CREATE INDEX IF NOT EXISTS idx_records_date ON accounting_records(date)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_records_group_date ON accounting_records(group_id, date)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_records_created ON accounting_records(created_at)")
 
@@ -1175,7 +1285,7 @@ def search_rule(rule_name: str) -> Optional[str]:
         return None
     finally:
         conn.close()
-        
+
 def get_rule_global_status() -> bool:
     """获取规则功能的全局状态（默认开启）"""
     conn = get_db_connection()
@@ -1233,8 +1343,8 @@ def add_performance_record(country: str, channel_income: float, customer_expense
                            channel_group: str, customer_group: str,
                            channel_employee_id: int, channel_employee_name: str,
                            customer_employee_id: int, customer_employee_name: str,
-                           created_by: int) -> bool:
-    """添加业绩记录"""
+                           created_by: int) -> int:
+    """添加业绩记录，返回记录ID"""
     conn = get_db_connection()
     c = conn.cursor()
     try:
@@ -1244,17 +1354,28 @@ def add_performance_record(country: str, channel_income: float, customer_expense
 
         # 生成编号：年月日 + 序号（2651401 = 2026年5月14日第01条）
         date_prefix = datetime.fromtimestamp(now, tz=timezone(timedelta(hours=8))).strftime('%y%m%d')
-        c.execute("SELECT COUNT(*) FROM performance_records WHERE date = ?", (date_str,))
-        count = c.fetchone()[0] + 1
-        record_id = int(f"{date_prefix}{count:02d}")
+        date_min = int(f"{date_prefix}01")
+        date_max = int(f"{date_prefix}99")
 
-        # 确保编号唯一
-        while True:
-            c.execute("SELECT id FROM performance_records WHERE id = ?", (record_id,))
-            if not c.fetchone():
-                break
-            count += 1
-            record_id = int(f"{date_prefix}{count:02d}")
+        # 查询当前表中当天的最大编号
+        c.execute("SELECT COALESCE(MAX(id), 0) FROM performance_records WHERE id >= ? AND id <= ?", (date_min, date_max))
+        current_max = c.fetchone()[0]
+
+        # 查询日志中当天删除记录的最大编号
+        c.execute("""
+            SELECT COALESCE(MAX(CAST(record_id AS INTEGER)), 0) 
+            FROM performance_logs 
+            WHERE record_type = 'performance' AND action = 'delete'
+            AND CAST(record_id AS INTEGER) >= ? AND CAST(record_id AS INTEGER) <= ?
+        """, (date_min, date_max))
+        deleted_max = c.fetchone()[0]
+
+        # 取两者的最大值 + 1
+        max_id = max(current_max, deleted_max)
+        if max_id >= date_min:
+            record_id = max_id + 1
+        else:
+            record_id = date_min
 
         c.execute("""
             INSERT INTO performance_records 
@@ -1265,11 +1386,22 @@ def add_performance_record(country: str, channel_income: float, customer_expense
         """, (record_id, country, channel_income, customer_expense, profit, channel_group, customer_group,
               channel_employee_id, channel_employee_name, customer_employee_id, customer_employee_name,
               created_by, now, date_str))
+
+        # 记录操作日志（复用同一个数据库连接）
+        log_performance_action('performance', str(record_id), 'create', None, {
+            'id': record_id, 'country': country, 'channel_income': channel_income,
+            'customer_expense': customer_expense, 'profit': profit,
+            'channel_group': channel_group, 'customer_group': customer_group,
+            'channel_employee_id': channel_employee_id, 'channel_employee_name': channel_employee_name,
+            'customer_employee_id': customer_employee_id, 'customer_employee_name': customer_employee_name,
+            'date': date_str
+        }, created_by, conn)
+
         conn.commit()
-        return True
+        return record_id
     except Exception as e:
         logger.error(f"添加业绩记录失败: {e}")
-        return False
+        return 0
     finally:
         conn.close()
 
@@ -1295,7 +1427,7 @@ def get_performance_records(year: int = None, month: int = None) -> list:
         return []
     finally:
         conn.close()
-        
+
 
 def get_performance_available_months() -> list:
     """获取有业绩记录的月份列表"""
@@ -1318,55 +1450,109 @@ def get_performance_available_months() -> list:
 def get_performance_summary(year: int, month: int) -> dict:
     """获取指定月份的业绩汇总"""
     records = get_performance_records(year, month)
+    loss_records = get_loss_records(year, month)
+    settings = get_performance_settings()
 
-    if not records:
-        return {"records": [], "total_profit": 0, "employee_commission": {}, "employee_performance": {}}
+    commission_rate = settings.get('commission_rate', 0.1)
+    channel_commission_rate = settings.get('channel_commission_rate', 0.1)
+    customer_commission_rate = settings.get('customer_commission_rate', 0.1)
 
-    total_profit = sum(r['profit'] for r in records)
+    # 业绩总利润
+    performance_profit = sum(r['profit'] for r in records) if records else 0
+    # 亏损总金额
+    total_loss = sum(l['amount'] for l in loss_records) if loss_records else 0
+    # 公司总利润 = 业绩总利润 - 亏损总金额
+    company_total_profit = performance_profit - total_loss
 
-    # 员工提成和业绩
-    employee_commission = {}
-    employee_performance = {}
+    # 员工业绩、亏损承担和提成
+    employee_data = {}
 
-    for r in records:
+    # 先计算每个员工的业绩（业绩 = 利润 × 50%）和累计利润
+    for r in (records or []):
         profit = r['profit']
+
         # 通道员工
         ch_id = r['channel_employee_id']
         ch_name = r['channel_employee_name'] or f"员工{ch_id}"
-        if ch_id not in employee_commission:
-            employee_commission[ch_id] = {"name": ch_name, "commission": 0}
-            employee_performance[ch_id] = {"name": ch_name, "performance": 0}
-        employee_commission[ch_id]["commission"] += profit * 0.1
-        employee_performance[ch_id]["performance"] += profit / 2
+        if ch_id not in employee_data:
+            employee_data[ch_id] = {"name": ch_name, "performance": 0, "profit": 0, "loss_bear": 0, "commission": 0, "is_channel": False, "is_customer": False}
+        employee_data[ch_id]["performance"] += profit * 0.5  # 业绩 = 利润 × 50%
+        employee_data[ch_id]["profit"] += profit  # 记录累计利润用于计算提成
+        employee_data[ch_id]["is_channel"] = True
 
         # 客户员工
         cu_id = r['customer_employee_id']
         cu_name = r['customer_employee_name'] or f"员工{cu_id}"
-        if cu_id not in employee_commission:
-            employee_commission[cu_id] = {"name": cu_name, "commission": 0}
-            employee_performance[cu_id] = {"name": cu_name, "performance": 0}
-        employee_commission[cu_id]["commission"] += profit * 0.1
-        employee_performance[cu_id]["performance"] += profit / 2
+        if cu_id not in employee_data:
+            employee_data[cu_id] = {"name": cu_name, "performance": 0, "profit": 0, "loss_bear": 0, "commission": 0, "is_channel": False, "is_customer": False}
+        employee_data[cu_id]["performance"] += profit * 0.5  # 业绩 = 利润 × 50%
+        employee_data[cu_id]["profit"] += profit  # 记录累计利润用于计算提成
+        employee_data[cu_id]["is_customer"] = True
+
+    # 再计算每个员工的亏损承担
+    for l in (loss_records or []):
+        # 通道员工承担
+        ch_id = l['channel_employee_id']
+        if ch_id in employee_data:
+            employee_data[ch_id]["loss_bear"] += l.get('channel_bear', 0)
+
+        # 客户员工承担
+        cu_id = l['customer_employee_id']
+        if cu_id in employee_data:
+            employee_data[cu_id]["loss_bear"] += l.get('customer_bear', 0)
+
+    # 计算提成：根据员工类型使用不同的提成比例（提成 = 利润 × 提成比例）
+    for emp_id in employee_data:
+        emp = employee_data[emp_id]
+        # 如果员工既是通道又是客户，使用平均提成比例
+        if emp["is_channel"] and emp["is_customer"]:
+            avg_rate = (channel_commission_rate + customer_commission_rate) / 2
+            gross_commission = emp["profit"] * avg_rate
+        elif emp["is_channel"]:
+            gross_commission = emp["profit"] * channel_commission_rate
+        elif emp["is_customer"]:
+            gross_commission = emp["profit"] * customer_commission_rate
+        else:
+            gross_commission = emp["profit"] * commission_rate
+
+        emp["commission"] = gross_commission - emp["loss_bear"]
+
+    # 为了兼容旧代码，保持原有结构
+    employee_commission = {k: {"name": v["name"], "commission": v["commission"]} for k, v in employee_data.items()}
+    employee_performance = {k: {"name": v["name"], "performance": v["performance"]} for k, v in employee_data.items()}
 
     return {
-        "records": records,
-        "total_profit": total_profit,
+        "records": records or [],
+        "loss_records": loss_records or [],
+        "total_profit": company_total_profit,  # 修改为公司总利润（已减亏损）
+        "total_loss": total_loss,
+        "performance_profit": performance_profit,  # 新增：业绩总利润
         "employee_commission": employee_commission,
-        "employee_performance": employee_performance
+        "employee_performance": employee_performance,
+        "employee_data": employee_data,  # 新增：包含完整员工数据
+        "settings": settings
     }
 
 def update_performance_record(record_id: int, country: str, channel_income: float, 
                               customer_expense: float, channel_group: str, customer_group: str,
                               channel_employee_id: int, channel_employee_name: str,
-                              customer_employee_id: int, customer_employee_name: str) -> bool:
+                              customer_employee_id: int, customer_employee_name: str,
+                              operated_by: int = None) -> bool:
     """修改业绩记录"""
     conn = get_db_connection()
     c = conn.cursor()
     try:
+        # 获取旧记录
+        c.execute("SELECT * FROM performance_records WHERE id=?", (record_id,))
+        old_row = c.fetchone()
+        if not old_row:
+            return False
+        old_data = dict(old_row)
+
         profit = channel_income + customer_expense
         c.execute("""
             UPDATE performance_records 
-            SET country=?, channel_income=?,          customer_expense=?, profit=?,
+            SET country=?, channel_income=?, customer_expense=?, profit=?,
                 channel_group=?, customer_group=?,
                 channel_employee_id=?, channel_employee_name=?,
                 customer_employee_id=?, customer_employee_name=?
@@ -1376,6 +1562,28 @@ def update_performance_record(record_id: int, country: str, channel_income: floa
               channel_employee_id, channel_employee_name,
               customer_employee_id, customer_employee_name,
               record_id))
+
+        # 记录操作日志（在同一个连接中）
+        if operated_by:
+            import json
+            import time
+            from datetime import datetime
+            now = int(time.time())
+            date_str = datetime.now().strftime('%Y-%m-%d')
+            c.execute("""
+                INSERT INTO performance_logs (record_type, record_id, action, old_data, new_data, operated_by, operated_at, date)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, ('performance', str(record_id), 'update',
+                  json.dumps(old_data, ensure_ascii=False),
+                  json.dumps({
+                      'id': record_id, 'country': country, 'channel_income': channel_income,
+                      'customer_expense': customer_expense, 'profit': profit,
+                      'channel_group': channel_group, 'customer_group': customer_group,
+                      'channel_employee_id': channel_employee_id, 'channel_employee_name': channel_employee_name,
+                      'customer_employee_id': customer_employee_id, 'customer_employee_name': customer_employee_name
+                  }, ensure_ascii=False),
+                  operated_by, now, date_str))
+
         conn.commit()
         return True
     except Exception as e:
@@ -1385,12 +1593,35 @@ def update_performance_record(record_id: int, country: str, channel_income: floa
         conn.close()
 
 
-def delete_performance_record(record_id: int) -> bool:
+def delete_performance_record(record_id: int, operated_by: int = None) -> bool:
     """删除业绩记录"""
     conn = get_db_connection()
     c = conn.cursor()
     try:
+        # 获取旧记录
+        c.execute("SELECT * FROM performance_records WHERE id=?", (record_id,))
+        old_row = c.fetchone()
+        if not old_row:
+            return False
+        old_data = dict(old_row)
+
         c.execute("DELETE FROM performance_records WHERE id=?", (record_id,))
+
+        # 记录操作日志（在同一个连接中）
+        if operated_by:
+            import json
+            import time
+            from datetime import datetime
+            now = int(time.time())
+            date_str = datetime.now().strftime('%Y-%m-%d')
+            c.execute("""
+                INSERT INTO performance_logs (record_type, record_id, action, old_data, new_data, operated_by, operated_at, date)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, ('performance', str(record_id), 'delete',
+                  json.dumps(old_data, ensure_ascii=False),
+                  None,
+                  operated_by, now, date_str))
+
         conn.commit()
         return True
     except Exception as e:
@@ -1439,6 +1670,417 @@ def refresh_performance_employee_names() -> int:
         return updated
     except Exception as e:
         logger.error(f"刷新员工名称失败: {e}")
+        return 0
+    finally:
+        conn.close()
+
+
+# ========== 亏损记录相关操作 ==========
+
+def add_loss_record(amount: float, country: str, channel_employee_id: int, channel_employee_name: str,
+                    customer_employee_id: int, customer_employee_name: str, reason: str,
+                    created_by: int, date: str = None) -> str:
+    """添加亏损记录，返回记录ID"""
+    import time
+    from datetime import datetime
+
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        # 获取比例设置（复用现有连接）
+        settings = get_performance_settings(conn)
+        channel_rate = settings['channel_loss_rate']
+        customer_rate = settings['customer_loss_rate']
+        company_rate = settings['company_loss_rate']
+
+        # 计算分摊金额
+        channel_bear = round(amount * channel_rate, 2)
+        customer_bear = round(amount * customer_rate, 2)
+        company_bear = round(amount * company_rate, 2)
+
+        # 设置日期
+        if not date:
+            date = datetime.now().strftime('%Y-%m-%d')
+
+        # 生成ID: 数字ID（确保永不重复）
+        # 查询当前表中的最大ID
+        c.execute("SELECT COALESCE(MAX(id), 0) FROM loss_records")
+        current_max = c.fetchone()[0]
+
+        # 查询日志中删除记录的最大ID
+        c.execute("""
+            SELECT COALESCE(MAX(CAST(record_id AS INTEGER)), 0) 
+            FROM performance_logs 
+            WHERE record_type = 'loss' AND action = 'delete'
+        """)
+        deleted_max = c.fetchone()[0]
+
+        # 取两者的最大值 + 1
+        max_id = max(current_max, deleted_max)
+        record_id = max_id + 1
+
+        now = int(time.time())
+        c.execute("""
+            INSERT INTO loss_records 
+            (id, amount, country, channel_bear, customer_bear, company_bear,
+             channel_employee_id, channel_employee_name, 
+             customer_employee_id, customer_employee_name,
+             reason, created_by, created_at, date)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (record_id, amount, country, channel_bear, customer_bear, company_bear,
+              channel_employee_id, channel_employee_name,
+              customer_employee_id, customer_employee_name,
+              reason, created_by, now, date))
+
+        # 在同一个连接中记录操作日志
+        import json
+        log_data = {
+            'id': record_id, 'amount': amount, 'country': country,
+            'channel_bear': channel_bear, 'customer_bear': customer_bear, 'company_bear': company_bear,
+            'channel_employee_id': channel_employee_id, 'channel_employee_name': channel_employee_name,
+            'customer_employee_id': customer_employee_id, 'customer_employee_name': customer_employee_name,
+            'reason': reason, 'date': date
+        }
+        c.execute("""
+            INSERT INTO performance_logs (record_type, record_id, action, old_data, new_data, operated_by, operated_at, date)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, ('loss', str(record_id), 'create', None, json.dumps(log_data, ensure_ascii=False), created_by, now, date))
+
+        conn.commit()
+        return record_id
+    except Exception as e:
+        logger.error(f"添加亏损记录失败: {e}")
+        return None
+    finally:
+        conn.close()
+
+
+def get_loss_records(year: int = None, month: int = None) -> list:
+    """获取亏损记录"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        if year and month:
+            pattern = f"{year}-{month:02d}-%"
+            c.execute("SELECT * FROM loss_records WHERE date LIKE ? ORDER BY date DESC", (pattern,))
+        else:
+            c.execute("SELECT * FROM loss_records ORDER BY date DESC")
+        rows = c.fetchall()
+        return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(f"获取亏损记录失败: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+def get_loss_record_by_id(record_id):
+    """根据ID获取单条亏损记录"""
+    # 处理 L 前缀
+    if isinstance(record_id, str) and record_id.upper().startswith('L'):
+        record_id = record_id[1:]
+
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("SELECT * FROM loss_records WHERE id=?", (record_id,))
+        row = c.fetchone()
+        return dict(row) if row else None
+    except Exception as e:
+        logger.error(f"获取亏损记录失败: {e}")
+        return None
+    finally:
+        conn.close()
+
+
+def update_loss_record(record_id, amount: float, country: str,
+                       channel_employee_id: int, channel_employee_name: str,
+                       customer_employee_id: int, customer_employee_name: str,
+                       reason: str, operated_by: int) -> bool:
+    """修改亏损记录"""
+    # 处理 L 前缀
+    if isinstance(record_id, str) and record_id.upper().startswith('L'):
+        record_id = record_id[1:]
+
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        # 获取旧记录
+        c.execute("SELECT * FROM loss_records WHERE id=?", (record_id,))
+        old_row = c.fetchone()
+        if not old_row:
+            return False
+        old_data = dict(old_row)
+
+        # 获取比例设置
+        settings = get_performance_settings()
+        channel_bear = round(amount * settings['channel_loss_rate'], 2)
+        customer_bear = round(amount * settings['customer_loss_rate'], 2)
+        company_bear = round(amount * settings['company_loss_rate'], 2)
+
+        c.execute("""
+            UPDATE loss_records 
+            SET amount=?, country=?, channel_bear=?, customer_bear=?, company_bear=?,
+                channel_employee_id=?, channel_employee_name=?,
+                customer_employee_id=?, customer_employee_name=?, reason=?
+            WHERE id=?
+        """, (amount, country, channel_bear, customer_bear, company_bear,
+              channel_employee_id, channel_employee_name,
+              customer_employee_id, customer_employee_name, reason, record_id))
+
+        # 在同一个连接中记录操作日志
+        import json
+        import time
+        from datetime import datetime
+        now = int(time.time())
+        date_str = old_data.get('date') or datetime.now().strftime('%Y-%m-%d')
+        c.execute("""
+            INSERT INTO performance_logs (record_type, record_id, action, old_data, new_data, operated_by, operated_at, date)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, ('loss', str(record_id), 'update',
+              json.dumps(old_data, ensure_ascii=False),
+              json.dumps({
+                  'id': record_id, 'amount': amount, 'country': country,
+                  'channel_bear': channel_bear, 'customer_bear': customer_bear, 'company_bear': company_bear,
+                  'channel_employee_id': channel_employee_id, 'channel_employee_name': channel_employee_name,
+                  'customer_employee_id': customer_employee_id, 'customer_employee_name': customer_employee_name,
+                  'reason': reason
+              }, ensure_ascii=False),
+              operated_by, now, date_str))
+
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"修改亏损记录失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def delete_loss_record(record_id, operated_by: int) -> bool:
+    """删除亏损记录"""
+    # 处理 L 前缀
+    if isinstance(record_id, str) and record_id.upper().startswith('L'):
+        record_id = record_id[1:]
+
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        # 获取旧记录
+        c.execute("SELECT * FROM loss_records WHERE id=?", (record_id,))
+        old_row = c.fetchone()
+        if not old_row:
+            return False
+        old_data = dict(old_row)
+
+        c.execute("DELETE FROM loss_records WHERE id=?", (record_id,))
+
+        # 在同一个连接中记录操作日志
+        import json
+        import time
+        from datetime import datetime
+        now = int(time.time())
+        date_str = old_data.get('date') or datetime.now().strftime('%Y-%m-%d')
+        c.execute("""
+            INSERT INTO performance_logs (record_type, record_id, action, old_data, new_data, operated_by, operated_at, date)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, ('loss', str(record_id), 'delete',
+              json.dumps(old_data, ensure_ascii=False),
+              None,
+              operated_by, now, date_str))
+
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"删除亏损记录失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+# ========== 比例设置相关操作 ==========
+
+def get_performance_settings(conn=None) -> dict:
+    """获取比例设置"""
+    own_conn = conn is None
+    if own_conn:
+        conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("SELECT * FROM performance_settings WHERE id=1")
+        row = c.fetchone()
+        if row:
+            return dict(row)
+        return {
+            'commission_rate': 0.1,
+            'channel_commission_rate': 0.1,
+            'customer_commission_rate': 0.1,
+            'channel_loss_rate': 0.25,
+            'customer_loss_rate': 0.25,
+            'company_loss_rate': 0.50
+        }
+    except Exception as e:
+        logger.error(f"获取比例设置失败: {e}")
+        return {
+            'commission_rate': 0.1,
+            'channel_commission_rate': 0.1,
+            'customer_commission_rate': 0.1,
+            'channel_loss_rate': 0.25,
+            'customer_loss_rate': 0.25,
+            'company_loss_rate': 0.50
+        }
+    finally:
+        if own_conn:
+            conn.close()
+
+
+def update_performance_settings(commission_rate: float, channel_commission_rate: float,
+                                customer_commission_rate: float, channel_loss_rate: float,
+                                customer_loss_rate: float, company_loss_rate: float,
+                                updated_by: int) -> bool:
+    """更新比例设置"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        import time
+        now = int(time.time())
+
+        # 获取旧设置
+        old_settings = get_performance_settings()
+
+        c.execute("""
+            UPDATE performance_settings 
+            SET commission_rate=?, channel_commission_rate=?, customer_commission_rate=?,
+                channel_loss_rate=?, customer_loss_rate=?, company_loss_rate=?,
+                updated_by=?, updated_at=?
+            WHERE id=1
+        """, (commission_rate, channel_commission_rate, customer_commission_rate,
+              channel_loss_rate, customer_loss_rate, company_loss_rate, updated_by, now))
+
+        # 在同一个连接中记录操作日志
+        import json
+        c.execute("""
+            INSERT INTO performance_logs (record_type, record_id, action, old_data, new_data, operated_by, operated_at, date)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, ('settings', '1', 'update',
+              json.dumps(old_settings, ensure_ascii=False) if old_settings else None,
+              json.dumps({
+                  'commission_rate': commission_rate,
+                  'channel_commission_rate': channel_commission_rate,
+                  'customer_commission_rate': customer_commission_rate,
+                  'channel_loss_rate': channel_loss_rate,
+                  'customer_loss_rate': customer_loss_rate,
+                  'company_loss_rate': company_loss_rate
+              }, ensure_ascii=False),
+              updated_by, now, datetime.now().strftime('%Y-%m-%d')))
+
+        # 如果亏损分摊比例改变了，重新计算所有亏损记录的分摊金额
+        old_channel_rate = old_settings.get('channel_loss_rate', 0.25)
+        old_customer_rate = old_settings.get('customer_loss_rate', 0.25)
+        old_company_rate = old_settings.get('company_loss_rate', 0.50)
+
+        if (channel_loss_rate != old_channel_rate or 
+            customer_loss_rate != old_customer_rate or 
+            company_loss_rate != old_company_rate):
+            # 重新计算所有亏损记录的分摊金额（使用批量更新）
+            c.execute("SELECT id, amount FROM loss_records")
+            loss_records = c.fetchall()
+            if loss_records:
+                # 批量更新
+                update_data = [
+                    (round(record['amount'] * channel_loss_rate, 2),
+                     round(record['amount'] * customer_loss_rate, 2),
+                     round(record['amount'] * company_loss_rate, 2),
+                     record['id'])
+                    for record in loss_records
+                ]
+                c.executemany("""
+                    UPDATE loss_records 
+                    SET channel_bear=?, customer_bear=?, company_bear=?
+                    WHERE id=?
+                """, update_data)
+
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"更新比例设置失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+# ========== 操作日志相关操作 ==========
+
+def log_performance_action(record_type: str, record_id: str, action: str,
+                           old_data: dict, new_data: dict, operated_by: int, conn=None):
+    """记录操作日志"""
+    import time
+    import json
+    from datetime import datetime
+
+    own_conn = conn is None
+    if own_conn:
+        conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        now = int(time.time())
+        date_str = datetime.fromtimestamp(now, tz=timezone(timedelta(hours=8))).strftime('%Y-%m-%d')
+        c.execute("""
+            INSERT INTO performance_logs (record_type, record_id, action, old_data, new_data, operated_by, operated_at, date)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (record_type, record_id, action,
+              json.dumps(old_data, ensure_ascii=False) if old_data else None,
+              json.dumps(new_data, ensure_ascii=False) if new_data else None,
+              operated_by, now, date_str))
+        if own_conn:
+            conn.commit()
+    except Exception as e:
+        logger.error(f"记录操作日志失败: {e}")
+    finally:
+        if own_conn:
+            conn.close()
+
+
+def get_performance_logs(record_type: str = None, limit: int = 100, offset: int = 0) -> list:
+    """获取操作日志"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        if record_type:
+            c.execute("""
+                SELECT * FROM performance_logs 
+                WHERE record_type = ? 
+                ORDER BY operated_at DESC 
+                LIMIT ? OFFSET ?
+            """, (record_type, limit, offset))
+        else:
+            c.execute("""
+                SELECT * FROM performance_logs 
+                ORDER BY operated_at DESC 
+                LIMIT ? OFFSET ?
+            """, (limit, offset))
+        rows = c.fetchall()
+        return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(f"获取操作日志失败: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+def get_performance_logs_count(record_type: str = None) -> int:
+    """获取操作日志总数"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        if record_type:
+            c.execute("SELECT COUNT(*) FROM performance_logs WHERE record_type = ?", (record_type,))
+        else:
+            c.execute("SELECT COUNT(*) FROM performance_logs")
+        result = c.fetchone()
+        return result[0] if result else 0
+    except Exception as e:
+        logger.error(f"获取操作日志总数失败: {e}")
         return 0
     finally:
         conn.close()
