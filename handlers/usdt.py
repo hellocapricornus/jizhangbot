@@ -69,10 +69,13 @@ async def handle_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # 查询 TronGrid API
 async def query_tron(address: str):
+    TRONGRID_API_KEY = "b7f1c9fa-a622-49ad-972e-9ce838faccbe"
+    headers = {"TRON-PRO-API-KEY": TRONGRID_API_KEY}
+
     async with aiohttp.ClientSession() as session:
         # 查询余额
         url_balance = f"https://api.trongrid.io/v1/accounts/{address}"
-        async with session.get(url_balance) as resp:
+        async with session.get(url_balance, headers=headers) as resp:
             data = await resp.json()
 
         trx = 0
@@ -87,7 +90,7 @@ async def query_tron(address: str):
 
         # 查询最近 50 条 USDT TRC20 交易
         url_tx = f"https://api.trongrid.io/v1/accounts/{address}/transactions/trc20?limit=50&contract_address={USDT_CONTRACT_ADDR}"
-        async with session.get(url_tx) as resp:
+        async with session.get(url_tx, headers=headers) as resp:
             tx_data = await resp.json()
 
         txs = []
