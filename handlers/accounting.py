@@ -958,7 +958,7 @@ class AccountingManager:
                 # 关联查询 group_users 表获取用户昵称
                 query = """
                     SELECT r.record_type, r.amount, r.amount_usdt, r.description, r.created_at, 
-                           r.username, r.category, r.user_id, u.first_name, r.rate, r.fee_rate, r.date, r.per_transaction_fee
+                           r.username, r.category, r.user_id, u.first_name, r.rate, r.fee_rate, r.date, r.per_transaction_fee, r.message_id
                     FROM accounting_records r
                     LEFT JOIN group_users u ON r.group_id = u.group_id AND r.user_id = u.user_id
                     WHERE r.group_id = ?
@@ -995,6 +995,7 @@ class AccountingManager:
                         'fee_rate': row[10] if len(row) > 10 else 0,
                         'date': row[11] if len(row) > 11 else '',
                         'per_transaction_fee': row[12] if len(row) > 12 else 0,
+                        'message_id': row[13] if len(row) > 13 else 0,
                     }
                     first_name = row[8] if len(row) > 8 else None
                     if first_name:
@@ -2061,9 +2062,9 @@ def _format_record_line(record: Dict) -> str:
         return f"`{time_str} +{amount:.2f}{rate_info} = {amount_usdt:.2f} USDT`{mention}"
 
 # --- 格式化账单函数 ---
-def format_bill_message(stats: Dict, records: List[Dict], title: str = "当前账单") -> str:
+def format_bill_message(stats: Dict, records: List[Dict], title: str = "当前账单", group_id: str = None) -> str:
     """格式化账单消息"""
-    message = f"📊 **{title}**\n\n"
+    message = ""
 
     # 分离入款和出款记录
     income_records = [r for r in records if r['type'] == 'income']
@@ -2088,7 +2089,7 @@ def format_bill_message(stats: Dict, records: List[Dict], title: str = "当前�
                 no_category_records.append(r)
 
         total_income_count = len(income_records)
-        message += f"📈 **入款 {total_income_count} 笔**\n"
+        message += f"<blockquote>📈 **入款 {total_income_count} 笔**</blockquote>\n"
 
         # 先显示无备注的记录（直接显示，不分组）
         if no_category_records:
@@ -2108,12 +2109,21 @@ def format_bill_message(stats: Dict, records: List[Dict], title: str = "当前�
                 user_id = r.get('user_id')
 
                 if user_id:
-                    mention = f" [{safe_operator}](tg://user?id={user_id})"
+                    mention = f' <a href="tg://user?id={user_id}">{safe_operator}</a>'
                 else:
                     mention = f" {safe_operator}"
 
+                # ✅ 日期可点击跳转 - 使用 t.me 链接格式
+                message_id = r.get('message_id', 0)
+                if group_id and message_id:
+                    # 转换 group_id: -1001234567890 -> 1234567890
+                    chat_id_num = abs(int(group_id)) - 1000000000000
+                    time_link = f'<a href="https://t.me/c/{chat_id_num}/{message_id}">{time_str}</a>'
+                else:
+                    time_link = time_str
+
                 amount_str = f"{amount:+.2f}"
-                message += f"  {time_str} {amount_str} {fee_info} = {amount_usdt:.2f} USDT{mention}\n"
+                message += f"  {time_link} {amount_str} {fee_info} = {amount_usdt:.2f} USDT{mention}\n"
 
             if len(no_category_records) > MAX_DISPLAY_RECORDS:
                 message += f"  `... 还有 {len(no_category_records) - MAX_DISPLAY_RECORDS} 条记录`\n"
@@ -2124,7 +2134,7 @@ def format_bill_message(stats: Dict, records: List[Dict], title: str = "当前�
 
             # 显示分组标题
             display_category = get_category_with_flag(category)
-            message += f"\n{display_category} ({len(group_records)} 笔)\n"
+            message += f"\n<blockquote>{display_category} ({len(group_records)} 笔)</blockquote>\n"
 
             # 显示该分组下的具体记录
             for r in group_sorted[:MAX_DISPLAY_RECORDS]:
@@ -2143,12 +2153,21 @@ def format_bill_message(stats: Dict, records: List[Dict], title: str = "当前�
                 user_id = r.get('user_id')
 
                 if user_id:
-                    mention = f" [{safe_operator}](tg://user?id={user_id})"
+                    mention = f' <a href="tg://user?id={user_id}">{safe_operator}</a>'
                 else:
                     mention = f" {safe_operator}"
 
+                # ✅ 日期可点击跳转 - 使用 t.me 链接格式
+                message_id = r.get('message_id', 0)
+                if group_id and message_id:
+                    # 转换 group_id: -1001234567890 -> 1234567890
+                    chat_id_num = abs(int(group_id)) - 1000000000000
+                    time_link = f'<a href="https://t.me/c/{chat_id_num}/{message_id}">{time_str}</a>'
+                else:
+                    time_link = time_str
+
                 amount_str = f"{amount:+.2f}"
-                message += f"  {time_str} {amount_str} {fee_info} = {amount_usdt:.2f} USDT{mention}\n"
+                message += f"  {time_link} {amount_str} {fee_info} = {amount_usdt:.2f} USDT{mention}\n"
 
             # 显示该组小计
             group_total_cny = sum(r['amount'] for r in group_records)
@@ -2168,7 +2187,7 @@ def format_bill_message(stats: Dict, records: List[Dict], title: str = "当前�
         display_expense = expense_records_sorted[:MAX_DISPLAY_RECORDS]
         total_expense_count = len(expense_records)
 
-        message += f"📉 **出款 {total_expense_count} 笔**\n"
+        message += f"<blockquote>📉 **出款 {total_expense_count} 笔**</blockquote>\n"
         if total_expense_count > MAX_DISPLAY_RECORDS:
             message += f" (显示最新{MAX_DISPLAY_RECORDS}条)\n"
 
@@ -2182,12 +2201,21 @@ def format_bill_message(stats: Dict, records: List[Dict], title: str = "当前�
             user_id = r.get('user_id')
 
             if user_id:
-                mention = f" [{safe_operator}](tg://user?id={user_id})"
+                mention = f' <a href="tg://user?id={user_id}">{safe_operator}</a>'
             else:
                 mention = f" {safe_operator}"
 
-            amount_str = f"{amount:+.2f}"
-            message += f"  {time_str} {amount_str} = {amount_usdt:.2f} USDT{mention}\n"
+            # ✅ 日期可点击跳转 - 使用 t.me 链接格式
+            message_id = r.get('message_id', 0)
+            if group_id and message_id:
+                # 转换 group_id: -1001234567890 -> 1234567890
+                chat_id_num = abs(int(group_id)) - 1000000000000
+                time_link = f'<a href="https://t.me/c/{chat_id_num}/{message_id}">{time_str}</a>'
+            else:
+                time_link = time_str
+
+            # ✅ 出款记录只显示 USDT 金额，不显示 CNY 金额
+            message += f"  {time_link} {amount_usdt:.2f} USDT{mention}\n"
 
         if total_expense_count > MAX_DISPLAY_RECORDS:
             message += f"  `... 还有 {total_expense_count - MAX_DISPLAY_RECORDS} 条记录`\n"
@@ -2208,7 +2236,7 @@ def format_bill_message(stats: Dict, records: List[Dict], title: str = "当前�
                 categories[category]['count'] += 1
 
         if categories:
-            message += f"📊 **入款分组统计**\n"
+            message += f"<blockquote>📊 **入款分组统计**</blockquote>\n"
             for category, data in categories.items():
                 display_category = get_category_with_flag(category)
                 message += f"{display_category}：{data['cny']:.2f} = {data['usdt']:.2f} USDT ({data['count']}笔)\n"
@@ -2271,16 +2299,16 @@ async def handle_end_bill(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📭 当前没有账单记录，无需结束")
         return
 
-    final_bill = format_bill_message(stats, records, "结束账单")
+    final_bill = format_bill_message(stats, records, "结束账单", group_id)
 
     result = accounting_manager.end_session(group_id)
 
     if result:
         await update.message.reply_text(
-            f"✅ **账单已结束并保存！**\n\n{final_bill}\n\n"
+            f"✅ <b>账单已结束并保存！</b>\n\n{final_bill}\n\n"
             f"💡 提示：费率已重置为0%，汇率已重置为1 = 1 USDT\n"
             f"可使用「设置手续费」和「设置汇率」重新配置",
-            parse_mode='Markdown'
+            parse_mode='HTML'
         )
     else:
         await update.message.reply_text("❌ 结束账单失败")
@@ -2420,7 +2448,7 @@ async def handle_add_income(update: Update, context: ContextTypes.DEFAULT_TYPE,
     if success:
         stats = accounting_manager.get_current_stats(group_id)
         records = accounting_manager.get_current_records(group_id)
-        message = format_bill_message(stats, records, "当前账单")
+        message = format_bill_message(stats, records, "当前账单", group_id)
 
         prefix = f"✅ 已记录修正入款：-{abs(amount):.2f}" if is_correction else f"✅ 已记录入款：{amount:.2f}"
         if category:
@@ -2446,7 +2474,7 @@ async def handle_add_income(update: Update, context: ContextTypes.DEFAULT_TYPE,
         result = await safe_reply_text(
             update.message,
             f"{prefix} \n\n{message}",
-            parse_mode='Markdown',
+            parse_mode='HTML',
             reply_markup=reply_markup
         )
         if result is None:
@@ -2487,7 +2515,7 @@ async def handle_add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE,
     if success:
         stats = accounting_manager.get_current_stats(group_id)
         records = accounting_manager.get_current_records(group_id)
-        message = format_bill_message(stats, records, "当前账单")
+        message = format_bill_message(stats, records, "当前账单", group_id)
 
         prefix = f"✅ 已记录修正出款：-{abs(amount):.2f} USDT" if is_correction else f"✅ 已记录出款：{amount:.2f} USDT"
 
@@ -2500,7 +2528,7 @@ async def handle_add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE,
         result = await safe_reply_text(
             update.message,
             f"{prefix}\n\n{message}",
-            parse_mode='Markdown',
+            parse_mode='HTML',
             reply_markup=reply_markup
         )
         if result is None:
@@ -2901,8 +2929,8 @@ async def handle_clear_current_confirm(update: Update, context: ContextTypes.DEF
 
         stats = accounting_manager.get_current_stats(group_id)
         records = accounting_manager.get_current_records(group_id)
-        message = format_bill_message(stats, records, "当前账单")
-        await query.message.reply_text(message, parse_mode='Markdown')
+        message = format_bill_message(stats, records, "当前账单", group_id)
+        await query.message.reply_text(message, parse_mode='HTML')
     else:
         await query.message.edit_text("❌ 清空失败，请稍后重试")
 
@@ -2961,8 +2989,8 @@ async def handle_clear_all_confirm(update: Update, context: ContextTypes.DEFAULT
 
         stats = accounting_manager.get_current_stats(group_id)
         records = accounting_manager.get_current_records(group_id)
-        message = format_bill_message(stats, records, "当前账单")
-        await query.message.reply_text(message, parse_mode='Markdown')
+        message = format_bill_message(stats, records, "当前账单", group_id)
+        await query.message.reply_text(message, parse_mode='HTML')
     else:
         await query.message.edit_text("❌ 清空失败，请稍后重试")
 
@@ -3022,8 +3050,8 @@ async def handle_remove_last_record(update: Update, context: ContextTypes.DEFAUL
     # 可选：显示更新后的账单
     stats = accounting_manager.get_current_stats(group_id)
     records = accounting_manager.get_current_records(group_id)
-    message = format_bill_message(stats, records, "当前账单")
-    await update.message.reply_text(message, parse_mode='Markdown')
+    message = format_bill_message(stats, records, "当前账单", group_id)
+    await update.message.reply_text(message, parse_mode='HTML')
 
 async def handle_revoke_record(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """撤销账单 - 回复记账消息后调用"""
@@ -3097,8 +3125,8 @@ async def handle_revoke_record(update: Update, context: ContextTypes.DEFAULT_TYP
         # 显示更新后的账单
         stats = accounting_manager.get_current_stats(group_id)
         records = accounting_manager.get_current_records(group_id)
-        bill_message = format_bill_message(stats, records, "当前账单")
-        await message.reply_text(bill_message, parse_mode='Markdown')
+        bill_message = format_bill_message(stats, records, "当前账单", group_id)
+        await message.reply_text(bill_message, parse_mode='HTML')
     else:
         await message.reply_text("❌ 撤销失败，请稍后重试")
 
