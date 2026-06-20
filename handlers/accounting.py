@@ -11,7 +11,6 @@ import re as _re
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Tuple, Optional
-
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import TimedOut, RetryAfter, NetworkError
 from telegram.ext import ContextTypes, ConversationHandler, CallbackQueryHandler
@@ -46,6 +45,7 @@ USDT_CONTRACTS = {
 
 # API 配置
 TRONGRID_API = "https://api.trongrid.io"
+USDT_CONTRACT_ADDR = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
 ETHERSCAN_API = "https://api.etherscan.io/api"
 ETHERSCAN_API_KEY = "MVYZTUF89KQ117USY6WH8CT2M6W7TK3PUD"  # 需要去 https://etherscan.io 注册获取
 
@@ -1938,26 +1938,55 @@ def init_accounting(db_path: str):
     accounting_manager.init_query_tables()  # 新增
 
 # ==================== USDT 地址查询函数 ====================
-
 async def query_trc20_balance(address: str) -> dict:
-    """查询 TRC20 USDT 余额"""
+    """
+    查询 TRC20 USDT 余额和 TRX 余额
+    """
+    # TronGrid API Key
+    TRONGRID_API_KEY = "b7f1c9fa-a622-49ad-972e-9ce838faccbe"
+    headers = {"TRON-PRO-API-KEY": TRONGRID_API_KEY}
+
     try:
         async with aiohttp.ClientSession() as session:
-            url = f"{TRONGRID_API}/v1/accounts/{address}"
-            async with session.get(url) as resp:
-                data = await resp.json()
+            # ========== 查询账户信息（TRX 和 USDT 余额） ==========
+            account_url = f"{TRONGRID_API}/v1/accounts/{address}"
+            async with session.get(account_url, headers=headers) as resp:
+                if resp.status != 200:
+                    logger.error(f"账户查询失败: {resp.status}")
+                    return {'balance': 0, 'success': False, 'error': f'API返回{resp.status}'}
+                account_data = await resp.json()
 
-            if data.get('data') and len(data['data']) > 0:
-                account = data['data'][0]
+            trx_balance = 0
+            usdt_balance = 0
+
+            if account_data.get('data') and len(account_data['data']) > 0:
+                account = account_data['data'][0]
+                if 'balance' in account:
+                    trx_balance = int(account['balance']) / 10**6
+
                 trc20_tokens = account.get('trc20', [])
                 for token in trc20_tokens:
-                    if USDT_CONTRACTS['TRC20'] in token:
-                        balance = int(token[USDT_CONTRACTS['TRC20']]) / 10**6
-                        return {'balance': balance, 'success': True, 'chain': 'TRC20'}
-            return {'balance': 0, 'success': True, 'chain': 'TRC20'}
+                    if USDT_CONTRACT_ADDR in token:
+                        usdt_balance = int(token[USDT_CONTRACT_ADDR]) / 10**6
+                        break
+
+            # 返回结果
+            result = {
+                'balance': usdt_balance,
+                'trx_balance': trx_balance,
+                'success': True,
+                'chain': 'TRC20'
+            }
+
+            logger.info(f"查询结果: USDT={usdt_balance}, TRX={trx_balance}")
+            return result
+
+    except aiohttp.ClientError as e:
+        logger.error(f"网络请求失败: {e}")
+        return {'balance': 0, 'success': False, 'error': f'网络错误: {str(e)}'}
     except Exception as e:
-        logger.error(f"TRC20 查询失败: {e}")
-        return {'balance': None, 'success': False, 'error': str(e)}
+        logger.error(f"TRC20 查询失败: {e}", exc_info=True)
+        return {'balance': 0, 'success': False, 'error': str(e)}
 
 async def query_erc20_balance(address: str) -> dict:
     """查询 ERC20 USDT 余额"""
@@ -1984,6 +2013,9 @@ async def query_erc20_balance(address: str) -> dict:
 
 def is_valid_address(text: str) -> tuple:
     """检测文本中的 USDT 地址，返回 (是否匹配, 地址, 链类型)"""
+    if not text:
+        return False, None, None
+
     trc20_pattern = r'T[0-9A-Za-z]{33}'
     erc20_pattern = r'0x[0-9a-fA-F]{40}'
 
@@ -2825,8 +2857,8 @@ async def handle_date_selection(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def handle_clear_bill(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """清空当前账单（弹出确认）"""
-    if not _is_authorized_in_group(update, full_access=False):
-        await update.message.reply_text("❌ 此操作需要管理员权限")
+    if not _is_authorized_in_group(update, full_access=True):
+        await update.message.reply_text("❌ 此操作需要管理员或正式操作员权限")
         return
 
     chat = update.effective_chat
@@ -2887,8 +2919,8 @@ async def handle_clear_current_cancel(update: Update, context: ContextTypes.DEFA
 
 async def handle_clear_all_bill(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """清空所有账单（包括历史记录）"""
-    if not _is_authorized_in_group(update, full_access=False):
-        await update.message.reply_text("❌ 此操作需要管理员权限")
+    if not _is_authorized_in_group(update, full_access=True):
+        await update.message.reply_text("❌ 此操作需要管理员或正式操作员权限")
         return
 
     chat = update.effective_chat
@@ -2946,8 +2978,8 @@ async def handle_clear_all_cancel(update: Update, context: ContextTypes.DEFAULT_
 
 async def handle_remove_last_record(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """移除上一笔记账记录"""
-    if not _is_authorized_in_group(update, full_access=False):
-        await update.message.reply_text("❌ 此操作需要管理员权限")
+    if not _is_authorized_in_group(update, full_access=True):
+        await update.message.reply_text("❌ 此操作需要管理员或正式操作员权限")
         return
 
     chat = update.effective_chat
@@ -3000,8 +3032,8 @@ async def handle_revoke_record(update: Update, context: ContextTypes.DEFAULT_TYP
     user = update.effective_user
 
     # 权限检查
-    if not is_authorized(user.id, require_full_access=False):
-        await message.reply_text("❌ 此操作需要管理员或操作员权限")
+    if not is_authorized(user.id, require_full_access=True):
+        await message.reply_text("❌ 此操作需要管理员或正式操作员权限")
         return
 
     if chat.type not in ['group', 'supergroup']:
@@ -3137,8 +3169,15 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
     text = message.text.strip() if message.text else ""
 
     # ========== 1. 优先处理 USDT 地址查询 ==========
-    is_addr, address, chain_type = is_valid_address(text)
-    if is_addr:
+    # 🔥 修复：先定义变量，确保在任何分支中都有值
+    is_addr = False
+    address = None
+    chain_type = None
+
+    if text:
+        is_addr, address, chain_type = is_valid_address(text)
+
+    if is_addr and address and chain_type:
         user = message.from_user
         group_id = str(chat.id)
 
@@ -3150,7 +3189,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
             result = await query_erc20_balance(address)
 
         if result.get('success'):
-            balance = result['balance']
+            balance = result.get('balance', 0)
 
             # 记录查询统计
             if accounting_manager:
@@ -3175,8 +3214,14 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 f"💰 **USDT 地址查询结果**\n\n"
                 f"📌 地址：`{address}`\n"
                 f"⛓️ 网络：{chain_type}\n"
-                f"💵 余额：**{balance:.2f} USDT**"
+                f"💵 USDT余额：**{balance:.2f} USDT**"
             )
+
+            # TRC20 地址额外显示 TRX 余额
+            if chain_type == 'TRC20':
+                trx_balance = result.get('trx_balance', 0)
+                caption += f"\n"
+                caption += f"⚡ TRX余额：**{trx_balance:.4f} TRX**"
 
             # 发送图片 + 文字标题（同一条消息）
             if image_bytes:
@@ -3189,7 +3234,8 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 # 图片生成失败，只发文字
                 await message.reply_text(caption, parse_mode='Markdown')
         else:
-            await status_msg.edit_text(f"❌ 查询失败：{result.get('error', '未知错误')}")
+            error_msg = result.get('error', '未知错误')
+            await status_msg.edit_text(f"❌ 查询失败：{error_msg}")
         return
 
     # ========== 2. 追踪用户信息 ==========
@@ -3557,9 +3603,9 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     # ========== 13. 出款 下发金额u ==========
-    elif text.startswith('下发') and 'u' in text and not text.startswith('下发-'):
+    elif text.startswith('下发') and 'u' in text.lower() and not text.startswith('下发-'):
         try:
-            amount_str = text.replace('下发', '').replace('u', '').strip()
+            amount_str = text.replace('下发', '').replace('u', '').replace('U', '').strip()
             if amount_str:
                 amount = float(amount_str)
                 await handle_add_expense(update, context, amount, is_correction=False)
@@ -3570,9 +3616,9 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     # ========== 14. 修正出款 下发-金额u ==========
-    elif text.startswith('下发-') and 'u' in text:
+    elif text.startswith('下发-') and 'u' in text.lower():
         try:
-            amount_str = text.replace('下发-', '').replace('u', '').strip()
+            amount_str = text.replace('下发-', '').replace('u', '').replace('U', '').strip()
             if amount_str:
                 amount = float(amount_str)
                 await handle_add_expense(update, context, amount, is_correction=True)
