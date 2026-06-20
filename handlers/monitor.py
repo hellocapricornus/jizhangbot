@@ -49,15 +49,15 @@ async def get_monthly_stats(address: str) -> dict:
     """获取地址本月的 USDT 收支统计"""
     import aiohttp
     from datetime import datetime
-    
+
     # 获取本月第一天的时间戳（北京时间）
     now = datetime.now()
     first_day = datetime(now.year, now.month, 1, 0, 0, 0)
     start_timestamp = int(first_day.timestamp())
-    
+
     total_received = 0.0
     total_sent = 0.0
-    
+
     try:
         url = f"{TRONGRID_API}/v1/accounts/{address}/transactions/trc20"
         headers = {"TRON-PRO-API-KEY": TRONGRID_API_KEY}  # 添加请求头
@@ -71,20 +71,20 @@ async def get_monthly_stats(address: str) -> dict:
                 if resp.status == 200:
                     data = await resp.json()
                     txs = data.get("data", [])
-                    
+
                     for tx in txs:
                         from_addr = tx.get("from", "")
                         to_addr = tx.get("to", "")
                         raw_amount = tx.get("value", 0)
                         amount = int(raw_amount) / 1_000_000 if raw_amount else 0
-                        
+
                         if to_addr == address:
                             total_received += amount
                         elif from_addr == address:
                             total_sent += amount
     except Exception as e:
         logger.error(f"查询月度统计失败: {e}")
-    
+
     return {
         "received": total_received,
         "sent": total_sent,
@@ -226,7 +226,7 @@ async def _check_single_address(addr_info, bot):
 
             message = (
                 f"🔔 **USDT 交易监控提醒**\n\n"
-                f"📌 监控地址：`{address[:8]}...{address[-6:]}`\n"
+                f"📌 监控地址：`{address}`\n"
             )
             if note:
                 message += f"📝 备注：{note}\n"
@@ -242,8 +242,8 @@ async def _check_single_address(addr_info, bot):
             message += (
                 f"💰 金额：**{amount:.2f} USDT**\n"
                 f"🔄 方向：{direction}\n"
-                f"📤 发送方：`{short_from}`\n"
-                f"📥 接收方：`{short_to}`\n"
+                f"📤 发送方：`{from_addr}`\n"
+                f"📥 接收方：`{to_addr}`\n"
                 f"⏰ 时间：{time_str}\n\n"
                 f"📅 **本月统计**\n"
                 f"• 累计收到：**{monthly_stats['received']:.2f} USDT**\n"
@@ -312,40 +312,40 @@ async def monitor_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """查看监控地址的月度统计"""
     query = update.callback_query
     user_id = query.from_user.id
-    
+
     if not is_authorized(user_id, require_full_access=True):
         await query.answer("❌ 无权限", show_alert=True)
         return
-    
+
     await query.answer()
-    
+
     addresses = get_monitored_addresses(user_id=user_id)
-    
+
     if not addresses:
         await query.message.edit_text("📭 您还没有添加任何监控地址")
         await asyncio.sleep(1)
         await monitor_menu(update, context)
         return
-    
+
     # 发送"查询中"提示
     await query.message.edit_text("📊 正在查询月度统计，请稍候...")
-    
+
     text = "📊 **监控地址月度统计**\n\n"
-    
+
     for addr_info in addresses:
         address = addr_info["address"]
         note = addr_info.get("note", "")
         short_addr = f"{address[:8]}...{address[-6:]}"
-        
+
         stats = await get_monthly_stats(address)
-        
+
         text += f"📌 {short_addr}"
         if note:
             text += f" ({note})"
         text += f"\n   💰 本月收到：**{stats['received']:.2f} USDT**"
         text += f"\n   📤 本月转出：**{stats['sent']:.2f} USDT**"
         text += f"\n   📈 净收入：**{stats['net']:.2f} USDT**\n\n"
-    
+
     keyboard = [[InlineKeyboardButton("◀️ 返回", callback_data="monitor_menu")]]
     await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
 
