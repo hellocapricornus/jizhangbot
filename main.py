@@ -35,9 +35,9 @@ from handlers.accounting import get_service_message_handler
 from handlers.ai_client import get_ai_client, cleanup_expired_conversations
 from handlers.help import handle_help
 from handlers.profile import (
-    handle_profile, profile_stats, profile_addresses,
+    handle_profile, profile_stats,
     profile_toggle_notify, profile_signature_start, profile_signature_input,
-    profile_contact, profile_feedback_start, profile_feedback_input,
+    profile_contact,
     profile_export_data, profile_back, profile_report_toggle, 
     # ========== 规则管理导入 ==========
     profile_rules_menu, profile_rule_add_start, profile_rule_add_name_input,
@@ -46,7 +46,7 @@ from handlers.profile import (
     profile_rule_update_content_input, profile_rule_delete_select,
     profile_rule_delete_handler, profile_rule_global_toggle,
     profile_back_to_menu, profile_rule_detail,
-    SET_SIGNATURE, FEEDBACK,
+    SET_SIGNATURE,
     RULE_MENU, RULE_ADD_NAME, RULE_ADD_CONTENT, RULE_UPDATE_SELECT,
     RULE_UPDATE_CONTENT, RULE_DELETE_SELECT, RULE_TOGGLE_SELECT, RULE_VIEW,
     profile_performance_menu, profile_performance_record_start,
@@ -59,6 +59,16 @@ from handlers.profile import (
     profile_performance_export_select,
     profile_performance_export_do,
     profile_performance_trace,
+    # 亏损记录
+    profile_loss_record_start, profile_loss_record_input,
+    LOSS_RECORD,
+    # 比例设置
+    profile_performance_settings, profile_set_commission_start, profile_set_channel_commission_start,
+    profile_set_customer_commission_start, profile_set_loss_start, profile_settings_save,
+    PERFORMANCE_SETTINGS,
+    # 修改/删除业绩和亏损
+    profile_edit_performance_start, profile_edit_loss_start,
+    profile_delete_performance_start, profile_delete_loss_start,
     profile_cancel,
 )
 
@@ -721,6 +731,8 @@ async def ai_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.get("usdt_session"),
         context.user_data.get("transfer_results"),
         context.user_data.get("selecting_group"),
+        context.user_data.get("profile_input_state"),  # 业绩/亏损记录输入状态
+        context.user_data.get("perf_action"),  # 业绩操作状态（记录/修改/删除）
     ]):
         return
 
@@ -1055,7 +1067,7 @@ async def send_transfer_page(update: Update, context: ContextTypes.DEFAULT_TYPE,
             disable_web_page_preview=True
         )
         # 去掉原来多余的返回按钮提示，改为在结果内联键盘中提供返回主菜单（可选）
-    
+
 # ==================== 群组列表内联显示 ====================
 
 async def show_group_list_inline(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1144,6 +1156,10 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     logger.debug(f"[BUTTON_ROUTER] 收到: {data}")
 
+    # ===== ✅ 让广播处理器处理广播相关的回调 =====
+    if data.startswith("bc_") or data == "broadcast":
+        return
+
     # ===== ✅ 新增：处理查看当前账单 =====
     if data == "view_current_bill":
         from handlers.accounting import handle_view_current_bill
@@ -1219,7 +1235,7 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         from handlers.group_manager import delete_category_start
         await delete_category_start(update, context)
         return
-        
+
     # ========== 群组分类选择 ==========
     if data.startswith("sel_group_"):
         await select_group_for_category(update, context)
@@ -1348,7 +1364,7 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         from handlers.accounting import handle_export_month_selection
         await handle_export_month_selection(update, context)
         return
-        
+
     if data.startswith("export_year_"):
         from handlers.accounting import handle_export_year_selection
         await handle_export_year_selection(update, context)
@@ -1744,11 +1760,9 @@ def main():
         entry_points=[
             # 子按钮回调
             CallbackQueryHandler(profile_stats, pattern="^profile_stats$"),
-            CallbackQueryHandler(profile_addresses, pattern="^profile_addresses$"),
             CallbackQueryHandler(profile_toggle_notify, pattern="^profile_toggle_notify$"),
             CallbackQueryHandler(profile_signature_start, pattern="^profile_signature$"),
             CallbackQueryHandler(profile_contact, pattern="^profile_contact$"),
-            CallbackQueryHandler(profile_feedback_start, pattern="^profile_feedback$"),
             CallbackQueryHandler(profile_export_data, pattern="^profile_export$"),
             CallbackQueryHandler(profile_report_toggle, pattern="^profile_report_toggle$"),
             CallbackQueryHandler(profile_back, pattern="^profile_back$"),
@@ -1767,9 +1781,6 @@ def main():
         states={
             SET_SIGNATURE: [
                 MessageHandler(filters.TEXT, profile_signature_input)
-            ],
-            FEEDBACK: [
-                MessageHandler(filters.TEXT, profile_feedback_input)
             ],
             # ========== 规则管理状态 ==========
             RULE_MENU: [
@@ -1810,7 +1821,11 @@ def main():
                 CallbackQueryHandler(profile_performance_delete_start, pattern="^profile_performance_delete$"),
                 CallbackQueryHandler(profile_performance_export_select, pattern="^profile_performance_export_select$"),
                 CallbackQueryHandler(profile_back, pattern="^profile_return$"),
-                CallbackQueryHandler(profile_performance_trace, pattern="^profile_performance_trace$"),
+                CallbackQueryHandler(profile_performance_trace, pattern="^profile_performance_trace"),
+                # 亏损记录
+                CallbackQueryHandler(profile_loss_record_start, pattern="^profile_loss_record$"),
+                # 比例设置
+                CallbackQueryHandler(profile_performance_settings, pattern="^profile_performance_settings$"),
             ],
             PERFORMANCE_RECORD: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, profile_performance_record_input),
@@ -1832,12 +1847,34 @@ def main():
                 CommandHandler("cancel", profile_cancel),
                 CallbackQueryHandler(profile_performance_menu, pattern="^profile_performance_menu$"),
                 CallbackQueryHandler(profile_back, pattern="^profile_return$"),
+                CallbackQueryHandler(profile_edit_performance_start, pattern="^profile_edit_performance$"),
+                CallbackQueryHandler(profile_edit_loss_start, pattern="^profile_edit_loss$"),
+                CallbackQueryHandler(profile_performance_edit_start, pattern="^profile_performance_edit$"),
             ],
             PERFORMANCE_DELETE: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, profile_performance_delete_input),
                 CommandHandler("cancel", profile_cancel),
                 CallbackQueryHandler(profile_performance_menu, pattern="^profile_performance_menu$"),
                 CallbackQueryHandler(profile_back, pattern="^profile_return$"),
+                CallbackQueryHandler(profile_delete_performance_start, pattern="^profile_delete_performance$"),
+                CallbackQueryHandler(profile_delete_loss_start, pattern="^profile_delete_loss$"),
+                CallbackQueryHandler(profile_performance_delete_start, pattern="^profile_performance_delete$"),
+            ],
+    # 亏损记录状态
+            LOSS_RECORD: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, profile_loss_record_input),
+                CommandHandler("cancel", profile_cancel),
+                CallbackQueryHandler(profile_performance_menu, pattern="^profile_performance_menu$"),
+            ],
+            # 比例设置状态
+            PERFORMANCE_SETTINGS: [
+                CallbackQueryHandler(profile_set_commission_start, pattern="^profile_set_commission$"),
+                CallbackQueryHandler(profile_set_channel_commission_start, pattern="^profile_set_channel_commission$"),
+                CallbackQueryHandler(profile_set_customer_commission_start, pattern="^profile_set_customer_commission$"),
+                CallbackQueryHandler(profile_set_loss_start, pattern="^profile_set_loss$"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, profile_settings_save),
+                CommandHandler("cancel", profile_cancel),
+                CallbackQueryHandler(profile_performance_menu, pattern="^profile_performance_menu$"),
             ],
         },
         fallbacks=[CommandHandler("cancel", profile_cancel)],
