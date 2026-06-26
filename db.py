@@ -570,6 +570,13 @@ def init_db():
         c.execute("ALTER TABLE performance_settings ADD COLUMN customer_commission_rate REAL DEFAULT 0.1")
         logger.info("已为 performance_settings 表添加分别提成比例字段")
 
+    # 迁移：添加激励奖励阶梯字段
+    try:
+        c.execute("SELECT incentive_tiers FROM performance_settings LIMIT 1")
+    except sqlite3.OperationalError:
+        c.execute("ALTER TABLE performance_settings ADD COLUMN incentive_tiers TEXT DEFAULT ''")
+        logger.info("已为 performance_settings 表添加激励奖励阶梯字段")
+
     # 初始化默认设置
     c.execute("INSERT OR IGNORE INTO performance_settings (id, commission_rate, channel_commission_rate, customer_commission_rate, channel_loss_rate, customer_loss_rate, company_loss_rate) VALUES (1, 0.1, 0.1, 0.1, 0.25, 0.25, 0.50)")
 
@@ -1371,6 +1378,8 @@ def add_performance_record(country: str, channel_income: float, customer_expense
         deleted_max = c.fetchone()[0]
 
         # 取两者的最大值 + 1
+        current_max = int(current_max) if current_max else 0
+        deleted_max = int(deleted_max) if deleted_max else 0
         max_id = max(current_max, deleted_max)
         if max_id >= date_min:
             record_id = max_id + 1
@@ -1516,6 +1525,37 @@ def get_performance_summary(year: int, month: int) -> dict:
             gross_commission = emp["profit"] * commission_rate
 
         emp["commission"] = gross_commission - emp["loss_bear"]
+
+    # 计算激励奖励
+    incentive_tiers_str = settings.get('incentive_tiers', '')
+    if incentive_tiers_str:
+        try:
+            import json
+            incentive_tiers = json.loads(incentive_tiers_str)
+            if isinstance(incentive_tiers, list) and incentive_tiers:
+                sorted_tiers = sorted(incentive_tiers, key=lambda x: x.get('threshold', 0), reverse=True)
+                for emp_id in employee_data:
+                    emp = employee_data[emp_id]
+                    performance = emp["performance"]
+                    incentive = 0
+                    for tier in sorted_tiers:
+                        threshold = tier.get('threshold', 0)
+                        rate = tier.get('rate', 0)
+                        if performance >= threshold:
+                            incentive = performance * rate
+                            break
+                    emp["incentive"] = round(incentive, 2)
+                    emp["commission"] += incentive
+            else:
+                for emp_id in employee_data:
+                    employee_data[emp_id]["incentive"] = 0
+        except Exception as e:
+            logger.error(f"解析激励奖励阶梯失败: {e}")
+            for emp_id in employee_data:
+                employee_data[emp_id]["incentive"] = 0
+    else:
+        for emp_id in employee_data:
+            employee_data[emp_id]["incentive"] = 0
 
     # 为了兼容旧代码，保持原有结构
     employee_commission = {k: {"name": v["name"], "commission": v["commission"]} for k, v in employee_data.items()}
@@ -1716,6 +1756,8 @@ def add_loss_record(amount: float, country: str, channel_employee_id: int, chann
         deleted_max = c.fetchone()[0]
 
         # 取两者的最大值 + 1
+        current_max = int(current_max) if current_max else 0
+        deleted_max = int(deleted_max) if deleted_max else 0
         max_id = max(current_max, deleted_max)
         record_id = max_id + 1
 
@@ -1917,7 +1959,8 @@ def get_performance_settings(conn=None) -> dict:
             'customer_commission_rate': 0.1,
             'channel_loss_rate': 0.25,
             'customer_loss_rate': 0.25,
-            'company_loss_rate': 0.50
+            'company_loss_rate': 0.50,
+            'incentive_tiers': ''
         }
     except Exception as e:
         logger.error(f"获取比例设置失败: {e}")
@@ -1927,7 +1970,8 @@ def get_performance_settings(conn=None) -> dict:
             'customer_commission_rate': 0.1,
             'channel_loss_rate': 0.25,
             'customer_loss_rate': 0.25,
-            'company_loss_rate': 0.50
+            'company_loss_rate': 0.50,
+            'incentive_tiers': ''
         }
     finally:
         if own_conn:
@@ -2004,6 +2048,48 @@ def update_performance_settings(commission_rate: float, channel_commission_rate:
         return True
     except Exception as e:
         logger.error(f"更新比例设置失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def update_incentive_tiers(incentive_tiers: str, updated_by: int) -> bool:
+    """更新激励奖励阶梯设置"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        import time
+        now = int(time.time())
+
+        old_settings = get_performance_settings()
+
+        c.execute("""
+            UPDATE performance_settings 
+            SET incentive_tiers=?, updated_by=?, updated_at=?
+            WHERE id=1
+        """, (incentive_tiers, updated_by, now))
+
+        import json
+        c.execute("""
+            INSERT INTO performance_logs (record_type, record_id, action, old_data, new_data, operated_by, operated_at, date)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, ('settings', '1', 'update',
+              json.dumps(old_settings, ensure_ascii=False) if old_settings else None,
+              json.dumps({
+                  'commission_rate': old_settings.get('commission_rate', 0.1),
+                  'channel_commission_rate': old_settings.get('channel_commission_rate', 0.1),
+                  'customer_commission_rate': old_settings.get('customer_commission_rate', 0.1),
+                  'channel_loss_rate': old_settings.get('channel_loss_rate', 0.25),
+                  'customer_loss_rate': old_settings.get('customer_loss_rate', 0.25),
+                  'company_loss_rate': old_settings.get('company_loss_rate', 0.50),
+                  'incentive_tiers': incentive_tiers
+              }, ensure_ascii=False),
+              updated_by, now, datetime.now().strftime('%Y-%m-%d')))
+
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"更新激励奖励设置失败: {e}")
         return False
     finally:
         conn.close()
