@@ -1432,8 +1432,13 @@ async def profile_performance_menu(update: Update, context: ContextTypes.DEFAULT
         for emp_id, data in employee_data.items():
             commission_info = f"• <a href=\"tg://user?id={emp_id}\">{data['name']}</a>：{data['commission']:.2f} USDT\n"
             commission_info += f"  ├─ 业绩：{data['performance']:.2f} USDT\n"
-            if data['loss_bear'] > 0:
-                commission_info += f"  └─ 承担亏损：{data['loss_bear']:.2f} USDT\n"
+            has_loss = data['loss_bear'] > 0
+            has_incentive = data.get('incentive', 0) > 0
+            if has_loss:
+                symbol = "└─" if not has_incentive else "├─"
+                commission_info += f"  {symbol} 承担亏损：{data['loss_bear']:.2f} USDT\n"
+            if has_incentive:
+                commission_info += f"  └─ 激励奖励：{data['incentive']:.2f} USDT\n"
             text += commission_info
     else:
         for emp_id, data in summary['employee_commission'].items():
@@ -1857,8 +1862,13 @@ async def profile_performance_view_show(update: Update, context: ContextTypes.DE
         for emp_id, data in employee_data.items():
             commission_info = f"• <a href=\"tg://user?id={emp_id}\">{data['name']}</a>：{data['commission']:.2f} USDT\n"
             commission_info += f"  ├─ 业绩：{data['performance']:.2f} USDT\n"
-            if data['loss_bear'] > 0:
-                commission_info += f"  └─ 承担亏损：{data['loss_bear']:.2f} USDT\n"
+            has_loss = data['loss_bear'] > 0
+            has_incentive = data.get('incentive', 0) > 0
+            if has_loss:
+                symbol = "└─" if not has_incentive else "├─"
+                commission_info += f"  {symbol} 承担亏损：{data['loss_bear']:.2f} USDT\n"
+            if has_incentive:
+                commission_info += f"  └─ 激励奖励：{data['incentive']:.2f} USDT\n"
             text += commission_info
     else:
         for emp_id, data in summary['employee_commission'].items():
@@ -2484,7 +2494,7 @@ async def profile_performance_export_do(update: Update, context: ContextTypes.DE
     await query.answer("正在生成HTML...")
 
     # 生成HTML
-    html = generate_performance_html(records, total_profit, employee_commission, employee_performance, year_str, month_str, loss_records, settings)
+    html = generate_performance_html(records, total_profit, employee_commission, employee_performance, year_str, month_str, loss_records, settings, summary.get('employee_data'))
 
     import tempfile, os
     with tempfile.NamedTemporaryFile(mode='w', suffix='.html', encoding='utf-8', delete=False) as f:
@@ -2502,7 +2512,7 @@ async def profile_performance_export_do(update: Update, context: ContextTypes.DE
         os.unlink(temp_path)
 
 
-def generate_performance_html(records, total_profit, employee_commission, employee_performance, title, subtitle="", loss_records=None, settings=None):
+def generate_performance_html(records, total_profit, employee_commission, employee_performance, title, subtitle="", loss_records=None, settings=None, employee_data=None):
     """生成业绩HTML"""
     total_loss = sum(l['amount'] for l in loss_records) if loss_records else 0
     commission_pct = int((settings or {}).get('commission_rate', 0.1) * 100)
@@ -2562,6 +2572,8 @@ def generate_performance_html(records, total_profit, employee_commission, employ
         .employee-name {{ font-size: 16px; font-weight: 600; }}
         .employee-commission {{ color: #10b981; font-size: 18px; font-weight: bold; }}
         .employee-perf {{ color: #94a3b8; font-size: 14px; margin-left: 10px; }}
+        .employee-loss {{ color: #ef4444; font-size: 14px; margin-left: 10px; }}
+        .employee-incentive {{ color: #8b5cf6; font-size: 14px; margin-left: 10px; }}
         .settings-section {{
             background: rgba(255,255,255,0.05); border-radius: 16px; padding: 24px;
             margin-bottom: 30px; backdrop-filter: blur(10px);
@@ -2639,11 +2651,19 @@ def generate_performance_html(records, total_profit, employee_commission, employ
 """
     for emp_id, data in employee_commission.items():
         perf = employee_performance.get(emp_id, {}).get('performance', 0)
+        emp_data = employee_data.get(emp_id, {}) if employee_data else {}
+        loss_bear = emp_data.get('loss_bear', 0)
+        incentive = emp_data.get('incentive', 0)
+        details = f"<span class=\"employee-perf\">业绩 {perf:.2f} USDT</span>"
+        if loss_bear > 0:
+            details += f"<span class=\"employee-loss\">亏损 {loss_bear:.2f} USDT</span>"
+        if incentive > 0:
+            details += f"<span class=\"employee-incentive\">激励 {incentive:.2f} USDT</span>"
         html += f"""        <div class="employee-card">
             <span class="employee-name">{data['name']}</span>
             <span>
                 <span class="employee-commission">{data['commission']:.2f} USDT</span>
-                <span class="employee-perf">业绩 {perf:.2f} USDT</span>
+                {details}
             </span>
         </div>
 """
@@ -3046,11 +3066,29 @@ async def profile_performance_settings(update: Update, context: ContextTypes.DEF
     customer_loss_pct = int(settings.get('customer_loss_rate', 0.25) * 100)
     company_loss_pct = int(settings.get('company_loss_rate', 0.50) * 100)
 
+    incentive_tiers_str = settings.get('incentive_tiers', '')
+    incentive_display = "未设置"
+    if incentive_tiers_str:
+        try:
+            import json
+            tiers = json.loads(incentive_tiers_str)
+            if isinstance(tiers, list) and tiers:
+                sorted_tiers = sorted(tiers, key=lambda x: x.get('threshold', 0))
+                tier_texts = []
+                for tier in sorted_tiers:
+                    threshold = tier.get('threshold', 0)
+                    rate = tier.get('rate', 0) * 100
+                    tier_texts.append(f"{threshold} USDT→{rate:.0f}%")
+                incentive_display = " | ".join(tier_texts)
+        except:
+            incentive_display = "设置有误"
+
     text = "⚙️ **比例设置**\n\n"
     text += f"当前设置：\n"
     text += f"• 通道员工提成比例：{channel_commission_pct}%\n"
     text += f"• 客户员工提成比例：{customer_commission_pct}%\n"
-    text += f"• 亏损分摊：通道{channel_loss_pct}% | 客户{customer_loss_pct}% | 公司{company_loss_pct}%\n\n"
+    text += f"• 亏损分摊：通道{channel_loss_pct}% | 客户{customer_loss_pct}% | 公司{company_loss_pct}%\n"
+    text += f"• 激励奖励：{incentive_display}\n\n"
     text += "💡 **提成计算公式**：\n"
     text += "• 业绩 = 利润 × 50%\n"
     text += "• 通道员工提成 = 利润 × 通道提成比例 - 亏损承担\n"
@@ -3060,7 +3098,8 @@ async def profile_performance_settings(update: Update, context: ContextTypes.DEF
     keyboard = [
         [InlineKeyboardButton(f"通道提成: {channel_commission_pct}%", callback_data="profile_set_channel_commission"),
          InlineKeyboardButton(f"客户提成: {customer_commission_pct}%", callback_data="profile_set_customer_commission")],
-        [InlineKeyboardButton("亏损分摊", callback_data="profile_set_loss")],
+        [InlineKeyboardButton("亏损分摊", callback_data="profile_set_loss"),
+         InlineKeyboardButton(f"激励奖励: {incentive_display[:15]}", callback_data="profile_set_incentive")],
         [InlineKeyboardButton("◀️ 返回业绩汇总", callback_data="profile_performance_menu")],
     ]
 
@@ -3160,6 +3199,35 @@ async def profile_set_loss_start(update: Update, context: ContextTypes.DEFAULT_T
 
     await query.message.edit_text(
         "⚙️ **设置亏损分摊比例**\n\n请输入三个比例（通道 客户 公司），用空格分隔：\n\n例如：`25 25 50`\n（三者之和应为100%）",
+        parse_mode="Markdown"
+    )
+    return PERFORMANCE_SETTINGS
+
+
+async def profile_set_incentive_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """设置激励奖励阶梯"""
+    query = update.callback_query
+    user_id = query.from_user.id
+
+    from config import OWNER_ID
+    if user_id != OWNER_ID:
+        await query.answer("❌ 无权限", show_alert=True)
+        return
+
+    await query.answer()
+
+    context.user_data['profile_input_state'] = 'set_incentive'
+
+    await query.message.edit_text(
+        "⚙️ **设置激励奖励阶梯**\n\n"
+        "请输入阶梯设置，每行一个阶梯：\n"
+        "`业绩门槛USDT 奖励比例%`\n\n"
+        "例如：\n"
+        "`5000 1`\n"
+        "`10000 2`\n\n"
+        "表示：业绩≥5000USDT奖励1%，业绩≥10000USDT奖励2%\n"
+        "💡 阶梯从高到低匹配，取最高达标阶梯\n"
+        "❌ 发送 /cancel 取消，发送 /clear 清空设置",
         parse_mode="Markdown"
     )
     return PERFORMANCE_SETTINGS
@@ -3289,6 +3357,54 @@ async def profile_settings_save(update: Update, context: ContextTypes.DEFAULT_TY
                 error_msg = "❌ 请输入有效的数字"
                 context.user_data['profile_input_state'] = 'set_loss'
 
+    elif state == 'set_incentive':
+        if text == '/clear':
+            from db import update_incentive_tiers
+            update_incentive_tiers('', user_id)
+            await update.message.reply_text("✅ 激励奖励设置已清空")
+            saved = True
+        else:
+            lines = text.strip().split('\n')
+            tiers = []
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split()
+                if len(parts) != 2:
+                    error_msg = "❌ 每行必须包含两个数字：业绩门槛和奖励比例"
+                    context.user_data['profile_input_state'] = 'set_incentive'
+                    break
+                try:
+                    threshold = float(parts[0])
+                    rate = float(parts[1]) / 100
+                    if threshold < 0:
+                        error_msg = "❌ 业绩门槛不能为负数"
+                        context.user_data['profile_input_state'] = 'set_incentive'
+                        break
+                    if rate < 0 or rate > 1:
+                        error_msg = "❌ 奖励比例必须在 0-100 之间"
+                        context.user_data['profile_input_state'] = 'set_incentive'
+                        break
+                    tiers.append({'threshold': threshold, 'rate': rate})
+                except ValueError:
+                    error_msg = "❌ 请输入有效的数字"
+                    context.user_data['profile_input_state'] = 'set_incentive'
+                    break
+            if not error_msg:
+                if not tiers:
+                    error_msg = "❌ 请至少输入一个阶梯设置"
+                    context.user_data['profile_input_state'] = 'set_incentive'
+                else:
+                    import json
+                    tiers_str = json.dumps(tiers)
+                    from db import update_incentive_tiers
+                    update_incentive_tiers(tiers_str, user_id)
+                    sorted_tiers = sorted(tiers, key=lambda x: x['threshold'])
+                    tier_texts = [f"{t['threshold']:.0f}USDT→{t['rate']*100:.0f}%" for t in sorted_tiers]
+                    await update.message.reply_text(f"✅ 激励奖励阶梯已更新：{' | '.join(tier_texts)}")
+                    saved = True
+
     if error_msg:
         await update.message.reply_text(error_msg)
         # 返回到比例设置页面
@@ -3300,12 +3416,31 @@ async def profile_settings_save(update: Update, context: ContextTypes.DEFAULT_TY
         customer_loss_pct = int(settings.get('customer_loss_rate', 0.25) * 100)
         company_loss_pct = int(settings.get('company_loss_rate', 0.50) * 100)
 
+        incentive_tiers_str = settings.get('incentive_tiers', '')
+        incentive_display = "未设置"
+        if incentive_tiers_str:
+            try:
+                import json
+                tiers = json.loads(incentive_tiers_str)
+                if isinstance(tiers, list) and tiers:
+                    sorted_tiers = sorted(tiers, key=lambda x: x.get('threshold', 0))
+                    tier_texts = []
+                    for tier in sorted_tiers:
+                        threshold = tier.get('threshold', 0)
+                        rate = tier.get('rate', 0) * 100
+                        tier_texts.append(f"{threshold} USDT→{rate:.0f}%")
+                    incentive_display = " | ".join(tier_texts)
+            except:
+                incentive_display = "设置有误"
+
         text = "⚙️ **比例设置**\n\n"
         text += f"当前设置：\n"
         text += f"• 通道员工提成比例：{channel_commission_pct}%\n"
         text += f"• 客户员工提成比例：{customer_commission_pct}%\n"
-        text += f"• 亏损分摊：通道{channel_loss_pct}% | 客户{customer_loss_pct}% | 公司{company_loss_pct}%\n\n"
+        text += f"• 亏损分摊：通道{channel_loss_pct}% | 客户{customer_loss_pct}% | 公司{company_loss_pct}%\n"
+        text += f"• 激励奖励：{incentive_display}\n\n"
         text += "💡 **提成计算公式**：\n"
+        text += "• 业绩 = 利润 × 50%\n"
         text += "• 通道员工提成 = 利润 × 通道提成比例 - 亏损承担\n"
         text += "• 客户员工提成 = 利润 × 客户提成比例 - 亏损承担\n\n"
         text += "请选择要修改的项目："
@@ -3313,7 +3448,8 @@ async def profile_settings_save(update: Update, context: ContextTypes.DEFAULT_TY
         keyboard = [
             [InlineKeyboardButton(f"通道提成: {channel_commission_pct}%", callback_data="profile_set_channel_commission"),
              InlineKeyboardButton(f"客户提成: {customer_commission_pct}%", callback_data="profile_set_customer_commission")],
-            [InlineKeyboardButton("亏损分摊", callback_data="profile_set_loss")],
+            [InlineKeyboardButton("亏损分摊", callback_data="profile_set_loss"),
+             InlineKeyboardButton(f"激励奖励: {incentive_display[:15]}", callback_data="profile_set_incentive")],
             [InlineKeyboardButton("◀️ 返回业绩汇总", callback_data="profile_performance_menu")],
         ]
 
@@ -3335,11 +3471,29 @@ async def profile_settings_save(update: Update, context: ContextTypes.DEFAULT_TY
     customer_loss_pct = int(settings.get('customer_loss_rate', 0.25) * 100)
     company_loss_pct = int(settings.get('company_loss_rate', 0.50) * 100)
 
+    incentive_tiers_str = settings.get('incentive_tiers', '')
+    incentive_display = "未设置"
+    if incentive_tiers_str:
+        try:
+            import json
+            tiers = json.loads(incentive_tiers_str)
+            if isinstance(tiers, list) and tiers:
+                sorted_tiers = sorted(tiers, key=lambda x: x.get('threshold', 0))
+                tier_texts = []
+                for tier in sorted_tiers:
+                    threshold = tier.get('threshold', 0)
+                    rate = tier.get('rate', 0) * 100
+                    tier_texts.append(f"{threshold} USDT→{rate:.0f}%")
+                incentive_display = " | ".join(tier_texts)
+        except:
+            incentive_display = "设置有误"
+
     text = "⚙️ **比例设置**\n\n"
     text += f"当前设置：\n"
     text += f"• 通道员工提成比例：{channel_commission_pct}%\n"
     text += f"• 客户员工提成比例：{customer_commission_pct}%\n"
-    text += f"• 亏损分摊：通道{channel_loss_pct}% | 客户{customer_loss_pct}% | 公司{company_loss_pct}%\n\n"
+    text += f"• 亏损分摊：通道{channel_loss_pct}% | 客户{customer_loss_pct}% | 公司{company_loss_pct}%\n"
+    text += f"• 激励奖励：{incentive_display}\n\n"
     text += "💡 **提成计算公式**：\n"
     text += "• 业绩 = 利润 × 50%\n"
     text += "• 通道员工提成 = 利润 × 通道提成比例 - 亏损承担\n"
@@ -3349,7 +3503,8 @@ async def profile_settings_save(update: Update, context: ContextTypes.DEFAULT_TY
     keyboard = [
         [InlineKeyboardButton(f"通道提成: {channel_commission_pct}%", callback_data="profile_set_channel_commission"),
          InlineKeyboardButton(f"客户提成: {customer_commission_pct}%", callback_data="profile_set_customer_commission")],
-        [InlineKeyboardButton("亏损分摊", callback_data="profile_set_loss")],
+        [InlineKeyboardButton("亏损分摊", callback_data="profile_set_loss"),
+         InlineKeyboardButton(f"激励奖励: {incentive_display[:15]}", callback_data="profile_set_incentive")],
         [InlineKeyboardButton("◀️ 返回业绩汇总", callback_data="profile_performance_menu")],
     ]
 
