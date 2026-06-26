@@ -64,7 +64,7 @@ from handlers.profile import (
     LOSS_RECORD,
     # 比例设置
     profile_performance_settings, profile_set_commission_start, profile_set_channel_commission_start,
-    profile_set_customer_commission_start, profile_set_loss_start, profile_settings_save,
+    profile_set_customer_commission_start, profile_set_loss_start, profile_set_incentive_start, profile_settings_save,
     PERFORMANCE_SETTINGS,
     # 修改/删除业绩和亏损
     profile_edit_performance_start, profile_edit_loss_start,
@@ -1872,7 +1872,9 @@ def main():
                 CallbackQueryHandler(profile_set_channel_commission_start, pattern="^profile_set_channel_commission$"),
                 CallbackQueryHandler(profile_set_customer_commission_start, pattern="^profile_set_customer_commission$"),
                 CallbackQueryHandler(profile_set_loss_start, pattern="^profile_set_loss$"),
+                CallbackQueryHandler(profile_set_incentive_start, pattern="^profile_set_incentive$"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, profile_settings_save),
+                CommandHandler("clear", profile_settings_save),
                 CommandHandler("cancel", profile_cancel),
                 CallbackQueryHandler(profile_performance_menu, pattern="^profile_performance_menu$"),
             ],
