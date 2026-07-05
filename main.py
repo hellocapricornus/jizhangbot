@@ -71,6 +71,7 @@ from handlers.profile import (
     profile_delete_performance_start, profile_delete_loss_start,
     profile_cancel,
 )
+from handlers.employee import register_employee_handlers, check_task_reminders, check_overdue_tasks
 
 from datetime import datetime, timedelta, timezone
 from logger import bot_logger as logger
@@ -698,6 +699,13 @@ async def ai_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.debug(f"规则名称存在，跳过AI: rule_name={context.user_data.get('rule_name')}")
         return
 
+    # 员工管理状态
+    if context.user_data.get("task_title") or context.user_data.get("task_description") or \
+       context.user_data.get("set_salary_employee_id") or context.user_data.get("complete_assignment_id") or \
+       context.user_data.get("modify_assignment_id"):
+        logger.debug(f"员工管理状态中，跳过AI")
+        return
+
     if context.user_data.get("_message_handled"):
         context.user_data.pop("_message_handled", None)
         return
@@ -1151,7 +1159,6 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理所有内联按钮回调"""
     query = update.callback_query
     user_id = query.from_user.id
-    await query.answer()
 
     data = query.data
     logger.debug(f"[BUTTON_ROUTER] 收到: {data}")
@@ -1160,13 +1167,20 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("bc_") or data == "broadcast":
         return
 
+    # ===== ✅ 让员工管理处理器处理员工管理相关的回调 =====
+    if data.startswith("employee_"):
+        return
+
+    # ===== ✅ 让个人中心处理器处理个人中心相关的回调 =====
+    if data.startswith("profile_"):
+        return
+
+    await query.answer()
+
     # ===== ✅ 新增：处理查看当前账单 =====
     if data == "view_current_bill":
         from handlers.accounting import handle_view_current_bill
         await handle_view_current_bill(update, context)
-        return
-
-    if data.startswith("profile_"):
         return
 
     # ========== 转账分页 ==========
@@ -1758,6 +1772,8 @@ def main():
     # ========== 个人中心 ConversationHandler ==========
     profile_conv = ConversationHandler(
         entry_points=[
+            # 个人中心入口（从员工管理等返回）
+            CallbackQueryHandler(handle_profile, pattern="^profile$"),
             # 子按钮回调
             CallbackQueryHandler(profile_stats, pattern="^profile_stats$"),
             CallbackQueryHandler(profile_toggle_notify, pattern="^profile_toggle_notify$"),
@@ -1885,6 +1901,8 @@ def main():
     )
     app.add_handler(profile_conv, group=1)
 
+    register_employee_handlers(app)
+
     # 三层私聊处理器
     app.add_handler(MessageHandler(
         filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND,
@@ -1921,6 +1939,7 @@ def main():
         asyncio.create_task(daily_report_loop(app))
         asyncio.create_task(cleanup_expired_states())
         asyncio.create_task(cleanup_expired_conversations())
+
         async def monitor_check_loop():
             await asyncio.sleep(10)
             class ContextWrapper:
@@ -1935,6 +1954,22 @@ def main():
                     logger.warning(f"监控检查失败: {e}")
                     await asyncio.sleep(30)
         asyncio.create_task(monitor_check_loop())
+
+        async def task_reminder_loop():
+            await asyncio.sleep(15)
+            class ContextWrapper:
+                def __init__(self, bot):
+                    self.bot = bot
+            ctx = ContextWrapper(app.bot)
+            while True:
+                try:
+                    await check_task_reminders(ctx)
+                    await check_overdue_tasks(ctx)
+                    await asyncio.sleep(60)
+                except Exception as e:
+                    logger.warning(f"任务检查失败: {e}")
+                    await asyncio.sleep(60)
+        asyncio.create_task(task_reminder_loop())
 
     app.post_init = post_init
 
