@@ -477,6 +477,71 @@ def init_db():
         )
     """)
 
+    # ========== 员工管理：任务表 ==========
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            period_type TEXT DEFAULT 'today',
+            deadline INTEGER NOT NULL,
+            remind_time INTEGER DEFAULT 0,
+            remind_enabled INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'pending',
+            created_by INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            completed_at INTEGER DEFAULT 0,
+            date TEXT NOT NULL
+        )
+    """)
+
+    # ========== 员工管理：任务分配表 ==========
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS task_assignments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id INTEGER NOT NULL,
+            employee_id INTEGER NOT NULL,
+            employee_name TEXT DEFAULT '',
+            status TEXT DEFAULT 'pending',
+            completed_at INTEGER DEFAULT 0,
+            completion_detail TEXT DEFAULT '',
+            completion_percent REAL DEFAULT 100.0,
+            notified INTEGER DEFAULT 0,
+            FOREIGN KEY (task_id) REFERENCES tasks(id)
+        )
+    """)
+
+    try:
+        c.execute("ALTER TABLE task_assignments ADD COLUMN completion_percent REAL DEFAULT 100.0")
+    except:
+        pass
+
+    # ========== 员工管理：底薪设置表 ==========
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS employee_salary (
+            employee_id INTEGER PRIMARY KEY,
+            monthly_base REAL DEFAULT 0.0,
+            currency TEXT DEFAULT 'USDT',
+            updated_by INTEGER,
+            updated_at INTEGER DEFAULT 0
+        )
+    """)
+
+    # ========== 员工管理：激励奖开关表 ==========
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS employee_incentive_settings (
+            employee_id INTEGER PRIMARY KEY,
+            incentive_enabled INTEGER DEFAULT 1,
+            updated_by INTEGER,
+            updated_at INTEGER DEFAULT 0
+        )
+    """)
+
+    c.execute("CREATE INDEX IF NOT EXISTS idx_tasks_date ON tasks(date)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_task_assignments_task ON task_assignments(task_id)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_task_assignments_employee ON task_assignments(employee_id)")
+
     # ========== 规则管理表 ==========
     c.execute("""
         CREATE TABLE IF NOT EXISTS rules (
@@ -1484,7 +1549,7 @@ def get_performance_summary(year: int, month: int) -> dict:
         ch_id = r['channel_employee_id']
         ch_name = r['channel_employee_name'] or f"员工{ch_id}"
         if ch_id not in employee_data:
-            employee_data[ch_id] = {"name": ch_name, "performance": 0, "profit": 0, "loss_bear": 0, "commission": 0, "is_channel": False, "is_customer": False}
+            employee_data[ch_id] = {"name": ch_name, "performance": 0, "profit": 0, "loss_bear": 0, "commission": 0, "is_channel": False, "is_customer": False, "base_salary": 0, "incentive": 0}
         employee_data[ch_id]["performance"] += profit * 0.5  # 业绩 = 利润 × 50%
         employee_data[ch_id]["profit"] += profit  # 记录累计利润用于计算提成
         employee_data[ch_id]["is_channel"] = True
@@ -1493,7 +1558,7 @@ def get_performance_summary(year: int, month: int) -> dict:
         cu_id = r['customer_employee_id']
         cu_name = r['customer_employee_name'] or f"员工{cu_id}"
         if cu_id not in employee_data:
-            employee_data[cu_id] = {"name": cu_name, "performance": 0, "profit": 0, "loss_bear": 0, "commission": 0, "is_channel": False, "is_customer": False}
+            employee_data[cu_id] = {"name": cu_name, "performance": 0, "profit": 0, "loss_bear": 0, "commission": 0, "is_channel": False, "is_customer": False, "base_salary": 0, "incentive": 0}
         employee_data[cu_id]["performance"] += profit * 0.5  # 业绩 = 利润 × 50%
         employee_data[cu_id]["profit"] += profit  # 记录累计利润用于计算提成
         employee_data[cu_id]["is_customer"] = True
@@ -1526,7 +1591,7 @@ def get_performance_summary(year: int, month: int) -> dict:
 
         emp["commission"] = gross_commission - emp["loss_bear"]
 
-    # 计算激励奖励
+    # 计算激励奖励（根据员工激励奖开关）
     incentive_tiers_str = settings.get('incentive_tiers', '')
     if incentive_tiers_str:
         try:
@@ -1536,16 +1601,31 @@ def get_performance_summary(year: int, month: int) -> dict:
                 sorted_tiers = sorted(incentive_tiers, key=lambda x: x.get('threshold', 0), reverse=True)
                 for emp_id in employee_data:
                     emp = employee_data[emp_id]
-                    performance = emp["performance"]
-                    incentive = 0
-                    for tier in sorted_tiers:
-                        threshold = tier.get('threshold', 0)
-                        rate = tier.get('rate', 0)
-                        if performance >= threshold:
-                            incentive = performance * rate
-                            break
-                    emp["incentive"] = round(incentive, 2)
-                    emp["commission"] += incentive
+
+                    # 获取员工激励奖开关设置
+                    incentive_enabled = get_employee_incentive_setting(emp_id)
+
+                    if incentive_enabled:
+                        performance = emp["performance"]
+                        incentive = 0
+                        achieved_threshold = 0
+                        achieved_rate = 0
+                        for tier in sorted_tiers:
+                            threshold = tier.get('threshold', 0)
+                            rate = tier.get('rate', 0)
+                            if performance >= threshold:
+                                incentive = performance * rate
+                                achieved_threshold = threshold
+                                achieved_rate = rate
+                                break
+                        emp["incentive"] = round(incentive, 2)
+                        emp["incentive_threshold"] = achieved_threshold
+                        emp["incentive_rate"] = achieved_rate
+                        emp["commission"] += incentive
+                    else:
+                        emp["incentive"] = 0
+                        emp["incentive_threshold"] = 0
+                        emp["incentive_rate"] = 0
             else:
                 for emp_id in employee_data:
                     employee_data[emp_id]["incentive"] = 0
@@ -1557,6 +1637,21 @@ def get_performance_summary(year: int, month: int) -> dict:
         for emp_id in employee_data:
             employee_data[emp_id]["incentive"] = 0
 
+    # 获取员工底薪并根据任务完成率计算实际底薪
+    for emp_id in employee_data:
+        base_salary = get_employee_base_salary(emp_id)
+        completion_rate = get_employee_monthly_completion_rate(emp_id, year, month)
+
+        if completion_rate > 0:
+            actual_base_salary = base_salary * completion_rate / 100
+        else:
+            actual_base_salary = base_salary
+
+        employee_data[emp_id]["base_salary"] = base_salary
+        employee_data[emp_id]["actual_base_salary"] = round(actual_base_salary, 2)
+        employee_data[emp_id]["completion_rate"] = round(completion_rate, 1)
+        employee_data[emp_id]["commission"] += actual_base_salary
+
     # 为了兼容旧代码，保持原有结构
     employee_commission = {k: {"name": v["name"], "commission": v["commission"]} for k, v in employee_data.items()}
     employee_performance = {k: {"name": v["name"], "performance": v["performance"]} for k, v in employee_data.items()}
@@ -1564,12 +1659,12 @@ def get_performance_summary(year: int, month: int) -> dict:
     return {
         "records": records or [],
         "loss_records": loss_records or [],
-        "total_profit": company_total_profit,  # 修改为公司总利润（已减亏损）
+        "total_profit": company_total_profit,
         "total_loss": total_loss,
-        "performance_profit": performance_profit,  # 新增：业绩总利润
+        "performance_profit": performance_profit,
         "employee_commission": employee_commission,
         "employee_performance": employee_performance,
-        "employee_data": employee_data,  # 新增：包含完整员工数据
+        "employee_data": employee_data,
         "settings": settings
     }
 
@@ -2168,5 +2263,578 @@ def get_performance_logs_count(record_type: str = None) -> int:
     except Exception as e:
         logger.error(f"获取操作日志总数失败: {e}")
         return 0
+    finally:
+        conn.close()
+
+
+# ========== 员工管理：任务相关操作 ==========
+
+def add_task(title: str, description: str, period_type: str, deadline: int,
+             remind_time: int, remind_enabled: int, created_by: int) -> int:
+    """添加任务"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        now = int(time.time())
+        date_str = datetime.fromtimestamp(now, tz=timezone(timedelta(hours=8))).strftime('%Y-%m-%d')
+
+        c.execute("""
+            INSERT INTO tasks (title, description, period_type, deadline, 
+                              remind_time, remind_enabled, created_by, created_at, date)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (title, description, period_type, deadline, remind_time, remind_enabled, created_by, now, date_str))
+
+        conn.commit()
+        return c.lastrowid
+    except Exception as e:
+        logger.error(f"添加任务失败: {e}")
+        return 0
+    finally:
+        conn.close()
+
+
+def assign_task(task_id: int, employee_id: int, employee_name: str) -> bool:
+    """分配任务给员工"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("""
+            INSERT OR IGNORE INTO task_assignments (task_id, employee_id, employee_name)
+            VALUES (?, ?, ?)
+        """, (task_id, employee_id, employee_name))
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"分配任务失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def get_tasks(period_type: str = None, status: str = None, date: str = None) -> list:
+    """获取任务列表"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        query = "SELECT * FROM tasks WHERE 1=1"
+        params = []
+
+        if period_type:
+            query += " AND period_type = ?"
+            params.append(period_type)
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+        if date:
+            query += " AND date LIKE ?"
+            params.append(f"{date}%")
+
+        query += " ORDER BY created_at DESC"
+        c.execute(query, params)
+        rows = c.fetchall()
+        return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(f"获取任务列表失败: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+def get_task_by_id(task_id: int) -> dict:
+    """根据ID获取任务"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("SELECT * FROM tasks WHERE id = ?", (task_id,))
+        row = c.fetchone()
+        return dict(row) if row else None
+    except Exception as e:
+        logger.error(f"获取任务失败: {e}")
+        return None
+    finally:
+        conn.close()
+
+
+def get_task_assignments(task_id: int) -> list:
+    """获取任务分配列表"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("SELECT * FROM task_assignments WHERE task_id = ?", (task_id,))
+        rows = c.fetchall()
+        return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(f"获取任务分配列表失败: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+def get_employee_tasks(employee_id: int) -> list:
+    """获取员工的任务列表"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("""
+            SELECT t.*, ta.id as assignment_id, ta.status as assignment_status, 
+                   ta.completion_detail, ta.completed_at, ta.completion_percent
+            FROM tasks t
+            JOIN task_assignments ta ON t.id = ta.task_id
+            WHERE ta.employee_id = ?
+            ORDER BY t.deadline ASC
+        """, (employee_id,))
+        rows = c.fetchall()
+        return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(f"获取员工任务列表失败: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+def update_task_status(task_id: int, status: str) -> bool:
+    """更新任务状态"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        now = int(time.time())
+        c.execute("""
+            UPDATE tasks 
+            SET status = ?, completed_at = ?
+            WHERE id = ?
+        """, (status, now if status == 'completed' else 0, task_id))
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"更新任务状态失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def complete_task_assignment(assignment_id: int, detail: str) -> bool:
+    """员工提交任务（等待管理员确认）"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        now = int(time.time())
+        c.execute("""
+            UPDATE task_assignments 
+            SET status = 'pending_review', completion_detail = ?, completed_at = ?, completion_percent = 100.0
+            WHERE id = ?
+        """, (detail, now, assignment_id))
+
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"提交任务失败: {e}")
+        return False
+
+
+def update_task_assignment_detail(assignment_id: int, detail: str) -> bool:
+    """员工修改任务详情（等待管理员审核）"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        now = int(time.time())
+        c.execute("""
+            UPDATE task_assignments 
+            SET status = 'pending_review', completion_detail = ?, completed_at = ?, completion_percent = 100.0
+            WHERE id = ?
+        """, (detail, now, assignment_id))
+
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"修改任务详情失败: {e}")
+        return False
+
+
+def confirm_task_assignment(assignment_id: int, completion_percent: float) -> bool:
+    """管理员确认任务并设置完成百分比"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        now = int(time.time())
+        c.execute("""
+            UPDATE task_assignments 
+            SET status = 'completed', completion_percent = ?
+            WHERE id = ?
+        """, (completion_percent, assignment_id))
+
+        c.execute("SELECT task_id FROM task_assignments WHERE id = ?", (assignment_id,))
+        task_id = c.fetchone()[0]
+
+        c.execute("SELECT COUNT(*) FROM task_assignments WHERE task_id = ? AND status != 'completed'", (task_id,))
+        remaining = c.fetchone()[0]
+
+        if remaining == 0:
+            c.execute("""
+                UPDATE tasks 
+                SET status = 'completed', completed_at = ?
+                WHERE id = ?
+            """, (now, task_id))
+
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"确认任务失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def delete_task(task_id: int) -> bool:
+    """删除任务"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("DELETE FROM task_assignments WHERE task_id = ?", (task_id,))
+        c.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"删除任务失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def mark_task_notified(assignment_id: int) -> bool:
+    """标记任务已通知"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("UPDATE task_assignments SET notified = 1 WHERE id = ?", (assignment_id,))
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"标记任务已通知失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def get_unnotified_tasks() -> list:
+    """获取未通知的任务分配"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("""
+            SELECT ta.*, t.title, t.description, t.deadline
+            FROM task_assignments ta
+            JOIN tasks t ON ta.task_id = t.id
+            WHERE ta.notified = 0 AND t.status = 'pending'
+        """)
+        rows = c.fetchall()
+        return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(f"获取未通知任务失败: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+def get_pending_review_tasks() -> list:
+    """获取待确认的任务（员工已提交，等待管理员确认）"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("""
+            SELECT ta.*, t.title, t.description, t.deadline, t.date
+            FROM task_assignments ta
+            JOIN tasks t ON ta.task_id = t.id
+            WHERE ta.status = 'pending_review'
+            ORDER BY ta.completed_at DESC
+        """)
+        rows = c.fetchall()
+        return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(f"获取待确认任务失败: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+def get_tasks_needing_reminder() -> list:
+    """获取需要提醒的任务"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        now = int(time.time())
+        c.execute("""
+            SELECT ta.*, t.title, t.description, t.deadline, t.remind_time
+            FROM task_assignments ta
+            JOIN tasks t ON ta.task_id = t.id
+            WHERE t.remind_enabled = 1 AND t.remind_time <= ? 
+            AND t.status = 'pending' AND ta.status = 'pending'
+        """, (now,))
+        rows = c.fetchall()
+        return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(f"获取需要提醒的任务失败: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+def get_overdue_tasks() -> list:
+    """获取已超时但未完成的任务"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        now = int(time.time())
+        c.execute("""
+            SELECT ta.*, t.title, t.description, t.deadline
+            FROM task_assignments ta
+            JOIN tasks t ON ta.task_id = t.id
+            WHERE t.deadline < ? AND ta.status = 'pending'
+        """, (now,))
+        rows = c.fetchall()
+        return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(f"获取超时任务失败: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+def handle_overdue_task(assignment_id: int) -> bool:
+    """处理超时任务：设置为待审核状态，完成度0%"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        now = int(time.time())
+        c.execute("""
+            UPDATE task_assignments 
+            SET status = 'pending_review', completion_detail = '超时未提交', 
+                completed_at = ?, completion_percent = 0.0
+            WHERE id = ? AND status = 'pending'
+        """, (now, assignment_id))
+
+        conn.commit()
+        return c.rowcount > 0
+    except Exception as e:
+        logger.error(f"处理超时任务失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+# ========== 员工管理：底薪相关操作 ==========
+
+def set_employee_base_salary(employee_id: int, monthly_base: float, updated_by: int) -> bool:
+    """设置员工底薪"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        now = int(time.time())
+        c.execute("""
+            INSERT OR REPLACE INTO employee_salary (employee_id, monthly_base, updated_by, updated_at)
+            VALUES (?, ?, ?, ?)
+        """, (employee_id, monthly_base, updated_by, now))
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"设置员工底薪失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def get_employee_base_salary(employee_id: int) -> float:
+    """获取员工底薪"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("SELECT monthly_base FROM employee_salary WHERE employee_id = ?", (employee_id,))
+        row = c.fetchone()
+        return row[0] if row else 0.0
+    except Exception as e:
+        logger.error(f"获取员工底薪失败: {e}")
+        return 0.0
+    finally:
+        conn.close()
+
+
+def get_all_employee_salaries() -> list:
+    """获取所有员工底薪设置"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("SELECT * FROM employee_salary")
+        rows = c.fetchall()
+        return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(f"获取所有员工底薪失败: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+# ========== 员工管理：激励奖开关相关操作 ==========
+
+def set_employee_incentive(employee_id: int, enabled: int, updated_by: int) -> bool:
+    """设置员工激励奖开关"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        now = int(time.time())
+        c.execute("""
+            INSERT OR REPLACE INTO employee_incentive_settings (employee_id, incentive_enabled, updated_by, updated_at)
+            VALUES (?, ?, ?, ?)
+        """, (employee_id, enabled, updated_by, now))
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"设置员工激励奖开关失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def get_employee_incentive_setting(employee_id: int) -> int:
+    """获取员工激励奖设置"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("SELECT incentive_enabled FROM employee_incentive_settings WHERE employee_id = ?", (employee_id,))
+        row = c.fetchone()
+        return row[0] if row else 1
+    except Exception as e:
+        logger.error(f"获取员工激励奖设置失败: {e}")
+        return 1
+    finally:
+        conn.close()
+
+
+def get_all_employee_incentive_settings() -> list:
+    """获取所有员工激励奖设置"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("SELECT * FROM employee_incentive_settings")
+        rows = c.fetchall()
+        return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(f"获取所有员工激励奖设置失败: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+# ========== 员工管理：统计相关操作 ==========
+
+def get_task_completion_stats() -> dict:
+    """获取任务完成统计"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("SELECT COUNT(*) FROM tasks")
+        total_tasks = c.fetchone()[0]
+
+        c.execute("SELECT COUNT(*) FROM tasks WHERE status = 'completed'")
+        completed_tasks = c.fetchone()[0]
+
+        c.execute("""
+            SELECT ta.employee_id, ta.employee_name, 
+                   COUNT(*) as total_assigned,
+                   SUM(CASE WHEN ta.status = 'completed' THEN 1 ELSE 0 END) as completed_count
+            FROM task_assignments ta
+            GROUP BY ta.employee_id, ta.employee_name
+        """)
+        employee_stats = []
+        rows = c.fetchall()
+        for row in rows:
+            stats = dict(row)
+            stats['completion_rate'] = round(stats['completed_count'] / stats['total_assigned'] * 100, 1) if stats['total_assigned'] > 0 else 0
+            employee_stats.append(stats)
+
+        return {
+            'total_tasks': total_tasks,
+            'completed_tasks': completed_tasks,
+            'completion_rate': round(completed_tasks / total_tasks * 100, 1) if total_tasks > 0 else 0,
+            'employee_stats': employee_stats
+        }
+    except Exception as e:
+        logger.error(f"获取任务完成统计失败: {e}")
+        return {
+            'total_tasks': 0,
+            'completed_tasks': 0,
+            'completion_rate': 0,
+            'employee_stats': []
+        }
+    finally:
+        conn.close()
+
+
+def get_employee_monthly_completion_rate(employee_id: int, year: int, month: int) -> float:
+    """计算员工本月任务完成率（所有已确认任务的平均完成百分比）"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        query = """
+            SELECT AVG(completion_percent) as avg_percent
+            FROM task_assignments ta
+            JOIN tasks t ON ta.task_id = t.id
+            WHERE ta.employee_id = ? AND ta.status = 'completed'
+            AND strftime('%Y-%m', t.date) = ?
+        """
+        params = [employee_id, f"{year}-{month:02d}"]
+
+        c.execute(query, params)
+        row = c.fetchone()
+
+        avg_percent = row[0] if row and row[0] else 0
+        return float(avg_percent)
+    except Exception as e:
+        logger.error(f"计算员工任务完成率失败: {e}")
+        return 0.0
+    finally:
+        conn.close()
+
+
+def get_employee_task_summary(employee_id: int, year: int = None, month: int = None) -> dict:
+    """获取员工任务完成汇总"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        query = """
+            SELECT COUNT(*) as total,
+                   SUM(CASE WHEN ta.status = 'completed' THEN 1 ELSE 0 END) as completed,
+                   SUM(CASE WHEN ta.status = 'pending' THEN 1 ELSE 0 END) as pending,
+                   SUM(CASE WHEN t.deadline < strftime('%s', 'now') AND ta.status = 'pending' THEN 1 ELSE 0 END) as overdue
+            FROM task_assignments ta
+            JOIN tasks t ON ta.task_id = t.id
+            WHERE ta.employee_id = ?
+        """
+        params = [employee_id]
+
+        if year and month:
+            query += " AND strftime('%Y-%m', t.date) = ?"
+            params.append(f"{year}-{month:02d}")
+
+        c.execute(query, params)
+        row = c.fetchone()
+
+        total = row[0] if row else 0
+        completed = row[1] if row else 0
+
+        return {
+            'total': total,
+            'completed': completed,
+            'pending': row[2] if row else 0,
+            'overdue': row[3] if row else 0,
+            'completion_rate': round(completed / total * 100, 1) if total > 0 else 0
+        }
+    except Exception as e:
+        logger.error(f"获取员工任务汇总失败: {e}")
+        return {
+            'total': 0,
+            'completed': 0,
+            'pending': 0,
+            'overdue': 0,
+            'completion_rate': 0
+        }
     finally:
         conn.close()
