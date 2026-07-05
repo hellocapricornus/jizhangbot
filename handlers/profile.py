@@ -116,6 +116,12 @@ async def _build_profile_menu(user_id: int, prefs: dict = None, display_name: st
     if full_access:
         keyboard.append([InlineKeyboardButton("📊 业绩汇总", callback_data="profile_performance_menu")])
 
+    # ========== 员工管理（超级管理员）/ 我的任务（员工） ==========
+    if user_id == OWNER_ID:
+        keyboard.append([InlineKeyboardButton("👤 员工管理", callback_data="employee_menu")])
+    elif is_authorized(user_id):
+        keyboard.append([InlineKeyboardButton("📋 我的任务", callback_data="employee_my_tasks")])
+
     keyboard.append([InlineKeyboardButton("◀️ 返回主菜单", callback_data="profile_back")])
 
     # 构建提示文本
@@ -1430,15 +1436,39 @@ async def profile_performance_menu(update: Update, context: ContextTypes.DEFAULT
     employee_data = summary.get('employee_data', {})
     if employee_data:
         for emp_id, data in employee_data.items():
-            commission_info = f"• <a href=\"tg://user?id={emp_id}\">{data['name']}</a>：{data['commission']:.2f} USDT\n"
-            commission_info += f"  ├─ 业绩：{data['performance']:.2f} USDT\n"
-            has_loss = data['loss_bear'] > 0
-            has_incentive = data.get('incentive', 0) > 0
-            if has_loss:
-                symbol = "└─" if not has_incentive else "├─"
-                commission_info += f"  {symbol} 承担亏损：{data['loss_bear']:.2f} USDT\n"
+            gross_commission = data['commission'] - data.get('actual_base_salary', 0) - data.get('incentive', 0)
+            actual_base = data.get('actual_base_salary', 0)
+            incentive = data.get('incentive', 0)
+            loss_bear = data['loss_bear']
+
+            total_income = gross_commission + actual_base + incentive - loss_bear
+
+            commission_info = f"• <a href=\"tg://user?id={emp_id}\">{data['name']}</a>：总收入 {total_income:.2f} USDT\n"
+
+            commission_info += f"  ├─ 业绩：{data['performance']:.2f} USDT（提成：{gross_commission:.2f} USDT）\n"
+
+            has_base_salary = data.get('base_salary', 0) > 0
+            has_actual_base = actual_base > 0
+            has_loss = loss_bear > 0
+            has_incentive = incentive > 0
+
+            if has_actual_base:
+                base_salary = data.get('base_salary', 0)
+                completion_rate = data.get('completion_rate', 0)
+                if completion_rate > 0:
+                    commission_info += f"  ├─ 实际底薪：{actual_base:.2f} USDT（底薪 {base_salary:.2f} USDT × 完成率 {completion_rate}%）\n"
+                else:
+                    commission_info += f"  ├─ 底薪：{actual_base:.2f} USDT\n"
+
             if has_incentive:
-                commission_info += f"  └─ 激励奖励：{data['incentive']:.2f} USDT\n"
+                threshold = data.get('incentive_threshold', 0)
+                rate = data.get('incentive_rate', 0)
+                commission_info += f"  ├─ 激励奖：{incentive:.2f} USDT（达到门槛 {threshold:.0f} USDT，{rate*100:.1f}%）\n"
+
+            if has_loss:
+                commission_info += f"  └─ 承担亏损：{loss_bear:.2f} USDT\n\n"
+            else:
+                commission_info += "\n"
             text += commission_info
     else:
         for emp_id, data in summary['employee_commission'].items():
@@ -1860,15 +1890,39 @@ async def profile_performance_view_show(update: Update, context: ContextTypes.DE
     employee_data = summary.get('employee_data', {})
     if employee_data:
         for emp_id, data in employee_data.items():
-            commission_info = f"• <a href=\"tg://user?id={emp_id}\">{data['name']}</a>：{data['commission']:.2f} USDT\n"
-            commission_info += f"  ├─ 业绩：{data['performance']:.2f} USDT\n"
-            has_loss = data['loss_bear'] > 0
-            has_incentive = data.get('incentive', 0) > 0
-            if has_loss:
-                symbol = "└─" if not has_incentive else "├─"
-                commission_info += f"  {symbol} 承担亏损：{data['loss_bear']:.2f} USDT\n"
+            gross_commission = data['commission'] - data.get('actual_base_salary', 0) - data.get('incentive', 0)
+            actual_base = data.get('actual_base_salary', 0)
+            incentive = data.get('incentive', 0)
+            loss_bear = data['loss_bear']
+
+            total_income = gross_commission + actual_base + incentive - loss_bear
+
+            commission_info = f"• <a href=\"tg://user?id={emp_id}\">{data['name']}</a>：总收入 {total_income:.2f} USDT\n"
+
+            commission_info += f"  ├─ 业绩：{data['performance']:.2f} USDT（提成：{gross_commission:.2f} USDT）\n"
+
+            has_base_salary = data.get('base_salary', 0) > 0
+            has_actual_base = actual_base > 0
+            has_loss = loss_bear > 0
+            has_incentive = incentive > 0
+
+            if has_actual_base:
+                base_salary = data.get('base_salary', 0)
+                completion_rate = data.get('completion_rate', 0)
+                if completion_rate > 0:
+                    commission_info += f"  ├─ 实际底薪：{actual_base:.2f} USDT（底薪 {base_salary:.2f} USDT × 完成率 {completion_rate}%）\n"
+                else:
+                    commission_info += f"  ├─ 底薪：{actual_base:.2f} USDT\n"
+
             if has_incentive:
-                commission_info += f"  └─ 激励奖励：{data['incentive']:.2f} USDT\n"
+                threshold = data.get('incentive_threshold', 0)
+                rate = data.get('incentive_rate', 0)
+                commission_info += f"  ├─ 激励奖：{incentive:.2f} USDT（达到门槛 {threshold:.0f} USDT，{rate*100:.1f}%）\n"
+
+            if has_loss:
+                commission_info += f"  └─ 承担亏损：{loss_bear:.2f} USDT\n\n"
+            else:
+                commission_info += "\n"
             text += commission_info
     else:
         for emp_id, data in summary['employee_commission'].items():
@@ -2650,19 +2704,38 @@ def generate_performance_html(records, total_profit, employee_commission, employ
         <h2>💰 员工提成汇总</h2>
 """
     for emp_id, data in employee_commission.items():
-        perf = employee_performance.get(emp_id, {}).get('performance', 0)
         emp_data = employee_data.get(emp_id, {}) if employee_data else {}
-        loss_bear = emp_data.get('loss_bear', 0)
+
+        perf = emp_data.get('performance', employee_performance.get(emp_id, {}).get('performance', 0))
+        gross_commission = emp_data.get('commission', data['commission']) - emp_data.get('actual_base_salary', 0) - emp_data.get('incentive', 0)
+        actual_base = emp_data.get('actual_base_salary', 0)
         incentive = emp_data.get('incentive', 0)
-        details = f"<span class=\"employee-perf\">业绩 {perf:.2f} USDT</span>"
-        if loss_bear > 0:
-            details += f"<span class=\"employee-loss\">亏损 {loss_bear:.2f} USDT</span>"
+        loss_bear = emp_data.get('loss_bear', 0)
+
+        total_income = gross_commission + actual_base + incentive - loss_bear
+
+        details = f"<span class=\"employee-perf\">业绩 {perf:.2f} USDT（提成 {gross_commission:.2f} USDT）</span>"
+
+        base_salary = emp_data.get('base_salary', 0)
+        completion_rate = emp_data.get('completion_rate', 0)
+        if actual_base > 0:
+            if completion_rate > 0:
+                details += f"<span class=\"employee-base\">实际底薪 {actual_base:.2f} USDT（底薪 {base_salary:.2f} USDT × 完成率 {completion_rate}%）</span>"
+            else:
+                details += f"<span class=\"employee-base\">底薪 {actual_base:.2f} USDT</span>"
+
+        incentive_threshold = emp_data.get('incentive_threshold', 0)
+        incentive_rate = emp_data.get('incentive_rate', 0)
         if incentive > 0:
-            details += f"<span class=\"employee-incentive\">激励 {incentive:.2f} USDT</span>"
+            details += f"<span class=\"employee-incentive\">激励奖 {incentive:.2f} USDT（达到门槛 {incentive_threshold:.0f} USDT，{incentive_rate*100:.1f}%）</span>"
+
+        if loss_bear > 0:
+            details += f"<span class=\"employee-loss\">承担亏损 {loss_bear:.2f} USDT</span>"
+
         html += f"""        <div class="employee-card">
             <span class="employee-name">{data['name']}</span>
-            <span>
-                <span class="employee-commission">{data['commission']:.2f} USDT</span>
+            <span class="employee-total">总收入 {total_income:.2f} USDT</span>
+            <span class="employee-details">
                 {details}
             </span>
         </div>
