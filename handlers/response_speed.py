@@ -40,6 +40,8 @@ def format_seconds(seconds: float) -> str:
         return f"{hours}小时{minutes}分"
 
 
+MAX_RESPONSE_SECONDS = 3 * 60 * 60
+
 async def monitor_group_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """监听群消息，检测员工响应速度"""
     if not update.message:
@@ -53,28 +55,40 @@ async def monitor_group_messages(update: Update, context: ContextTypes.DEFAULT_T
     operators = list_operators()
 
     if user_id in operators:
-        if chat_id in pending_customer_messages:
-            for msg_id in list(pending_customer_messages[chat_id].keys()):
-                customer_info = pending_customer_messages[chat_id][msg_id]
-                if customer_info['responded']:
-                    continue
+        if chat_id in pending_customer_messages and pending_customer_messages[chat_id]:
+            sorted_msg_ids = sorted(pending_customer_messages[chat_id].keys())
+            latest_msg_id = sorted_msg_ids[-1]
+            customer_info = pending_customer_messages[chat_id][latest_msg_id]
 
+            if not customer_info['responded']:
                 customer_info['responded'] = True
                 customer_info['responder_id'] = user_id
                 customer_info['responder_time'] = message_time
 
-                is_work = is_in_work_time(user_id, customer_info['message_time'])
-                add_response_record(
-                    customer_info['user_id'],
-                    customer_info['message_time'],
-                    user_id,
-                    message_time,
-                    is_work
-                )
+                customer_msg_time = customer_info['message_time']
+                response_seconds = message_time - customer_msg_time
+
+                is_customer_in_work = is_in_work_time(user_id, customer_msg_time)
+                is_responder_in_work = is_in_work_time(user_id, message_time)
+
+                if is_customer_in_work and is_responder_in_work and response_seconds <= MAX_RESPONSE_SECONDS:
+                    add_response_record(
+                        customer_info['user_id'],
+                        customer_msg_time,
+                        user_id,
+                        message_time,
+                        True
+                    )
 
             pending_customer_messages[chat_id] = {}
     else:
         if message.text and message.text.startswith('/'):
+            return
+
+        customer_msg_time = message_time
+        is_in_work = is_in_work_time(user_id, customer_msg_time)
+
+        if not is_in_work:
             return
 
         if chat_id not in pending_customer_messages:
@@ -96,7 +110,7 @@ async def monitor_group_messages(update: Update, context: ContextTypes.DEFAULT_T
 
 async def cleanup_pending_messages(chat_id: int, message_id: int):
     """清理超时未响应的客户消息"""
-    await asyncio.sleep(86400)
+    await asyncio.sleep(MAX_RESPONSE_SECONDS)
     if chat_id in pending_customer_messages:
         if message_id in pending_customer_messages[chat_id]:
             del pending_customer_messages[chat_id][message_id]
