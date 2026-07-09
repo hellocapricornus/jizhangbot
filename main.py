@@ -13,7 +13,7 @@ from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboard
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, filters, ContextTypes, ConversationHandler,
-    ChatMemberHandler
+    ChatMemberHandler, ApplicationHandlerStop
 )
 from config import BOT_TOKEN
 from auth import is_authorized, init_operators_from_db
@@ -35,10 +35,9 @@ from handlers.accounting import get_service_message_handler
 from handlers.ai_client import get_ai_client, cleanup_expired_conversations
 from handlers.help import handle_help
 from handlers.profile import (
-    handle_profile, profile_stats,
+    handle_profile,
     profile_toggle_notify, profile_signature_start, profile_signature_input,
-    profile_contact,
-    profile_export_data, profile_back, profile_report_toggle, 
+    profile_back, 
     # ========== 规则管理导入 ==========
     profile_rules_menu, profile_rule_add_start, profile_rule_add_name_input,
     profile_rule_add_content_input, profile_rule_view_all,
@@ -591,9 +590,18 @@ async def module_input_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         # 让 keyboard_handler 处理具体按钮
         return None
 
-    # 检查个人中心输入标志，有则拦截并清除标志
-    if context.user_data.pop("profile_input_state", False):
-        return ConversationHandler.END
+    # 检查个人中心输入标志，有则拦截（不清除，保持状态）
+    if context.user_data.get("profile_input_state", False):
+        raise ApplicationHandlerStop
+
+    # 检查响应速度设置状态，有则拦截不让AI处理
+    if context.user_data.get("response_work_time_emp_id") or context.user_data.get("response_rating_level"):
+        raise ApplicationHandlerStop
+
+    # 检查响应速度消息是否已处理，已处理则停止传播
+    if context.user_data.get("response_message_processed"):
+        context.user_data.pop("response_message_processed", None)
+        raise ApplicationHandlerStop
 
     # 如果是已知键盘按钮，不处理
     if text in ALL_KNOWN_BUTTONS:
@@ -681,8 +689,8 @@ async def ai_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat.type != 'private':
         return
 
-    # 检查个人中心输入标志
-    if context.user_data.pop("profile_input_state", False):
+    # 检查个人中心输入标志（使用get不清除，保持状态）
+    if context.user_data.get("profile_input_state", False):
         return
 
     # 业绩汇总状态
@@ -704,6 +712,17 @@ async def ai_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
        context.user_data.get("set_salary_employee_id") or context.user_data.get("complete_assignment_id") or \
        context.user_data.get("modify_assignment_id"):
         logger.debug(f"员工管理状态中，跳过AI")
+        return
+
+    # 响应速度设置状态
+    if context.user_data.get("response_work_time_emp_id") or context.user_data.get("response_rating_level"):
+        logger.debug(f"响应速度设置状态中，跳过AI")
+        return
+
+    # 响应速度消息已处理标志
+    if context.user_data.get("response_message_processed"):
+        context.user_data.pop("response_message_processed", None)
+        logger.debug(f"响应速度消息已处理，跳过AI")
         return
 
     if context.user_data.get("_message_handled"):
@@ -1173,6 +1192,10 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ===== ✅ 让个人中心处理器处理个人中心相关的回调 =====
     if data.startswith("profile_"):
+        return
+
+    # ===== ✅ 让响应速度处理器处理响应速度相关的回调 =====
+    if data.startswith("response_"):
         return
 
     await query.answer()
@@ -1775,12 +1798,8 @@ def main():
             # 个人中心入口（从员工管理等返回）
             CallbackQueryHandler(handle_profile, pattern="^profile$"),
             # 子按钮回调
-            CallbackQueryHandler(profile_stats, pattern="^profile_stats$"),
             CallbackQueryHandler(profile_toggle_notify, pattern="^profile_toggle_notify$"),
             CallbackQueryHandler(profile_signature_start, pattern="^profile_signature$"),
-            CallbackQueryHandler(profile_contact, pattern="^profile_contact$"),
-            CallbackQueryHandler(profile_export_data, pattern="^profile_export$"),
-            CallbackQueryHandler(profile_report_toggle, pattern="^profile_report_toggle$"),
             CallbackQueryHandler(profile_back, pattern="^profile_back$"),
             # ========== 规则管理入口 ==========
             CallbackQueryHandler(profile_rules_menu, pattern="^profile_rules_menu$"),
@@ -1901,6 +1920,9 @@ def main():
     )
     app.add_handler(profile_conv, group=1)
 
+    from handlers.response_speed import register_response_speed_handlers
+    register_response_speed_handlers(app)
+
     register_employee_handlers(app)
 
     # 三层私聊处理器
@@ -1924,6 +1946,13 @@ def main():
         filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND,
         handle_group_message
     ), group=1)
+
+    # 响应速度监控
+    from handlers.response_speed import monitor_group_messages
+    app.add_handler(MessageHandler(
+        filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND,
+        monitor_group_messages
+    ), group=2)
 
     # 全局群组消息
     app.add_handler(MessageHandler(
