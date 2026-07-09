@@ -157,13 +157,14 @@ async def response_speed_menu(update: Update, context: CallbackContext):
 
             text += f"{rank}️⃣ {rating_emoji}【{rating_name}】{safe_escape_markdown(name)} - 平均响应 {avg_time} - 响应 {emp_stats['total_count']}次\n"
 
-            total_avg += emp_stats['avg_response_seconds']
+            total_avg += emp_stats['avg_response_seconds'] * emp_stats['total_count']
             total_count += emp_stats['total_count']
             rank += 1
 
         if total_count > 0:
-            overall_rating = get_response_rating_for_seconds(total_avg / total_count)
-            text += f"\n📊 整体统计：\n总响应次数：{total_count}\n平均响应时间：{format_seconds(total_avg / total_count)} {overall_rating['emoji']}\n"
+            overall_avg = total_avg / total_count
+            overall_rating = get_response_rating_for_seconds(overall_avg)
+            text += f"\n📊 整体统计：\n总响应次数：{total_count}\n平均响应时间：{format_seconds(overall_avg)} {overall_rating['emoji']}\n"
 
     keyboard = []
 
@@ -243,13 +244,14 @@ async def response_view_month(update: Update, context: CallbackContext):
 
             text += f"{rank}️⃣ {rating_emoji}【{rating_name}】{safe_escape_markdown(name)} - 平均响应 {avg_time} - 响应 {emp_stats['total_count']}次\n"
 
-            total_avg += emp_stats['avg_response_seconds']
+            total_avg += emp_stats['avg_response_seconds'] * emp_stats['total_count']
             total_count += emp_stats['total_count']
             rank += 1
 
         if total_count > 0:
-            overall_rating = get_response_rating_for_seconds(total_avg / total_count)
-            text += f"\n📊 整体统计：\n总响应次数：{total_count}\n平均响应时间：{format_seconds(total_avg / total_count)} {overall_rating['emoji']}\n"
+            overall_avg = total_avg / total_count
+            overall_rating = get_response_rating_for_seconds(overall_avg)
+            text += f"\n📊 整体统计：\n总响应次数：{total_count}\n平均响应时间：{format_seconds(overall_avg)} {overall_rating['emoji']}\n"
 
     months_with_records = get_months_with_response_records()
     keyboard = []
