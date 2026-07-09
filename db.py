@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from typing import Optional, List, Dict, Any
 from logger import bot_logger as logger
 from datetime import datetime, timezone, timedelta
+from auth import list_operators
 
 DB_PATH = "bot.db"
 if not os.path.isabs(DB_PATH):
@@ -1637,15 +1638,38 @@ def get_performance_summary(year: int, month: int) -> dict:
         for emp_id in employee_data:
             employee_data[emp_id]["incentive"] = 0
 
+    # 添加有底薪但无业绩记录的员工（仅限仍是正式操作员的员工）
+    all_salaries = get_all_employee_salaries()
+    current_operators = list_operators()
+    for salary in all_salaries:
+        emp_id = salary['employee_id']
+        if emp_id not in employee_data:
+            if emp_id in current_operators:
+                op_info = current_operators[emp_id]
+                emp_name = op_info.get('first_name', op_info.get('username', f"员工{emp_id}"))
+                employee_data[emp_id] = {
+                    "name": emp_name,
+                    "performance": 0,
+                    "profit": 0,
+                    "loss_bear": 0,
+                    "commission": 0,
+                    "is_channel": False,
+                    "is_customer": False,
+                    "base_salary": 0,
+                    "incentive": 0
+                }
+
     # 获取员工底薪并根据任务完成率计算实际底薪
     for emp_id in employee_data:
         base_salary = get_employee_base_salary(emp_id)
         completion_rate = get_employee_monthly_completion_rate(emp_id, year, month)
 
-        if completion_rate > 0:
+        if not has_assigned_tasks(emp_id):
+            actual_base_salary = base_salary
+        elif completion_rate > 0:
             actual_base_salary = base_salary * completion_rate / 100
         else:
-            actual_base_salary = base_salary
+            actual_base_salary = 0
 
         employee_data[emp_id]["base_salary"] = base_salary
         employee_data[emp_id]["actual_base_salary"] = round(actual_base_salary, 2)
@@ -2794,6 +2818,21 @@ def get_employee_monthly_completion_rate(employee_id: int, year: int, month: int
         conn.close()
 
 
+def has_assigned_tasks(employee_id: int) -> bool:
+    """判断员工是否收到过任务"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("SELECT COUNT(*) FROM task_assignments WHERE employee_id = ?", (employee_id,))
+        row = c.fetchone()
+        return row[0] > 0 if row else False
+    except Exception as e:
+        logger.error(f"判断员工是否收到过任务失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+
 def get_employee_task_summary(employee_id: int, year: int = None, month: int = None) -> dict:
     """获取员工任务完成汇总"""
     conn = get_db_connection()
@@ -2838,3 +2877,338 @@ def get_employee_task_summary(employee_id: int, year: int = None, month: int = N
         }
     finally:
         conn.close()
+
+
+# ========== 响应速度检测相关 ==========
+
+def init_response_tables():
+    """初始化响应速度相关表"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS response_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                customer_user_id INTEGER,
+                customer_message_time INTEGER,
+                responder_user_id INTEGER,
+                responder_message_time INTEGER,
+                response_seconds REAL,
+                is_work_time INTEGER DEFAULT 1,
+                created_at INTEGER
+            )
+        """)
+
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS employee_work_time (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                employee_id INTEGER UNIQUE,
+                work_start TEXT DEFAULT '09:00',
+                work_end TEXT DEFAULT '18:00',
+                created_at INTEGER,
+                updated_at INTEGER
+            )
+        """)
+
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS response_rating_config (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                level_name TEXT,
+                min_seconds REAL DEFAULT 0,
+                max_seconds REAL DEFAULT 0,
+                emoji TEXT,
+                color TEXT,
+                created_at INTEGER,
+                updated_at INTEGER
+            )
+        """)
+
+        c.execute("SELECT COUNT(*) FROM response_rating_config")
+        if c.fetchone()[0] == 0:
+            default_config = [
+                ('优秀', 0, 300, '⚡', 'green'),
+                ('良好', 300, 900, '✅', 'blue'),
+                ('一般', 900, 1800, '⚠️', 'yellow'),
+                ('较慢', 1800, 3600, '❌', 'orange'),
+                ('超时', 3600, 999999, '🔴', 'red'),
+            ]
+            c.executemany("""
+                INSERT INTO response_rating_config 
+                (level_name, min_seconds, max_seconds, emoji, color, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, [(name, min_s, max_s, emoji, color, int(time.time()), int(time.time())) 
+                  for name, min_s, max_s, emoji, color in default_config])
+
+        conn.commit()
+    except Exception as e:
+        logger.error(f"初始化响应速度表失败: {e}")
+    finally:
+        conn.close()
+
+
+def add_response_record(customer_user_id: int, customer_message_time: int,
+                        responder_user_id: int, responder_message_time: int,
+                        is_work_time: bool = True):
+    """添加响应记录"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        response_seconds = responder_message_time - customer_message_time
+        c.execute("""
+            INSERT INTO response_records 
+            (customer_user_id, customer_message_time, responder_user_id, 
+             responder_message_time, response_seconds, is_work_time, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (customer_user_id, customer_message_time, responder_user_id,
+              responder_message_time, response_seconds, 1 if is_work_time else 0, int(time.time())))
+        conn.commit()
+        return c.lastrowid
+    except Exception as e:
+        logger.error(f"添加响应记录失败: {e}")
+        return None
+    finally:
+        conn.close()
+
+
+def get_employee_response_stats(employee_id: int, year: int, month: int) -> Dict:
+    """获取员工某月的响应统计"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        start_time = int(datetime(year, month, 1, tzinfo=timezone(timedelta(hours=8))).timestamp())
+        last_day = (datetime(year, month, 1) + timedelta(days=32)).replace(day=1) - timedelta(days=1)
+        end_time = int(last_day.replace(hour=23, minute=59, second=59, tzinfo=timezone(timedelta(hours=8))).timestamp())
+
+        c.execute("""
+            SELECT COUNT(*), AVG(response_seconds), SUM(CASE WHEN is_work_time = 1 THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN response_seconds <= 300 THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN response_seconds > 300 AND response_seconds <= 900 THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN response_seconds > 900 AND response_seconds <= 1800 THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN response_seconds > 1800 AND response_seconds <= 3600 THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN response_seconds > 3600 THEN 1 ELSE 0 END)
+            FROM response_records
+            WHERE responder_user_id = ? AND customer_message_time BETWEEN ? AND ?
+        """, (employee_id, start_time, end_time))
+        row = c.fetchone()
+
+        if row and row[0] > 0:
+            return {
+                'total_count': row[0],
+                'avg_response_seconds': round(row[1], 2) if row[1] else 0,
+                'work_time_count': row[2],
+                'excellent_count': row[3],
+                'good_count': row[4],
+                'normal_count': row[5],
+                'slow_count': row[6],
+                'timeout_count': row[7]
+            }
+        return {
+            'total_count': 0,
+            'avg_response_seconds': 0,
+            'work_time_count': 0,
+            'excellent_count': 0,
+            'good_count': 0,
+            'normal_count': 0,
+            'slow_count': 0,
+            'timeout_count': 0
+        }
+    except Exception as e:
+        logger.error(f"获取员工响应统计失败: {e}")
+        return {
+            'total_count': 0,
+            'avg_response_seconds': 0,
+            'work_time_count': 0,
+            'excellent_count': 0,
+            'good_count': 0,
+            'normal_count': 0,
+            'slow_count': 0,
+            'timeout_count': 0
+        }
+    finally:
+        conn.close()
+
+
+def get_all_employee_response_stats(year: int, month: int) -> Dict:
+    """获取所有员工某月的响应统计"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        start_time = int(datetime(year, month, 1, tzinfo=timezone(timedelta(hours=8))).timestamp())
+        last_day = (datetime(year, month, 1) + timedelta(days=32)).replace(day=1) - timedelta(days=1)
+        end_time = int(last_day.replace(hour=23, minute=59, second=59, tzinfo=timezone(timedelta(hours=8))).timestamp())
+
+        c.execute("""
+            SELECT responder_user_id, COUNT(*), AVG(response_seconds),
+                   SUM(CASE WHEN is_work_time = 1 THEN 1 ELSE 0 END)
+            FROM response_records
+            WHERE customer_message_time BETWEEN ? AND ?
+            GROUP BY responder_user_id
+            ORDER BY AVG(response_seconds) ASC
+        """, (start_time, end_time))
+
+        stats = {}
+        for row in c.fetchall():
+            stats[row[0]] = {
+                'total_count': row[1],
+                'avg_response_seconds': round(row[2], 2) if row[2] else 0,
+                'work_time_count': row[3]
+            }
+        return stats
+    except Exception as e:
+        logger.error(f"获取所有员工响应统计失败: {e}")
+        return {}
+    finally:
+        conn.close()
+
+
+def set_employee_work_time(employee_id: int, work_start: str, work_end: str):
+    """设置员工工作时间"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        now = int(time.time())
+        c.execute("""
+            INSERT OR REPLACE INTO employee_work_time 
+            (employee_id, work_start, work_end, created_at, updated_at)
+            VALUES (?, ?, ?, 
+                    COALESCE((SELECT created_at FROM employee_work_time WHERE employee_id = ?), ?), 
+                    ?)
+        """, (employee_id, work_start, work_end, employee_id, now, now))
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"设置员工工作时间失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def get_employee_work_time(employee_id: int) -> Optional[Dict]:
+    """获取员工工作时间"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("SELECT work_start, work_end FROM employee_work_time WHERE employee_id = ?", (employee_id,))
+        row = c.fetchone()
+        if row:
+            return {'work_start': row[0], 'work_end': row[1]}
+        return None
+    except Exception as e:
+        logger.error(f"获取员工工作时间失败: {e}")
+        return None
+    finally:
+        conn.close()
+
+
+def is_in_work_time(employee_id: int, check_time: int = None) -> bool:
+    """判断当前时间是否在员工工作时间内"""
+    if check_time is None:
+        check_time = int(time.time())
+
+    work_time = get_employee_work_time(employee_id)
+    if not work_time:
+        return True
+
+    work_start = work_time['work_start']
+    work_end = work_time['work_end']
+
+    check_dt = datetime.fromtimestamp(check_time, timezone(timedelta(hours=8)))
+    start_dt = check_dt.replace(hour=int(work_start.split(':')[0]), minute=int(work_start.split(':')[1]), second=0)
+    end_dt = check_dt.replace(hour=int(work_end.split(':')[0]), minute=int(work_end.split(':')[1]), second=0)
+
+    if start_dt <= end_dt:
+        return start_dt <= check_dt <= end_dt
+    else:
+        return check_dt >= start_dt or check_dt <= end_dt
+
+
+def get_response_rating_config() -> List[Dict]:
+    """获取响应速度评级配置"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("SELECT level_name, min_seconds, max_seconds, emoji FROM response_rating_config ORDER BY min_seconds ASC")
+        config = []
+        for row in c.fetchall():
+            config.append({
+                'level_name': row[0],
+                'min_seconds': row[1],
+                'max_seconds': row[2],
+                'emoji': row[3]
+            })
+        return config
+    except Exception as e:
+        logger.error(f"获取响应评级配置失败: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+def update_response_rating_config(level_name: str, min_seconds: float, max_seconds: float, emoji: str):
+    """更新响应速度评级配置"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("""
+            UPDATE response_rating_config 
+            SET min_seconds = ?, max_seconds = ?, emoji = ?, updated_at = ?
+            WHERE level_name = ?
+        """, (min_seconds, max_seconds, emoji, int(time.time()), level_name))
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"更新响应评级配置失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def cleanup_old_response_records(months_to_keep: int = 6):
+    """清理旧的响应记录（保留指定月份数）"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        cutoff_time = int((datetime.now(timezone(timedelta(hours=8))) - timedelta(days=months_to_keep * 30)).timestamp())
+        c.execute("DELETE FROM response_records WHERE customer_message_time < ?", (cutoff_time,))
+        conn.commit()
+        return c.rowcount
+    except Exception as e:
+        logger.error(f"清理旧响应记录失败: {e}")
+        return 0
+    finally:
+        conn.close()
+
+
+def get_months_with_response_records() -> List[Dict]:
+    """获取有响应记录的月份列表"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("""
+            SELECT strftime('%Y', customer_message_time, 'unixepoch', '+8 hours') as year,
+                   strftime('%m', customer_message_time, 'unixepoch', '+8 hours') as month
+            FROM response_records
+            GROUP BY year, month
+            ORDER BY year DESC, month DESC
+        """)
+        months = []
+        for row in c.fetchall():
+            months.append({
+                'year': int(row[0]),
+                'month': int(row[1])
+            })
+        return months
+    except Exception as e:
+        logger.error(f"获取有记录的月份失败: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+def get_response_rating_for_seconds(seconds: float) -> Dict:
+    """根据秒数获取响应评级"""
+    config = get_response_rating_config()
+    for item in config:
+        if item['min_seconds'] <= seconds < item['max_seconds']:
+            return item
+    return config[-1] if config else {'level_name': '未知', 'emoji': '❓'}
