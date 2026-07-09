@@ -3,7 +3,7 @@ from telegram.ext import (
     CallbackContext, ConversationHandler, CommandHandler,
     CallbackQueryHandler, MessageHandler, filters
 )
-from auth import list_operators
+from auth import list_operators, safe_escape_markdown
 from db import (
     add_task, assign_task, get_tasks, get_task_by_id,
     get_task_assignments, get_employee_tasks, complete_task_assignment,
@@ -113,7 +113,8 @@ async def view_my_task_detail(update: Update, context: CallbackContext):
     completion_detail_text = ""
     if my_assignment and my_assignment['completion_detail']:
         completed_at_str = datetime.fromtimestamp(my_assignment['completed_at'], timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M')
-        completion_detail_text = f"\n\n✅ **完成详情**：\n{my_assignment['completion_detail']}\n\n完成时间：{completed_at_str}"
+        escaped_detail = safe_escape_markdown(my_assignment['completion_detail'])
+        completion_detail_text = f"\n\n✅ **完成详情**：\n{escaped_detail}\n\n完成时间：{completed_at_str}"
         if my_assignment['status'] == 'completed' and my_assignment.get('completion_percent', 100) < 100:
             completion_detail_text += f"\n完成度：{my_assignment['completion_percent']}%"
 
@@ -123,15 +124,17 @@ async def view_my_task_detail(update: Update, context: CallbackContext):
             keyboard.append([InlineKeyboardButton("提交任务", callback_data=f'employee_complete_task_{assignment_id}')])
         elif my_assignment['status'] == 'pending_review':
             keyboard.append([InlineKeyboardButton("⏳ 等待审核", callback_data=f'employee_wait_review_{assignment_id}')])
-
-        keyboard.append([InlineKeyboardButton("✏️ 修改任务", callback_data=f'employee_modify_task_{assignment_id}')])
+        elif my_assignment['status'] == 'completed':
+            pass
+        else:
+            keyboard.append([InlineKeyboardButton("✏️ 修改任务", callback_data=f'employee_modify_task_{assignment_id}')])
 
     keyboard.append([InlineKeyboardButton("⬅️ 返回", callback_data='employee_my_tasks')])
 
     await query.edit_message_text(
         f"📋 **任务详情**\n\n"
-        f"标题：{task['title']}\n"
-        f"描述：{task['description']}\n"
+        f"标题：{safe_escape_markdown(task['title'])}\n"
+        f"描述：{safe_escape_markdown(task['description'])}\n"
         f"截止时间：{deadline_str}\n"
         f"状态：{status_text}\n"
         f"创建时间：{created_at_str}{completion_detail_text}",
@@ -205,7 +208,8 @@ async def review_task_detail(update: Update, context: CallbackContext):
     query = update.callback_query
     await query.answer()
 
-    assignment_id = int(query.data.split('_')[-1])
+    parts = query.data.split('_')
+    assignment_id = int(parts[-1])
 
     pending_tasks = get_pending_review_tasks()
     task = next((t for t in pending_tasks if t['id'] == assignment_id), None)
@@ -234,11 +238,11 @@ async def review_task_detail(update: Update, context: CallbackContext):
 
     await query.edit_message_text(
         f"✅ **任务审核**\n\n"
-        f"员工：{task['employee_name']}\n"
-        f"任务标题：{task['title']}\n"
-        f"任务描述：{task['description']}\n"
+        f"员工：{safe_escape_markdown(task['employee_name'])}\n"
+        f"任务标题：{safe_escape_markdown(task['title'])}\n"
+        f"任务描述：{safe_escape_markdown(task['description'])}\n"
         f"截止时间：{deadline_str}\n\n"
-        f"📝 **提交详情**：\n{task['completion_detail']}\n\n"
+        f"📝 **提交详情**：\n{safe_escape_markdown(task['completion_detail'])}\n\n"
         f"提交时间：{submitted_at_str}\n\n"
         f"请选择完成百分比：",
         reply_markup=InlineKeyboardMarkup(keyboard),
@@ -255,11 +259,17 @@ async def confirm_task(update: Update, context: CallbackContext):
     completion_percent = float(parts[-1])
 
     if confirm_task_assignment(assignment_id, completion_percent):
-        await query.edit_message_text(f"✅ 任务已确认，完成度：{completion_percent}%")
+        await query.answer(f"✅ 任务已确认，完成度：{completion_percent}%")
     else:
-        await query.edit_message_text("❌ 确认失败")
+        await query.answer("❌ 确认失败")
 
     await pending_review_menu(update, context)
+
+
+async def employee_cancel(update: Update, context: CallbackContext):
+    """取消员工操作"""
+    await update.message.reply_text("✅ 已取消")
+    return ConversationHandler.END
 
 
 async def start_publish_task(update: Update, context: CallbackContext):
@@ -268,28 +278,41 @@ async def start_publish_task(update: Update, context: CallbackContext):
 
     await query.edit_message_text(
         "📝 **发布任务**\n\n"
-        "请输入任务标题：",
+        "请输入任务标题：\n"
+        "❌ 发送 /cancel 取消发布",
         parse_mode='Markdown'
     )
     return TASK_TITLE
 
 
 async def task_title(update: Update, context: CallbackContext):
-    context.user_data['task_title'] = update.message.text
+    text = update.message.text
+    if text == '/cancel':
+        await update.message.reply_text("✅ 任务发布已取消")
+        return ConversationHandler.END
+
+    context.user_data['task_title'] = text
     await update.message.reply_text(
-        "请输入任务描述：",
+        "请输入任务描述：\n"
+        "❌ 发送 /cancel 取消发布",
         parse_mode='Markdown'
     )
     return TASK_DESCRIPTION
 
 
 async def task_description(update: Update, context: CallbackContext):
-    context.user_data['task_description'] = update.message.text
+    text = update.message.text
+    if text == '/cancel':
+        await update.message.reply_text("✅ 任务发布已取消")
+        return ConversationHandler.END
+
+    context.user_data['task_description'] = text
 
     keyboard = [
         [InlineKeyboardButton("今日", callback_data='task_period_today')],
         [InlineKeyboardButton("本周", callback_data='task_period_week')],
-        [InlineKeyboardButton("本月", callback_data='task_period_month')]
+        [InlineKeyboardButton("本月", callback_data='task_period_month')],
+        [InlineKeyboardButton("❌ 取消发布", callback_data='task_cancel')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -303,6 +326,10 @@ async def task_description(update: Update, context: CallbackContext):
 async def task_period(update: Update, context: CallbackContext):
     query = update.callback_query
     await query.answer()
+
+    if query.data == 'task_cancel':
+        await query.edit_message_text("✅ 任务发布已取消")
+        return ConversationHandler.END
 
     period_type = query.data.split('_')[-1]
     context.user_data['task_period'] = period_type
@@ -331,6 +358,7 @@ async def task_period(update: Update, context: CallbackContext):
         name = op_info.get('first_name', f"员工{user_id}")
         keyboard.append([InlineKeyboardButton(f"✅ {name}", callback_data=f'task_employee_{user_id}')])
     keyboard.append([InlineKeyboardButton("✅ 确认选择", callback_data='task_employee_done')])
+    keyboard.append([InlineKeyboardButton("❌ 取消发布", callback_data='task_cancel')])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -347,6 +375,10 @@ async def task_employees(update: Update, context: CallbackContext):
     await query.answer()
 
     data = query.data
+    if data == 'task_cancel':
+        await query.edit_message_text("✅ 任务发布已取消")
+        return ConversationHandler.END
+
     if data == 'task_employee_done':
         if not context.user_data.get('selected_employees'):
             await query.edit_message_text("❌ 请至少选择一名员工")
@@ -354,7 +386,8 @@ async def task_employees(update: Update, context: CallbackContext):
 
         keyboard = [
             [InlineKeyboardButton("开启提醒", callback_data='task_remind_on')],
-            [InlineKeyboardButton("不开启提醒", callback_data='task_remind_off')]
+            [InlineKeyboardButton("不开启提醒", callback_data='task_remind_off')],
+            [InlineKeyboardButton("❌ 取消发布", callback_data='task_cancel')]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -382,6 +415,7 @@ async def task_employees(update: Update, context: CallbackContext):
         prefix = "✅ " if op_user_id in selected else "⬜ "
         keyboard.append([InlineKeyboardButton(f"{prefix}{name}", callback_data=f'task_employee_{op_user_id}')])
     keyboard.append([InlineKeyboardButton("✅ 确认选择", callback_data='task_employee_done')])
+    keyboard.append([InlineKeyboardButton("❌ 取消发布", callback_data='task_cancel')])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -397,6 +431,10 @@ async def task_remind(update: Update, context: CallbackContext):
     await query.answer()
 
     data = query.data
+    if data == 'task_cancel':
+        await query.edit_message_text("✅ 任务发布已取消")
+        return ConversationHandler.END
+
     if data == 'task_remind_on':
         context.user_data['task_remind_enabled'] = 1
 
@@ -487,8 +525,8 @@ async def notify_task_assignment(bot, task_id, title, description, deadline):
                 await bot.send_message(
                     chat_id=assignment['employee_id'],
                     text=f"📋 **新任务通知**\n\n"
-                         f"任务标题：{title}\n"
-                         f"任务描述：{description}\n"
+                         f"任务标题：{safe_escape_markdown(title)}\n"
+                         f"任务描述：{safe_escape_markdown(description)}\n"
                          f"截止时间：{deadline_str}\n\n"
                          f"请按时完成任务！",
                     parse_mode='Markdown',
@@ -560,10 +598,10 @@ async def view_task_detail(update: Update, context: CallbackContext):
     employee_list = ""
     for a in assignments:
         status_text = '✅ 已完成' if a['status'] == 'completed' else '⏳ 进行中'
-        employee_list += f"• {a['employee_name']} - {status_text}\n"
+        employee_list += f"• {safe_escape_markdown(a['employee_name'])} - {status_text}\n"
         if a['status'] == 'completed' and a['completion_detail']:
             completed_at_str = datetime.fromtimestamp(a['completed_at'], timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M')
-            employee_list += f"  └─ 完成详情：{a['completion_detail']}\n  └─ 完成时间：{completed_at_str}\n"
+            employee_list += f"  └─ 完成详情：{safe_escape_markdown(a['completion_detail'])}\n  └─ 完成时间：{completed_at_str}\n"
 
     keyboard = [
         [InlineKeyboardButton("删除任务", callback_data=f'employee_delete_task_{task_id}')],
@@ -572,9 +610,9 @@ async def view_task_detail(update: Update, context: CallbackContext):
 
     await query.edit_message_text(
         f"📋 **任务详情**\n\n"
-        f"标题：{task['title']}\n"
-        f"描述：{task['description']}\n"
-        f"周期：{task['period_type']}\n"
+        f"标题：{safe_escape_markdown(task['title'])}\n"
+        f"描述：{safe_escape_markdown(task['description'])}\n"
+        f"周期：{safe_escape_markdown(task['period_type'])}\n"
         f"截止时间：{deadline_str}\n"
         f"提醒：{remind_text}\n"
         f"状态：{status_text}\n"
@@ -613,19 +651,43 @@ async def view_employee_task(update: Update, context: CallbackContext):
         await query.edit_message_text("❌ 任务不存在")
         return
 
+    assignments = get_task_assignments(task_id)
+    my_assignment = next((a for a in assignments if a['id'] == assignment_id), None)
+
     deadline_str = datetime.fromtimestamp(task['deadline'], timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M')
 
-    keyboard = [[InlineKeyboardButton("完成任务", callback_data=f'employee_complete_task_{assignment_id}')]]
+    keyboard = []
+    if my_assignment:
+        if my_assignment['status'] == 'pending':
+            keyboard.append([InlineKeyboardButton("提交任务", callback_data=f'employee_complete_task_{assignment_id}')])
+        elif my_assignment['status'] == 'pending_review':
+            keyboard.append([InlineKeyboardButton("⏳ 等待审核", callback_data=f'employee_wait_review_{assignment_id}')])
+
+    keyboard.append([InlineKeyboardButton("⬅️ 返回", callback_data='employee_my_tasks')])
+
+    status_text = "未提交"
+    if my_assignment:
+        if my_assignment['status'] == 'completed':
+            status_text = "已完成"
+        elif my_assignment['status'] == 'pending_review':
+            status_text = "待审核"
 
     await query.edit_message_text(
         f"📋 **任务详情**\n\n"
         f"标题：{task['title']}\n"
         f"描述：{task['description']}\n"
-        f"截止时间：{deadline_str}\n\n"
-        f"请完成此任务后点击下方按钮",
+        f"截止时间：{deadline_str}\n"
+        f"状态：{status_text}",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
     )
+
+
+async def wait_review_handler(update: Update, context: CallbackContext):
+    query = update.callback_query
+    await query.answer()
+
+    await query.answer("⏳ 任务正在等待管理员审核，请耐心等待")
 
 
 async def complete_task(update: Update, context: CallbackContext):
@@ -957,7 +1019,7 @@ async def progress_detail(update: Update, context: CallbackContext):
     tasks = get_employee_tasks(employee_id)
 
     task_list = "\n".join([
-        f"{'✅' if t['assignment_status'] == 'completed' else '⏳'} {t['title']} - "
+        f"{'✅' if t['assignment_status'] == 'completed' else '⏳'} {safe_escape_markdown(t['title'])} - "
         f"{datetime.fromtimestamp(t['deadline'], timezone(timedelta(hours=8))).strftime('%m-%d')}"
         for t in tasks
     ]) if tasks else "暂无任务"
@@ -965,7 +1027,7 @@ async def progress_detail(update: Update, context: CallbackContext):
     keyboard = [[InlineKeyboardButton("⬅️ 返回", callback_data='employee_task_progress')]]
 
     await query.edit_message_text(
-        f"📊 **{emp_name} 的任务进度**\n\n"
+        f"📊 **{safe_escape_markdown(emp_name)} 的任务进度**\n\n"
         f"总任务：{summary['total']}\n"
         f"已完成：{summary['completed']}\n"
         f"进行中：{summary['pending']}\n"
@@ -1061,12 +1123,12 @@ def register_employee_handlers(application):
         states={
             TASK_TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, task_title)],
             TASK_DESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, task_description)],
-            TASK_PERIOD: [CallbackQueryHandler(task_period, pattern='^task_period_')],
-            TASK_EMPLOYEES: [CallbackQueryHandler(task_employees, pattern='^task_employee_')],
-            TASK_REMIND: [CallbackQueryHandler(task_remind, pattern='^task_remind_')],
+            TASK_PERIOD: [CallbackQueryHandler(task_period, pattern='^task_period_'), CallbackQueryHandler(task_period, pattern='^task_cancel$')],
+            TASK_EMPLOYEES: [CallbackQueryHandler(task_employees, pattern='^task_employee_'), CallbackQueryHandler(task_employees, pattern='^task_cancel$')],
+            TASK_REMIND: [CallbackQueryHandler(task_remind, pattern='^task_remind_'), CallbackQueryHandler(task_remind, pattern='^task_cancel$')],
             TASK_CONFIRM: [CallbackQueryHandler(task_confirm, pattern='^task_confirm_')],
         },
-        fallbacks=[CallbackQueryHandler(employee_menu, pattern='^employee_menu$')],
+        fallbacks=[CallbackQueryHandler(employee_menu, pattern='^employee_menu$'), CommandHandler('cancel', employee_cancel)],
         allow_reentry=True
     )
 
@@ -1112,6 +1174,7 @@ def register_employee_handlers(application):
     application.add_handler(CallbackQueryHandler(view_task_detail, pattern='^employee_view_task_detail_'), group=-1)
     application.add_handler(CallbackQueryHandler(delete_task_handler, pattern='^employee_delete_task_'), group=-1)
     application.add_handler(CallbackQueryHandler(view_employee_task, pattern='^employee_view_task_'), group=-1)
+    application.add_handler(CallbackQueryHandler(wait_review_handler, pattern='^employee_wait_review_'), group=-1)
     application.add_handler(CallbackQueryHandler(set_salary_menu, pattern='^employee_set_salary$'), group=-1)
     application.add_handler(CallbackQueryHandler(incentive_settings_menu, pattern='^employee_incentive_settings$'), group=-1)
     application.add_handler(CallbackQueryHandler(toggle_incentive, pattern='^employee_toggle_incentive_'), group=-1)
