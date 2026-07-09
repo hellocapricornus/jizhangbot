@@ -7,8 +7,9 @@ from datetime import datetime, timedelta, timezone
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
 from handlers.menu import get_main_menu
-from auth import is_authorized, OWNER_ID
-from db import get_monitored_addresses, get_user_preferences, set_user_preference
+from auth import is_authorized, OWNER_ID, safe_escape_markdown
+from db import get_monitored_addresses, get_user_preferences, set_user_preference, \
+    get_employee_response_stats, get_employee_work_time, get_response_rating_for_seconds
 from handlers.accounting import get_today_beijing
 from handlers.monitor import get_trc20_transactions
 from logger import bot_logger as logger
@@ -81,29 +82,14 @@ async def _build_profile_menu(user_id: int, prefs: dict = None, display_name: st
 
     keyboard = []
 
-    # 个人记账统计：控制人、正式操作员、临时操作员可见
-    if full_access or limited_access:
-        keyboard.append([InlineKeyboardButton("📊 个人记账统计", callback_data="profile_stats")])
-
     # 监控交易提醒：仅完整权限且添加了监控地址时显示
     if full_access and addresses:
         notify = "🟢 已开启" if prefs["monitor_notify"] else "🔴 已关闭"
         keyboard.append([InlineKeyboardButton(f"🔔 监控交易提醒：{notify}", callback_data="profile_toggle_notify")])
 
-    # 联系管理员：非超级管理员可见
-    if user_id != OWNER_ID:
-        keyboard.append([InlineKeyboardButton("📞 联系管理员", callback_data="profile_contact")])
-
-    # 默认群发附言、数据分析导出：仅完整权限
+    # 默认群发附言：仅完整权限
     if full_access:
         keyboard.append([InlineKeyboardButton("📝 默认群发附言", callback_data="profile_signature")])
-        # 早报：仅完整权限可见
-        if is_authorized(user_id, require_full_access=True):
-            prefs_early = prefs if prefs else get_user_preferences(user_id)
-            report_enabled = prefs_early.get('daily_report_enabled', False)
-            status = "🟢 已开启" if report_enabled else "🔴 已关闭"
-            keyboard.append([InlineKeyboardButton(f"📋 每日早报 {status}", callback_data="profile_report_toggle")])
-        keyboard.append([InlineKeyboardButton("📈 数据分析导出", callback_data="profile_export")])
 
     # ========== 规则管理（仅完整权限可见） ==========
     if full_access:
@@ -115,6 +101,10 @@ async def _build_profile_menu(user_id: int, prefs: dict = None, display_name: st
     # ========== 业绩汇总（所有有权限的人可见） ==========
     if full_access:
         keyboard.append([InlineKeyboardButton("📊 业绩汇总", callback_data="profile_performance_menu")])
+
+    # ========== 响应速度（所有有权限的人可见） ==========
+    if is_authorized(user_id):
+        keyboard.append([InlineKeyboardButton("⚡ 员工响应速度", callback_data="response_speed_menu")])
 
     # ========== 员工管理（超级管理员）/ 我的任务（员工） ==========
     if user_id == OWNER_ID:
@@ -130,11 +120,26 @@ async def _build_profile_menu(user_id: int, prefs: dict = None, display_name: st
     else:
         notify_status = ""
     user_info_line = f"👤 用户名：{display_name}\n" if display_name else ""
+
+    response_info = ""
+    if is_authorized(user_id):
+        now = datetime.now(timezone(timedelta(hours=8)))
+        response_stats = get_employee_response_stats(user_id, now.year, now.month)
+        if response_stats['total_count'] > 0:
+            avg_time = response_stats['avg_response_seconds']
+            rating = get_response_rating_for_seconds(avg_time)
+            response_info = f"⚡ 本月响应速度：{int(avg_time // 60)}分{int(avg_time % 60)}秒 {rating['emoji']}\n"
+
+        work_time = get_employee_work_time(user_id)
+        if work_time:
+            response_info += f"⏰ 工作时间：{work_time['work_start']}-{work_time['work_end']}\n"
+
     text = (f"👤 个人中心\n\n"
             f"{user_info_line}"
             f"🆔 用户 ID：`{user_id}`\n"
             f"🏷️ 当前身份：{role}\n"
             f"{notify_status}"
+            f"{response_info}"
             )
     return text, InlineKeyboardMarkup(keyboard)
 
@@ -980,8 +985,8 @@ async def profile_rule_add_name_input(update: Update, context: ContextTypes.DEFA
     existing = get_rule(text)
     if existing and existing['is_active']:
         await update.message.reply_text(
-            f"⚠️ 规则「{text}」已存在\n"
-            f"内容：{existing['rule_content'][:100]}\n\n"
+            f"⚠️ 规则「{safe_escape_markdown(text)}」已存在\n"
+            f"内容：{safe_escape_markdown(existing['rule_content'][:100])}\n\n"
             f"请使用其他名称，或先删除后再添加：\n"
             f"❌ 发送 /cancel 取消"
         )
@@ -1079,8 +1084,8 @@ async def profile_rule_view_all(update: Update, context: ContextTypes.DEFAULT_TY
     keyboard = []
     for rule in rules:
         # 显示规则名称和内容预览（前30个字符）
-        content_preview = rule['rule_content'][:40]
-        text += f"📌 **{rule['rule_name']}**\n"
+        content_preview = safe_escape_markdown(rule['rule_content'][:40])
+        text += f"📌 **{safe_escape_markdown(rule['rule_name'])}**\n"
         text += f"   {content_preview}{'...' if len(rule['rule_content']) > 40 else ''}\n\n"
 
         keyboard.append([InlineKeyboardButton(
@@ -1113,7 +1118,7 @@ async def profile_rule_update_select(update: Update, context: ContextTypes.DEFAU
     text = "✏️ **选择要更新的规则**\n\n"
     keyboard = []
     for rule in rules:
-        text += f"📌 {rule['rule_name']}\n"
+        text += f"📌 {safe_escape_markdown(rule['rule_name'])}\n"
         keyboard.append([InlineKeyboardButton(f"✏️ {rule['rule_name']}", callback_data=f"profile_rule_upd_{rule['rule_name']}")])
 
     keyboard.append([InlineKeyboardButton("◀️ 返回规则管理", callback_data="profile_rules_menu")])
@@ -1287,8 +1292,8 @@ async def profile_rule_detail(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.message.edit_text("❌ 规则不存在")
         return RULE_VIEW
 
-    text = f"📋 **{rule['rule_name']}规则**\n\n"
-    text += f"{rule['rule_content']}\n\n"
+    text = f"📋 **{safe_escape_markdown(rule['rule_name'])}规则**\n\n"
+    text += f"{safe_escape_markdown(rule['rule_content'])}\n\n"
 
     created_time = datetime.fromtimestamp(rule['created_at']).strftime('%Y-%m-%d %H:%M')
     updated_time = datetime.fromtimestamp(rule['updated_at']).strftime('%Y-%m-%d %H:%M')
