@@ -5350,7 +5350,7 @@ def parse_batch_settings(text: str):
 
     clean_text = re.sub(r'@\S+', '', text)
 
-    fee_match = re.search(r'(?:设置)?手续费\s*(\d+(?:\.\d+)?)', clean_text)
+    fee_match = re.search(r'(?:设置)?手续费\s*(-?\d+(?:\.\d+)?)', clean_text)
     if fee_match:
         fee_rate = float(fee_match.group(1))
 
