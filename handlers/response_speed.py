@@ -1,6 +1,7 @@
 # handlers/response_speed.py
 
 import asyncio
+import re
 import time
 from datetime import datetime, timezone, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -25,6 +26,61 @@ RESPONSE_RATING_EDIT = 7
 
 pending_customer_messages = {}
 
+# ========== 结束语词典：客户发送这些消息时不计入响应统计 ==========
+CLOSING_WORDS = {
+    '到', '好的', '收到', '谢谢', '嗯', '行', 'ok', '了解', '明白', '1',
+    '好的谢谢', '好的收到', '收到谢谢', '嗯嗯', '行吧', '好的呢',
+}
+CLOSING_EMOJIS = {'👍', '👌', '🙏', '😊', '✅', '😄', '😁', '🆗', '💯'}
+
+# ========== 机器人触发指令模式：触发机器人回复的消息不计入响应统计 ==========
+BOT_TRIGGER_PATTERNS = [
+    r'^[+-]\d',                                                           # 记账：+100 或 -100
+    r'^下发',                                                              # 下发100u
+    r'^设置(手续费|汇率|单笔费用)',                                        # 设置命令
+    r'^(今日总|总|当前账单|查询账单|导出账单|清理账单|清空账单|清理总账单|清空总账单|清空所有账单|移除上一笔|删除上一笔|撤销账单|结束账单)$',  # 账单命令
+    r'^(查看配置|查看设置)$',                                              # 查看配置
+    r'^(添加操作人|删除操作人)',                                           # 操作人管理
+    r'^发送.+规则$',                                                       # 规则查询
+    r'^T[1-9A-HJ-NP-Za-km-z]{33}$',                                      # TRC20地址查询
+    r'^0x[0-9a-fA-F]{40}$',                                              # ERC20地址查询
+]
+BOT_TRIGGER_REGEXES = [re.compile(p) for p in BOT_TRIGGER_PATTERNS]
+
+# 计算器表达式匹配：包含数字和运算符的表达式
+CALC_PATTERN = re.compile(r'^[\d.+\-*/%() ^]+$')
+
+
+def is_closing_message(text: str) -> bool:
+    """判断是否为结束语消息"""
+    if not text:
+        return False
+    text_stripped = text.strip().lower()
+    if text_stripped in CLOSING_WORDS:
+        return True
+    # 检查纯表情消息
+    if text_stripped in CLOSING_EMOJIS:
+        return True
+    return False
+
+
+def is_bot_trigger_message(text: str) -> bool:
+    """判断是否为触发机器人回复的消息"""
+    if not text:
+        return False
+    text_stripped = text.strip()
+    # 匹配机器人指令模式
+    for regex in BOT_TRIGGER_REGEXES:
+        if regex.search(text_stripped):
+            return True
+    # 匹配计算器表达式（必须包含运算符，排除纯数字）
+    if CALC_PATTERN.match(text_stripped):
+        has_operator = any(op in text_stripped for op in ['+', '-', '*', '/', '%', '^', '('])
+        has_digit = any(c.isdigit() for c in text_stripped)
+        if has_operator and has_digit:
+            return True
+    return False
+
 
 def format_seconds(seconds: float) -> str:
     """格式化秒数为可读时间"""
@@ -48,6 +104,11 @@ async def monitor_group_messages(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     message = update.message
+
+    # 防御：服务消息等可能没有 from_user
+    if not message.from_user:
+        return
+
     chat_id = message.chat_id
     user_id = message.from_user.id
     message_time = int(message.date.timestamp())
@@ -55,6 +116,7 @@ async def monitor_group_messages(update: Update, context: ContextTypes.DEFAULT_T
     operators = list_operators()
 
     if user_id in operators:
+        # 操作员分支：任何消息类型（文本/表情/Sticker/图片/文件）都算响应
         if chat_id in pending_customer_messages and pending_customer_messages[chat_id]:
             sorted_msg_ids = sorted(pending_customer_messages[chat_id].keys())
             latest_msg_id = sorted_msg_ids[-1]
@@ -82,7 +144,15 @@ async def monitor_group_messages(update: Update, context: ContextTypes.DEFAULT_T
 
             pending_customer_messages[chat_id] = {}
     else:
-        if message.text and message.text.startswith('/'):
+        # 客户分支
+        # 命令消息已被外层 filters.COMMAND 过滤，此处无需再检查
+
+        # 过滤结束语：客户发送结束语不计入响应统计
+        if is_closing_message(message.text):
+            return
+
+        # 过滤机器人触发指令：触发机器人回复的消息不计入响应统计
+        if is_bot_trigger_message(message.text):
             return
 
         customer_msg_time = message_time
