@@ -1947,18 +1947,18 @@ def main():
         handle_group_message
     ), group=1)
 
-    # 响应速度监控
+    # 响应速度监控（支持所有消息类型：文本/表情/Sticker/图片等）
     from handlers.response_speed import monitor_group_messages
     app.add_handler(MessageHandler(
-        filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND,
+        filters.ChatType.GROUPS & ~filters.COMMAND & ~filters.StatusUpdate.ALL,
         monitor_group_messages
     ), group=2)
 
-    # 全局群组消息
+    # 全局群组消息（独立 group，避免被 monitor 抢占）
     app.add_handler(MessageHandler(
         filters.ChatType.GROUPS & ~filters.COMMAND, 
         auto_save_group
-    ), group=2)
+    ), group=4)
 
     app.add_handler(ChatMemberHandler(on_bot_join_or_leave, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(get_service_message_handler())
