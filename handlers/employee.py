@@ -124,8 +124,9 @@ async def view_my_task_detail(update: Update, context: CallbackContext):
             keyboard.append([InlineKeyboardButton("提交任务", callback_data=f'employee_complete_task_{assignment_id}')])
         elif my_assignment['status'] == 'pending_review':
             keyboard.append([InlineKeyboardButton("⏳ 等待审核", callback_data=f'employee_wait_review_{assignment_id}')])
+            keyboard.append([InlineKeyboardButton("✏️ 修改任务", callback_data=f'employee_modify_task_{assignment_id}')])
         elif my_assignment['status'] == 'completed':
-            pass
+            keyboard.append([InlineKeyboardButton("✏️ 修改任务", callback_data=f'employee_modify_task_{assignment_id}')])
         else:
             keyboard.append([InlineKeyboardButton("✏️ 修改任务", callback_data=f'employee_modify_task_{assignment_id}')])
 
@@ -662,6 +663,9 @@ async def view_employee_task(update: Update, context: CallbackContext):
             keyboard.append([InlineKeyboardButton("提交任务", callback_data=f'employee_complete_task_{assignment_id}')])
         elif my_assignment['status'] == 'pending_review':
             keyboard.append([InlineKeyboardButton("⏳ 等待审核", callback_data=f'employee_wait_review_{assignment_id}')])
+            keyboard.append([InlineKeyboardButton("✏️ 修改任务", callback_data=f'employee_modify_task_{assignment_id}')])
+        elif my_assignment['status'] == 'completed':
+            keyboard.append([InlineKeyboardButton("✏️ 修改任务", callback_data=f'employee_modify_task_{assignment_id}')])
 
     keyboard.append([InlineKeyboardButton("⬅️ 返回", callback_data='employee_my_tasks')])
 
