@@ -1654,7 +1654,7 @@ def main():
     fix_joined_at()
     init_operators_from_db()
 
-    from handlers.accounting import init_accounting, handle_group_message
+    from handlers.accounting import init_accounting, handle_group_message, check_daily_cutoff
     init_accounting(DB_PATH)
 
     # 🔥 关键修改：使用 concurrent_updates 支持并发处理
@@ -1999,6 +1999,21 @@ def main():
                     logger.warning(f"任务检查失败: {e}")
                     await asyncio.sleep(60)
         asyncio.create_task(task_reminder_loop())
+
+        async def daily_cutoff_loop():
+            await asyncio.sleep(30)
+            class ContextWrapper:
+                def __init__(self, bot):
+                    self.bot = bot
+            ctx = ContextWrapper(app.bot)
+            while True:
+                try:
+                    await check_daily_cutoff(ctx)
+                    await asyncio.sleep(300)
+                except Exception as e:
+                    logger.warning(f"日切检查失败: {e}")
+                    await asyncio.sleep(300)
+        asyncio.create_task(daily_cutoff_loop())
 
     app.post_init = post_init
 
