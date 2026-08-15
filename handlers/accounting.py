@@ -1156,6 +1156,12 @@ class AccountingManager:
                 # 3. 除以汇率
                 amount_usdt = with_fee / actual_rate
 
+                # 🔥 手续费为负数时，默认分配到"代付"分组，USDT 取负值
+                if actual_fee_rate < 0:
+                    if not category:
+                        category = "代付"
+                    amount_usdt = -abs(amount_usdt)
+
                 # 保存当前手续费率到记录中
                 current_fee_rate = actual_fee_rate
                 current_per_fee = actual_per_fee  # ✅ 使用 actual_per_fee
