@@ -184,26 +184,36 @@ def generate_export_html(records: List[Dict], group_name: str, start_date: str, 
                 per_transaction_fee = r.get('per_transaction_fee', 0)
             break
 
-    # 按日期分组
+    # 按日期分组（分离代付记录 fee_rate<0）
     records_by_date = {}
     for r in records:
         date = r.get('date', '')
         if date not in records_by_date:
-            records_by_date[date] = {'income': [], 'expense': [], 'stats': {'income_cny': 0, 'income_usdt': 0, 'expense_usdt': 0}}
+            records_by_date[date] = {
+                'income': [], 'daifu': [], 'expense': [],
+                'stats': {'income_cny': 0, 'income_usdt': 0, 'daifu_cny': 0, 'daifu_usdt': 0, 'expense_usdt': 0}
+            }
 
-        if r['type'] == 'income':
+        if r['type'] == 'income' and r.get('fee_rate', 0) >= 0:
             records_by_date[date]['income'].append(r)
             records_by_date[date]['stats']['income_cny'] += r['amount']
             records_by_date[date]['stats']['income_usdt'] += r['amount_usdt']
+        elif r['type'] == 'income' and r.get('fee_rate', 0) < 0:
+            records_by_date[date]['daifu'].append(r)
+            records_by_date[date]['stats']['daifu_cny'] += r['amount']
+            records_by_date[date]['stats']['daifu_usdt'] += r['amount_usdt']
         else:
             records_by_date[date]['expense'].append(r)
             records_by_date[date]['stats']['expense_usdt'] += r['amount_usdt']
 
     # 计算总计
-    total_income_cny = sum(r['amount'] for r in records if r['type'] == 'income')
-    total_income_usdt = sum(r['amount_usdt'] for r in records if r['type'] == 'income')
+    total_income_cny = sum(r['amount'] for r in records if r['type'] == 'income' and r.get('fee_rate', 0) >= 0)
+    total_income_usdt = sum(r['amount_usdt'] for r in records if r['type'] == 'income' and r.get('fee_rate', 0) >= 0)
+    total_daifu_cny = sum(r['amount'] for r in records if r['type'] == 'income' and r.get('fee_rate', 0) < 0)
+    total_daifu_usdt = sum(r['amount_usdt'] for r in records if r['type'] == 'income' and r.get('fee_rate', 0) < 0)
+    total_daifu_count = sum(1 for r in records if r['type'] == 'income' and r.get('fee_rate', 0) < 0)
     total_expense_usdt = sum(r['amount_usdt'] for r in records if r['type'] == 'expense')
-    total_pending = total_income_usdt - total_expense_usdt
+    total_pending = total_income_usdt + total_daifu_usdt - total_expense_usdt
 
     # 获取费率、汇率和单笔费用
     fee_rate = 0
@@ -236,23 +246,37 @@ def generate_export_html(records: List[Dict], group_name: str, start_date: str, 
             return str(int(num))
         return f"{num:.{decimals}f}"
 
-    # ========== 按操作人分组 ==========
+    # ========== 按操作人分组（分离代付 fee_rate<0） ==========
     operator_income = {}
+    operator_daifu = {}
     for r in records:
         if r['type'] == 'income':
             operator = r.get('display_name', r.get('username', '未知'))
             user_id = r.get('user_id', 0)
             key = f"op_{user_id}_{hash(operator) % 10000}"
-            if key not in operator_income:
-                operator_income[key] = {
-                    'name': operator,
-                    'records': [],
-                    'total_cny': 0.0,
-                    'total_usdt': 0.0,
-                }
-            operator_income[key]['records'].append(r)
-            operator_income[key]['total_cny'] += r['amount']
-            operator_income[key]['total_usdt'] += r['amount_usdt']
+            is_daifu = r.get('fee_rate', 0) < 0
+            if not is_daifu:
+                if key not in operator_income:
+                    operator_income[key] = {
+                        'name': operator,
+                        'records': [],
+                        'total_cny': 0.0,
+                        'total_usdt': 0.0,
+                    }
+                operator_income[key]['records'].append(r)
+                operator_income[key]['total_cny'] += r['amount']
+                operator_income[key]['total_usdt'] += r['amount_usdt']
+            else:
+                if key not in operator_daifu:
+                    operator_daifu[key] = {
+                        'name': operator,
+                        'records': [],
+                        'total_cny': 0.0,
+                        'total_usdt': 0.0,
+                    }
+                operator_daifu[key]['records'].append(r)
+                operator_daifu[key]['total_cny'] += r['amount']
+                operator_daifu[key]['total_usdt'] += r['amount_usdt']
 
     operator_expense = {}
     for r in records:
@@ -271,28 +295,49 @@ def generate_export_html(records: List[Dict], group_name: str, start_date: str, 
 
     # ========== 生成每个操作人的可折叠记录（按日期分组） ==========
     operator_sections = ""
-    all_operator_keys = set(list(operator_income.keys()) + list(operator_expense.keys()))
+    all_operator_keys = set(list(operator_income.keys()) + list(operator_daifu.keys()) + list(operator_expense.keys()))
 
     if all_operator_keys:
         for idx, key in enumerate(sorted(all_operator_keys, key=lambda k: operator_income.get(k, {}).get('total_cny', 0), reverse=True)):
             safe_key = key.replace('.', '_').replace('-', '_')
             op_income = operator_income.get(key, {})
+            op_daifu = operator_daifu.get(key, {})
             op_expense = operator_expense.get(key, {})
 
-            name = op_income.get('name') or op_expense.get('name', '未知')
+            name = op_income.get('name') or op_daifu.get('name') or op_expense.get('name', '未知')
             income_count = len(op_income.get('records', []))
             income_cny = op_income.get('total_cny', 0)
             income_usdt = op_income.get('total_usdt', 0)
+            daifu_count = len(op_daifu.get('records', []))
+            daifu_cny = op_daifu.get('total_cny', 0)
+            daifu_usdt = op_daifu.get('total_usdt', 0)
             expense_count = len(op_expense.get('records', []))
             expense_usdt = op_expense.get('total_usdt', 0)
 
-            # ✅ 按日期分组
+            # ✅ 头部：拼接所有部分
+            header_parts = [f"👤 {name}"]
+            if income_count:
+                header_parts.append(f"入款{income_count}笔 {fmt(income_cny)}元 ≈ {fmt(income_usdt)}USDT")
+            if daifu_count:
+                header_parts.append(f"代付{daifu_count}笔 {fmt(daifu_cny)}元 ≈ {fmt(daifu_usdt)}USDT")
+            if expense_count:
+                header_parts.append(f"出款{expense_count}笔 {fmt(expense_usdt)}USDT")
+            header_text = " · ".join(header_parts)
+
+            # ✅ 按日期分组（入款 / 代付 / 出款）
             op_income_by_date = {}
             for r in op_income.get('records', []):
                 date = r.get('date', '未知日期')
                 if date not in op_income_by_date:
                     op_income_by_date[date] = []
                 op_income_by_date[date].append(r)
+
+            op_daifu_by_date = {}
+            for r in op_daifu.get('records', []):
+                date = r.get('date', '未知日期')
+                if date not in op_daifu_by_date:
+                    op_daifu_by_date[date] = []
+                op_daifu_by_date[date].append(r)
 
             op_expense_by_date = {}
             for r in op_expense.get('records', []):
@@ -304,7 +349,7 @@ def generate_export_html(records: List[Dict], group_name: str, start_date: str, 
             operator_sections += f'''
         <div class="date-group operator-group">
             <div class="date-header" onclick="toggleSection(this)">
-                <span>👤 {name} · 入款{income_count}笔 {fmt(income_cny)}元 ≈ {fmt(income_usdt)}USDT · 出款{expense_count}笔 {fmt(expense_usdt)}USDT</span>
+                <span>{header_text}</span>
                 <span class="toggle-icon">▼</span>
             </div>
             <div class="date-content">
@@ -349,6 +394,45 @@ def generate_export_html(records: List[Dict], group_name: str, start_date: str, 
                 </table>
 '''
 
+            # ✅ 按日期显示代付
+            for date, date_records in sorted(op_daifu_by_date.items()):
+                date_cny = sum(r['amount'] for r in date_records)
+                date_usdt = sum(r['amount_usdt'] for r in date_records)
+                operator_sections += f'''
+                <div class="section-title" style="border-left-color:#8b5cf6;color:#8b5cf6;">📤 {date} · 代付{len(date_records)}笔 · {fmt(date_cny)}元 ≈ {fmt(date_usdt)}USDT</div>
+                <table>
+                    <thead>
+                        <tr><th>时间</th><th>金额(元)</th><th>手续费</th><th>汇率</th><th>单笔费用</th><th>USDT</th><th>分类</th></tr>
+                    </thead>
+                    <tbody>
+'''
+                for r in date_records:
+                    dt = beijing_time(r['created_at'])
+                    time_str = dt.strftime('%H:%M')
+                    cat = r.get('category', '') or ''
+                    flag = get_flag(cat)
+                    cat_display = f"{flag} {cat}" if flag else (cat or '无')
+                    fr = r.get('fee_rate', 0)
+                    rate = r.get('rate', 0)
+                    per_fee = r.get('per_transaction_fee', 0)
+                    fee_display = f"{fmt(fr)}%" if fr == int(fr) else f"{fr}%"
+                    rate_display = fmt(rate) if rate == int(rate) else f"{rate:.2f}"
+                    per_fee_display = f"{fmt(per_fee)}元" if per_fee > 0 else "-"
+                    operator_sections += f'''
+                        <tr>
+                            <td class="record-time">{time_str}</td>
+                            <td class="record-amount" style="color:#8b5cf6;">-{fmt(r['amount'])}</td>
+                            <td class="record-fee">{fee_display}</td>
+                            <td>{rate_display}</td>
+                            <td>{per_fee_display}</td>
+                            <td style="color:#8b5cf6;">{fmt(r['amount_usdt'])}</td>
+                            <td>{cat_display}</td>
+                        </tr>'''
+                operator_sections += '''
+                    </tbody>
+                </table>
+'''
+
             # ✅ 按日期显示出款
             for date, date_records in sorted(op_expense_by_date.items()):
                 date_usdt = sum(r['amount_usdt'] for r in date_records)
@@ -377,6 +461,18 @@ def generate_export_html(records: List[Dict], group_name: str, start_date: str, 
             </div>
         </div>
 '''
+
+    # 条件式的代付汇总卡片（避免嵌套 f-string）
+    if total_daifu_count > 0:
+        daifu_summary_card = f'''
+            <div class="summary-card" style="border-bottom: 4px solid #8b5cf6;">
+                <div class="label" style="color:#8b5cf6;">📤 总出款</div>
+                <div class="value" style="color:#8b5cf6;">{total_daifu_cny:.2f} 元</div>
+                <div class="value" style="font-size: 18px; color:#8b5cf6;">≈ {total_daifu_usdt:.2f} USDT</div>
+            </div>
+'''
+    else:
+        daifu_summary_card = ""
 
     # 生成 HTML
     html = f'''<!DOCTYPE html>
@@ -493,8 +589,9 @@ def generate_export_html(records: List[Dict], group_name: str, start_date: str, 
                 <div class="value">{total_income_cny:.2f} 元</div>
                 <div class="value" style="font-size: 18px;">≈ {total_income_usdt:.2f} USDT</div>
             </div>
+            {daifu_summary_card}
             <div class="summary-card expense">
-                <div class="label">📤 总下发</div>
+                <div class="label">📤 已下发</div>
                 <div class="value">{total_expense_usdt:.2f} USDT</div>
             </div>
             <div class="summary-card pending">
@@ -509,15 +606,26 @@ def generate_export_html(records: List[Dict], group_name: str, start_date: str, 
         date_obj = datetime.strptime(date, '%Y-%m-%d')
         date_display = date_obj.strftime('%Y年%m月%d日')
         income_count = len(data['income'])
+        daifu_count = len(data['daifu'])
         expense_count = len(data['expense'])
         income_usdt = data['stats']['income_usdt']
+        daifu_usdt = data['stats']['daifu_usdt']
         expense_usdt = data['stats']['expense_usdt']
-        day_pending = income_usdt - expense_usdt
+        day_pending = income_usdt + daifu_usdt - expense_usdt
+
+        header_parts = []
+        if income_count:
+            header_parts.append(f"{income_count}笔入款")
+        if daifu_count:
+            header_parts.append(f"{daifu_count}笔代付")
+        if expense_count:
+            header_parts.append(f"{expense_count}笔出款")
+        header_text = " / ".join(header_parts)
 
         html += f'''
         <div class="date-group">
             <div class="date-header" onclick="toggleSection(this)">
-                <span>📅 {date_display} ({income_count}笔入款 / {expense_count}笔出款)</span>
+                <span>📅 {date_display} ({header_text})</span>
                 <span class="toggle-icon">▼</span>
             </div>
             <div class="date-content">
@@ -556,8 +664,64 @@ def generate_export_html(records: List[Dict], group_name: str, start_date: str, 
                             <td>{operator}</td>
                         </tr>
 '''
-            html += '''
+            day_income_cny = sum(r['amount'] for r in data['income'])
+            html += f'''
                     </tbody>
+                    <tfoot>
+                        <tr style="background:#10b981;color:white;font-weight:600;">
+                            <td>📊 本日入款</td>
+                            <td>{fmt(day_income_cny)} 元</td>
+                            <td colspan="4"></td>
+                            <td colspan="2">≈ {fmt(income_usdt)} USDT</td>
+                        </tr>
+                    </tfoot>
+                </table>
+'''
+
+        if data['daifu']:
+            html += f'''
+                <div class="section-title" style="border-left-color:#8b5cf6; color:#8b5cf6;">📤 代付出款记录</div>
+                <table>
+                    <thead>
+                        <tr><th>日期时间</th><th>金额(元)</th><th>手续费</th><th>汇率</th><th>单笔费用</th><th>USDT</th><th>分类</th><th>操作人</th></tr>
+                    </thead>
+                    <tbody>
+'''
+            for r in data['daifu']:
+                dt = beijing_time(r['created_at'])
+                time_str = dt.strftime('%m-%d %H:%M')
+                fee_rate_r = r.get('fee_rate', 0)
+                rate_r = r.get('rate', 0)
+                per_fee = r.get('per_transaction_fee', 0)
+                fee_display = f"{fmt(fee_rate_r)}%" if fee_rate_r == int(fee_rate_r) else f"{fee_rate_r}%"
+                rate_display = fmt(rate_r) if rate_r == int(rate_r) else f"{rate_r:.2f}"
+                per_fee_display = f"{fmt(per_fee)}元" if per_fee > 0 else "-"
+                category = get_category_with_flag(r.get('category', '')) or '无'
+                operator = r.get('display_name', '未知')
+
+                html += f'''
+                        <tr>
+                            <td class="record-time">{time_str}</td>
+                            <td class="record-amount" style="color:#8b5cf6;">-{fmt(r['amount'])}</td>
+                            <td class="record-fee">{fee_display}</td>
+                            <td>{rate_display}</td>
+                            <td>{per_fee_display}</td>
+                            <td style="color:#8b5cf6;">{fmt(r['amount_usdt'])}</td>
+                            <td>{category}</td>
+                            <td>{operator}</td>
+                        </tr>
+'''
+            day_daifu_cny = sum(r['amount'] for r in data['daifu'])
+            html += f'''
+                    </tbody>
+                    <tfoot>
+                        <tr style="background:#8b5cf6;color:white;font-weight:600;">
+                            <td>📤 本日代付</td>
+                            <td>{fmt(day_daifu_cny)} 元</td>
+                            <td colspan="4"></td>
+                            <td colspan="2">≈ {fmt(daifu_usdt)} USDT</td>
+                        </tr>
+                    </tfoot>
                 </table>
 '''
 
@@ -581,15 +745,28 @@ def generate_export_html(records: List[Dict], group_name: str, start_date: str, 
                             <td>{operator}</td>
                         </tr>
 '''
-            html += '''
+            html += f'''
                     </tbody>
+                    <tfoot>
+                        <tr style="background:#ef4444;color:white;font-weight:600;">
+                            <td>📤 本日出款</td>
+                            <td>{fmt(expense_usdt)} USDT</td>
+                            <td></td>
+                        </tr>
+                    </tfoot>
                 </table>
 '''
 
+        subtotal_parts = [f"入款 {income_usdt:.2f} USDT"]
+        if daifu_count > 0:
+            subtotal_parts.append(f"代付 {daifu_usdt:.2f} USDT")
+        subtotal_parts.append(f"已下发 {expense_usdt:.2f} USDT")
+        if day_pending != 0:
+            subtotal_parts.append(f"结余 {day_pending:.2f} USDT")
+
         html += f'''
                 <div class="subtotal">
-                    本日小计：入款 {income_usdt:.2f} USDT / 出款 {expense_usdt:.2f} USDT
-                    {f' / 结余 {day_pending:.2f} USDT' if day_pending != 0 else ''}
+                    本日小计：{' / '.join(subtotal_parts)}
                 </div>
             </div>
         </div>
@@ -762,6 +939,17 @@ class AccountingManager:
                     per_transaction_fee REAL,
                     updated_at INTEGER DEFAULT 0,
                     UNIQUE(group_id, user_id)
+                )
+            """)
+
+            # ========== ✅ 新增：日切配置表（独立于会话，持久保存） ==========
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS group_daily_cutoff_config (
+                    group_id TEXT PRIMARY KEY,
+                    enabled INTEGER DEFAULT 0,
+                    cutoff_hour INTEGER DEFAULT 4,
+                    last_cutoff_date TEXT DEFAULT '',
+                    updated_at INTEGER DEFAULT 0
                 )
             """)
 
@@ -1067,17 +1255,21 @@ class AccountingManager:
             return {'income_usdt': 0, 'expense_usdt': 0, 'pending_usdt': 0}
 
     def get_current_stats(self, group_id: str) -> Dict:
-        """获取当前会话统计"""
+        """获取当前会话统计（代付记录 fee_rate<0 单独统计为出款）"""
         try:
             session = self.get_or_create_session(group_id)
 
             with self._get_conn() as conn:
                 c = conn.cursor()
+                # 用 CASE 把 fee_rate<0 的 income 记录归为 'daifu'，从入款中分离
                 c.execute("""
-                    SELECT record_type, SUM(amount), SUM(amount_usdt), COUNT(*)
+                    SELECT 
+                        CASE WHEN record_type = 'income' AND fee_rate < 0 THEN 'daifu'
+                             ELSE record_type END as calc_type,
+                        SUM(amount), SUM(amount_usdt), COUNT(*)
                     FROM accounting_records
                     WHERE group_id = ? AND session_id = ?
-                    GROUP BY record_type
+                    GROUP BY calc_type
                 """, (group_id, session['session_id']))
                 rows = c.fetchall()
 
@@ -1087,16 +1279,27 @@ class AccountingManager:
             expense_total = 0
             expense_usdt = 0
             expense_count = 0
+            daifu_total = 0
+            daifu_usdt = 0
+            daifu_count = 0
 
             for row in rows:
-                if row[0] == 'income':
+                calc_type = row[0]
+                if calc_type == 'income':
                     income_total = row[1] or 0
                     income_usdt = row[2] or 0
                     income_count = row[3] or 0
+                elif calc_type == 'daifu':
+                    daifu_total = row[1] or 0
+                    daifu_usdt = row[2] or 0
+                    daifu_count = row[3] or 0
                 else:
                     expense_total = row[1] or 0
                     expense_usdt = row[2] or 0
                     expense_count = row[3] or 0
+
+            # 待下发 = 总入款 + 代付(负数) - 已下发
+            pending_usdt = income_usdt + daifu_usdt - expense_usdt
 
             return {
                 'fee_rate': session['fee_rate'],
@@ -1108,7 +1311,10 @@ class AccountingManager:
                 'expense_total': expense_total,
                 'expense_usdt': expense_usdt,
                 'expense_count': expense_count,
-                'pending_usdt': income_usdt - expense_usdt
+                'daifu_total': daifu_total,
+                'daifu_usdt': daifu_usdt,
+                'daifu_count': daifu_count,
+                'pending_usdt': pending_usdt
             }
         except Exception as e:
             logger.error(f"获取当前统计失败: {e}")
@@ -1121,6 +1327,9 @@ class AccountingManager:
                 'expense_total': 0,
                 'expense_usdt': 0,
                 'expense_count': 0,
+                'daifu_total': 0,
+                'daifu_usdt': 0,
+                'daifu_count': 0,
                 'pending_usdt': 0
             }
 
@@ -1254,6 +1463,139 @@ class AccountingManager:
         except Exception as e:
             logger.error(f"设置单笔费用失败: {e}")
             return False
+
+    # ========== 日切功能 ==========
+
+    def get_daily_cutoff_config(self, group_id: str) -> Dict:
+        """获取群组的日切配置"""
+        try:
+            with self._get_conn() as conn:
+                c = conn.cursor()
+                c.execute("""
+                    SELECT enabled, cutoff_hour, last_cutoff_date
+                    FROM group_daily_cutoff_config
+                    WHERE group_id = ?
+                """, (group_id,))
+                row = c.fetchone()
+                if row:
+                    return {
+                        'enabled': bool(row[0]),
+                        'cutoff_hour': row[1],
+                        'last_cutoff_date': row[2] or ''
+                    }
+            return {'enabled': False, 'cutoff_hour': 4, 'last_cutoff_date': ''}
+        except Exception as e:
+            logger.error(f"获取日切配置失败: {e}")
+            return {'enabled': False, 'cutoff_hour': 4, 'last_cutoff_date': ''}
+
+    def set_daily_cutoff_enabled(self, group_id: str, enabled: bool, hour: int = 4) -> bool:
+        """开启/关闭日切功能。开启时设置日切时间并记录今日（避免立即触发）"""
+        try:
+            with self._get_conn() as conn:
+                c = conn.cursor()
+                now = int(time.time())
+                today = beijing_time(now).strftime('%Y-%m-%d')
+                last_cutoff = today if enabled else ''
+                c.execute("""
+                    INSERT INTO group_daily_cutoff_config (group_id, enabled, cutoff_hour, last_cutoff_date, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(group_id) DO UPDATE SET
+                        enabled = excluded.enabled,
+                        cutoff_hour = excluded.cutoff_hour,
+                        last_cutoff_date = excluded.last_cutoff_date,
+                        updated_at = excluded.updated_at
+                """, (group_id, 1 if enabled else 0, hour, last_cutoff, now))
+                conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"设置日切开关失败: {e}")
+            return False
+
+    def set_daily_cutoff_hour(self, group_id: str, hour: int) -> bool:
+        """设置日切时间点（1-24），同时自动开启日切并记录今日（避免立即触发）"""
+        try:
+            with self._get_conn() as conn:
+                c = conn.cursor()
+                now = int(time.time())
+                today = beijing_time(now).strftime('%Y-%m-%d')
+                c.execute("""
+                    INSERT INTO group_daily_cutoff_config (group_id, enabled, cutoff_hour, last_cutoff_date, updated_at)
+                    VALUES (?, 1, ?, ?, ?)
+                    ON CONFLICT(group_id) DO UPDATE SET
+                        enabled = 1,
+                        cutoff_hour = excluded.cutoff_hour,
+                        last_cutoff_date = excluded.last_cutoff_date,
+                        updated_at = excluded.updated_at
+                """, (group_id, hour, today, now))
+                conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"设置日切时间失败: {e}")
+            return False
+
+    def update_last_cutoff_date(self, group_id: str, date_str: str) -> bool:
+        """更新上次日切日期"""
+        try:
+            with self._get_conn() as conn:
+                c = conn.cursor()
+                now = int(time.time())
+                c.execute("""
+                    UPDATE group_daily_cutoff_config
+                    SET last_cutoff_date = ?, updated_at = ?
+                    WHERE group_id = ?
+                """, (date_str, now, group_id))
+                conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"更新日切日期失败: {e}")
+            return False
+
+    def get_all_daily_cutoff_groups(self) -> List[Dict]:
+        """获取所有已开启日切的群组"""
+        try:
+            with self._get_conn() as conn:
+                c = conn.cursor()
+                c.execute("""
+                    SELECT group_id, cutoff_hour, last_cutoff_date
+                    FROM group_daily_cutoff_config
+                    WHERE enabled = 1
+                """)
+                rows = c.fetchall()
+                return [
+                    {
+                        'group_id': row[0],
+                        'cutoff_hour': row[1],
+                        'last_cutoff_date': row[2] or ''
+                    }
+                    for row in rows
+                ]
+        except Exception as e:
+            logger.error(f"获取日切群组列表失败: {e}")
+            return []
+
+    def do_daily_cutoff(self, group_id: str) -> Optional[Dict]:
+        """执行日切：结束当前会话并开始新会话（保留费率/汇率配置）"""
+        try:
+            # 保存当前配置
+            session = self.get_or_create_session(group_id)
+            saved_fee_rate = session['fee_rate']
+            saved_exchange_rate = session['exchange_rate']
+            saved_per_fee = session.get('per_transaction_fee', 0)
+
+            # 结束当前会话（按日期分割保存历史）
+            result = self.end_session(group_id)
+
+            # 创建新会话（恢复费率/汇率配置）
+            self.get_or_create_session(group_id)
+            self.set_fee_rate(group_id, saved_fee_rate)
+            self.set_exchange_rate(group_id, saved_exchange_rate)
+            self.set_per_transaction_fee(group_id, saved_per_fee)
+
+            logger.info(f"群组 {group_id} 日切完成，费率/汇率已保留")
+            return result
+        except Exception as e:
+            logger.error(f"日切失败: {e}")
+            return None
 
     # ========== 用户个性化配置管理 ==========
 
@@ -1406,17 +1748,20 @@ class AccountingManager:
         }
 
     def get_today_stats(self, group_id: str) -> Dict:
-        """获取今日统计"""
+        """获取今日统计（代付记录 fee_rate<0 单独统计为出款）"""
         today = get_today_beijing()
 
         try:
             with self._get_conn() as conn:
                 c = conn.cursor()
                 c.execute("""
-                    SELECT record_type, SUM(amount), SUM(amount_usdt), COUNT(*)
+                    SELECT 
+                        CASE WHEN record_type = 'income' AND fee_rate < 0 THEN 'daifu'
+                             ELSE record_type END as calc_type,
+                        SUM(amount), SUM(amount_usdt), COUNT(*)
                     FROM accounting_records
                     WHERE group_id = ? AND date = ?
-                    GROUP BY record_type
+                    GROUP BY calc_type
                 """, (group_id, today))
                 rows = c.fetchall()
 
@@ -1426,21 +1771,28 @@ class AccountingManager:
             expense_total = 0
             expense_usdt = 0
             expense_count = 0
+            daifu_total = 0
+            daifu_usdt = 0
+            daifu_count = 0
 
             for row in rows:
-                if row[0] == 'income':
+                calc_type = row[0]
+                if calc_type == 'income':
                     income_total = row[1] or 0
                     income_usdt = row[2] or 0
                     income_count = row[3] or 0
+                elif calc_type == 'daifu':
+                    daifu_total = row[1] or 0
+                    daifu_usdt = row[2] or 0
+                    daifu_count = row[3] or 0
                 else:
                     expense_total = row[1] or 0
                     expense_usdt = row[2] or 0
                     expense_count = row[3] or 0
 
-            # 确保会话存在
-            self.get_or_create_session(group_id)
-
             session = self.get_or_create_session(group_id)
+
+            pending_usdt = income_usdt + daifu_usdt - expense_usdt
 
             return {
                 'fee_rate': session['fee_rate'],
@@ -1452,22 +1804,28 @@ class AccountingManager:
                 'expense_total': expense_total,
                 'expense_usdt': expense_usdt,
                 'expense_count': expense_count,
-                'pending_usdt': income_usdt - expense_usdt
+                'daifu_total': daifu_total,
+                'daifu_usdt': daifu_usdt,
+                'daifu_count': daifu_count,
+                'pending_usdt': pending_usdt
             }
         except Exception as e:
             logger.error(f"获取今日统计失败: {e}")
             return self.get_current_stats(group_id)
 
     def get_total_stats(self, group_id: str) -> Dict:
-        """获取总计统计"""
+        """获取总计统计（代付记录 fee_rate<0 单独统计为出款）"""
         try:
             with self._get_conn() as conn:
                 c = conn.cursor()
                 c.execute("""
-                    SELECT record_type, SUM(amount), SUM(amount_usdt), COUNT(*)
+                    SELECT 
+                        CASE WHEN record_type = 'income' AND fee_rate < 0 THEN 'daifu'
+                             ELSE record_type END as calc_type,
+                        SUM(amount), SUM(amount_usdt), COUNT(*)
                     FROM accounting_records
                     WHERE group_id = ?
-                    GROUP BY record_type
+                    GROUP BY calc_type
                 """, (group_id,))
                 rows = c.fetchall()
 
@@ -1477,18 +1835,28 @@ class AccountingManager:
             expense_total = 0
             expense_usdt = 0
             expense_count = 0
+            daifu_total = 0
+            daifu_usdt = 0
+            daifu_count = 0
 
             for row in rows:
-                if row[0] == 'income':
+                calc_type = row[0]
+                if calc_type == 'income':
                     income_total = row[1] or 0
                     income_usdt = row[2] or 0
                     income_count = row[3] or 0
+                elif calc_type == 'daifu':
+                    daifu_total = row[1] or 0
+                    daifu_usdt = row[2] or 0
+                    daifu_count = row[3] or 0
                 else:
                     expense_total = row[1] or 0
                     expense_usdt = row[2] or 0
                     expense_count = row[3] or 0
 
             session = self.get_or_create_session(group_id)
+
+            pending_usdt = income_usdt + daifu_usdt - expense_usdt
 
             return {
                 'fee_rate': session['fee_rate'],
@@ -1500,7 +1868,10 @@ class AccountingManager:
                 'expense_total': expense_total,
                 'expense_usdt': expense_usdt,
                 'expense_count': expense_count,
-                'pending_usdt': income_usdt - expense_usdt
+                'daifu_total': daifu_total,
+                'daifu_usdt': daifu_usdt,
+                'daifu_count': daifu_count,
+                'pending_usdt': pending_usdt
             }
         except Exception as e:
             logger.error(f"获取总计统计失败: {e}")
@@ -1526,15 +1897,18 @@ class AccountingManager:
             return []
 
     def get_stats_by_date(self, group_id: str, date_str: str) -> Dict:
-        """获取指定日期的统计（包含费率和汇率）"""
+        """获取指定日期的统计（包含费率和汇率，代付记录 fee_rate<0 单独统计）"""
         try:
             with self._get_conn() as conn:
                 c = conn.cursor()
                 c.execute("""
-                    SELECT record_type, SUM(amount), SUM(amount_usdt), COUNT(*)
+                    SELECT 
+                        CASE WHEN record_type = 'income' AND fee_rate < 0 THEN 'daifu'
+                             ELSE record_type END as calc_type,
+                        SUM(amount), SUM(amount_usdt), COUNT(*)
                     FROM accounting_records
                     WHERE group_id = ? AND date = ?
-                    GROUP BY record_type
+                    GROUP BY calc_type
                 """, (group_id, date_str))
                 rows = c.fetchall()
 
@@ -1544,16 +1918,26 @@ class AccountingManager:
             expense_total = 0
             expense_usdt = 0
             expense_count = 0
+            daifu_total = 0
+            daifu_usdt = 0
+            daifu_count = 0
 
             for row in rows:
-                if row[0] == 'income':
+                calc_type = row[0]
+                if calc_type == 'income':
                     income_total = row[1] or 0
                     income_usdt = row[2] or 0
                     income_count = row[3] or 0
+                elif calc_type == 'daifu':
+                    daifu_total = row[1] or 0
+                    daifu_usdt = row[2] or 0
+                    daifu_count = row[3] or 0
                 else:
                     expense_total = row[1] or 0
                     expense_usdt = row[2] or 0
                     expense_count = row[3] or 0
+
+            pending_usdt = income_usdt + daifu_usdt - expense_usdt
 
             # 🔥 获取该日期的费率和汇率（从第一条入款记录中获取）
             fee_rate = 0
@@ -1590,10 +1974,13 @@ class AccountingManager:
                 'expense_total': expense_total,
                 'expense_usdt': expense_usdt,
                 'expense_count': expense_count,
-                'pending_usdt': income_usdt - expense_usdt,
+                'daifu_total': daifu_total,
+                'daifu_usdt': daifu_usdt,
+                'daifu_count': daifu_count,
+                'pending_usdt': pending_usdt,
                 'fee_rate': fee_rate,
                 'exchange_rate': exchange_rate,
-                'per_transaction_fee': per_transaction_fee  # 🔥 添加单笔费用
+                'per_transaction_fee': per_transaction_fee
             }
         except Exception as e:
             logger.error(f"获取日期统计失败: {e}")
@@ -1604,6 +1991,9 @@ class AccountingManager:
                 'expense_total': 0,
                 'expense_usdt': 0,
                 'expense_count': 0,
+                'daifu_total': 0,
+                'daifu_usdt': 0,
+                'daifu_count': 0,
                 'pending_usdt': 0,
                 'fee_rate': 0,
                 'exchange_rate': 1,
@@ -2072,8 +2462,9 @@ def format_bill_message(stats: Dict, records: List[Dict], title: str = "当前�
     """格式化账单消息"""
     message = ""
 
-    # 分离入款和出款记录
-    income_records = [r for r in records if r['type'] == 'income']
+    # 分离入款、代付出款(fee_rate<0)和出款记录
+    income_records = [r for r in records if r['type'] == 'income' and r.get('fee_rate', 0) >= 0]
+    daifu_records = [r for r in records if r['type'] == 'income' and r.get('fee_rate', 0) < 0]
     expense_records = [r for r in records if r['type'] == 'expense']
 
     # ==================== 入款记录 ====================
@@ -2187,6 +2578,44 @@ def format_bill_message(stats: Dict, records: List[Dict], title: str = "当前�
     else:
         message += "📈 入款 0 笔\n\n"
 
+    # ==================== 代付出款记录（fee_rate<0）====================
+    if daifu_records:
+        daifu_sorted = sorted(daifu_records, key=lambda x: x['created_at'], reverse=True)
+        message += f"<blockquote>📤 代付出款 {len(daifu_records)} 笔</blockquote>\n"
+
+        for r in daifu_sorted[:MAX_DISPLAY_RECORDS]:
+            dt = beijing_time(r['created_at'])
+            time_str = dt.strftime('%m-%d %H:%M')
+            amount = r['amount']
+            amount_usdt = r['amount_usdt']
+
+            fee_rate = r.get('fee_rate', 0)
+            rate = r.get('rate', 0)
+            fee_info = format_fee_info(fee_rate, rate)
+
+            operator = r.get('display_name', '未知用户')
+            safe_operator = safe_escape_markdown(operator)
+            user_id = r.get('user_id')
+
+            if user_id:
+                mention = f' <a href="tg://user?id={user_id}">{safe_operator}</a>'
+            else:
+                mention = f" {safe_operator}"
+
+            message_id = r.get('message_id', 0)
+            if group_id and message_id:
+                chat_id_num = abs(int(group_id)) - 1000000000000
+                time_link = f'<a href="https://t.me/c/{chat_id_num}/{message_id}">{time_str}</a>'
+            else:
+                time_link = time_str
+
+            amount_str = f"{amount:+.2f}"
+            message += f"  {time_link} {amount_str} {fee_info} = {amount_usdt:.2f} USDT{mention}\n"
+
+        if len(daifu_records) > MAX_DISPLAY_RECORDS:
+            message += f"  `... 还有 {len(daifu_records) - MAX_DISPLAY_RECORDS} 条记录`\n"
+        message += "\n"
+
     # ==================== 出款记录 ====================
     if expense_records:
         expense_records_sorted = sorted(expense_records, key=lambda x: x['created_at'], reverse=True)
@@ -2255,12 +2684,18 @@ def format_bill_message(stats: Dict, records: List[Dict], title: str = "当前�
     total_income_cny = stats['income_total']
     total_income_usdt = stats['income_usdt']
     total_expense_usdt = stats['expense_usdt']
-    pending_usdt = total_income_usdt - total_expense_usdt
+    daifu_usdt = stats.get('daifu_usdt', 0)
+    daifu_count = stats.get('daifu_count', 0)
+    pending_usdt = stats.get('pending_usdt', total_income_usdt - total_expense_usdt)
 
     message += f"💰 费率：{fee_rate}%\n"
     message += f"💱 汇率：{exchange_rate}\n"
     message += f"📝 单笔费用：{per_transaction_fee} 元\n\n"
     message += f"📊 总入款：{total_income_cny:.2f} = {total_income_usdt:.2f} USDT\n"
+    # 仅有代付记录时才显示总出款，USDT 默认显示负数
+    if daifu_count > 0:
+        daifu_total_cny = stats.get('daifu_total', 0)
+        message += f"📤 总出款：{daifu_total_cny:.2f} = {daifu_usdt:.2f} USDT\n"
     message += f"📤 已下发：{total_expense_usdt:.2f} USDT\n"
 
     if title == "总计账单":
@@ -2301,7 +2736,7 @@ async def handle_end_bill(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stats = accounting_manager.get_current_stats(group_id)
     records = accounting_manager.get_current_records(group_id)
 
-    if stats['income_count'] == 0 and stats['expense_count'] == 0:
+    if stats['income_count'] == 0 and stats['expense_count'] == 0 and stats.get('daifu_count', 0) == 0:
         await update.message.reply_text("📭 当前没有账单记录，无需结束")
         return
 
@@ -2553,7 +2988,7 @@ async def handle_total_stats(update: Update, context: ContextTypes.DEFAULT_TYPE)
     group_id = str(chat.id)
     stats = accounting_manager.get_total_stats(group_id)
 
-    if stats['income_count'] == 0 and stats['expense_count'] == 0:
+    if stats['income_count'] == 0 and stats['expense_count'] == 0 and stats.get('daifu_count', 0) == 0:
         await update.message.reply_text("📭 暂无账单记录")
         return
 
@@ -2579,7 +3014,7 @@ async def handle_today_stats(update: Update, context: ContextTypes.DEFAULT_TYPE)
     today = get_today_beijing()
     stats = accounting_manager.get_today_stats(group_id)
 
-    if stats['income_count'] == 0 and stats['expense_count'] == 0:
+    if stats['income_count'] == 0 and stats['expense_count'] == 0 and stats.get('daifu_count', 0) == 0:
         await update.message.reply_text("📭 今日暂无账单记录")
         return
 
@@ -2602,7 +3037,7 @@ async def handle_current_bill(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     group_id = str(chat.id)
     stats = accounting_manager.get_current_stats(group_id)
-    if stats['income_count'] == 0 and stats['expense_count'] == 0:
+    if stats['income_count'] == 0 and stats['expense_count'] == 0 and stats.get('daifu_count', 0) == 0:
         await update.message.reply_text("📭 当前账单为空")
         return
     # 获取当前会话ID
@@ -2786,7 +3221,7 @@ async def handle_day_selection(update: Update, context: ContextTypes.DEFAULT_TYP
     date_str = f"{year}-{month:02d}-{day:02d}"
 
     stats = accounting_manager.get_stats_by_date(group_id, date_str)
-    if stats['income_count'] == 0 and stats['expense_count'] == 0:
+    if stats['income_count'] == 0 and stats['expense_count'] == 0 and stats.get('daifu_count', 0) == 0:
         await query.message.edit_text(f"📭 {date_str} 暂无账单记录")
         return
 
@@ -2873,7 +3308,7 @@ async def handle_date_selection(update: Update, context: ContextTypes.DEFAULT_TY
     stats = accounting_manager.get_stats_by_date(group_id, date_str)
     records = accounting_manager.get_records_by_date(group_id, date_str)
 
-    if stats['income_count'] == 0 and stats['expense_count'] == 0:
+    if stats['income_count'] == 0 and stats['expense_count'] == 0 and stats.get('daifu_count', 0) == 0:
         await query.message.edit_text(f"📭 {date_str} 暂无账单记录")
         return ConversationHandler.END
 
@@ -2900,7 +3335,7 @@ async def handle_clear_bill(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     stats = accounting_manager.get_current_stats(group_id)
 
-    if stats['income_count'] == 0 and stats['expense_count'] == 0:
+    if stats['income_count'] == 0 and stats['expense_count'] == 0 and stats.get('daifu_count', 0) == 0:
         await update.message.reply_text("📭 当前账单为空，无需清理")
         return
 
@@ -2961,7 +3396,7 @@ async def handle_clear_all_bill(update: Update, context: ContextTypes.DEFAULT_TY
     group_id = str(chat.id)
     total_stats = accounting_manager.get_total_stats(group_id)
 
-    if total_stats['income_count'] == 0 and total_stats['expense_count'] == 0:
+    if total_stats['income_count'] == 0 and total_stats['expense_count'] == 0 and total_stats.get('daifu_count', 0) == 0:
         await update.message.reply_text("📭 暂无任何账单记录")
         return
 
@@ -3410,6 +3845,30 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
             await message.reply_text(f"❌ 设置失败：{str(e)[:50]}")
         return
 
+    # ========== 9.5 日切命令 ==========
+    elif text.startswith('设置日切'):
+        try:
+            hour_str = text.replace('设置日切', '').strip()
+            if not hour_str:
+                await message.reply_text("❌ 格式错误：设置日切 数字（如：设置日切4，范围1-24）")
+                return
+            hour = int(hour_str)
+            await handle_daily_cutoff_set(update, context, hour)
+        except ValueError:
+            await message.reply_text("❌ 日切时间必须为整数（1-24）")
+        except Exception as e:
+            await message.reply_text(f"❌ 设置失败：{str(e)[:50]}")
+        return
+    elif text == '开启日切':
+        await handle_daily_cutoff_on(update, context)
+        return
+    elif text == '关闭日切':
+        await handle_daily_cutoff_off(update, context)
+        return
+    elif text == '日切当前':
+        await handle_daily_cutoff_now(update, context)
+        return
+
     # ========== 10. 账单命令 ==========
     elif text == '结束账单':
         await handle_end_bill(update, context)
@@ -3731,15 +4190,16 @@ async def send_bill_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     total_pages = (total + page_size - 1) // page_size if total > 0 else 1
 
-    # 分离入款和出款（仅当前页）
-    income_records = [r for r in records if r['type'] == 'income']
+    # 分离入款、代付出款(fee_rate<0)和出款（仅当前页）
+    income_records = [r for r in records if r['type'] == 'income' and r.get('fee_rate', 0) >= 0]
+    daifu_records = [r for r in records if r['type'] == 'income' and r.get('fee_rate', 0) < 0]
     expense_records = [r for r in records if r['type'] == 'expense']
 
-    # 开始构建消息
+    # 开始构建消息（HTML 格式，和 format_bill_message 一致）
     if bill_type == "date":
-        message = f"📅 **{title}** (第 {page+1}/{total_pages} 页)\n\n"
+        message = f"📅 <b>{title}</b> (第 {page+1}/{total_pages} 页)\n\n"
     else:
-        message = f"📊 **{title}** (第 {page+1}/{total_pages} 页)\n\n"
+        message = f"📊 <b>{title}</b> (第 {page+1}/{total_pages} 页)\n\n"
 
     # ========== 入款记录（按备注分组） ==========
     if income_records:
@@ -3756,7 +4216,7 @@ async def send_bill_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 no_category_records.append(r)
 
         total_income_count = len(income_records)
-        message += f"📈 入款 {total_income_count} 笔\n"
+        message += f"<blockquote>📈 入款 {total_income_count} 笔</blockquote>\n"
 
         # 先显示无备注的记录
         if no_category_records:
@@ -3767,16 +4227,23 @@ async def send_bill_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 rate = r.get('rate', 0)
                 fee_info = format_fee_info(fee_rate, rate)
                 display_name = r.get('display_name', '未知用户')
+                safe_op = safe_escape_markdown(display_name)
                 user_id = r.get('user_id')
-                mention = f" [{display_name}](tg://user?id={user_id})" if user_id else f" {display_name}"
+                mention = f' <a href="tg://user?id={user_id}">{safe_op}</a>' if user_id else f" {safe_op}"
+                msg_id = r.get('message_id', 0)
+                if group_id and msg_id:
+                    chat_id_num = abs(int(group_id)) - 1000000000000
+                    time_link = f'<a href="https://t.me/c/{chat_id_num}/{msg_id}">{time_str}</a>'
+                else:
+                    time_link = time_str
                 amount_str = f"{r['amount']:+.2f}"
-                message += f"  `{time_str} {amount_str} {fee_info} = {r['amount_usdt']:.2f} USDT`{mention}\n"
+                message += f"  {time_link} {amount_str} {fee_info} = {r['amount_usdt']:.2f} USDT{mention}\n"
             message += "\n"
 
         # 再显示有备注的分组
         for category, group_records in categories.items():
             display_category = get_category_with_flag(category)
-            message += f"{display_category} ({len(group_records)} 笔)\n"
+            message += f"\n<blockquote>{display_category} ({len(group_records)} 笔)</blockquote>\n"
             for r in group_records:
                 dt = beijing_time(r['created_at'])
                 time_str = dt.strftime('%m-%d %H:%M')
@@ -3784,10 +4251,17 @@ async def send_bill_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 rate = r.get('rate', 0)
                 fee_info = format_fee_info(fee_rate, rate)
                 display_name = r.get('display_name', '未知用户')
+                safe_op = safe_escape_markdown(display_name)
                 user_id = r.get('user_id')
-                mention = f" [{display_name}](tg://user?id={user_id})" if user_id else f" {display_name}"
+                mention = f' <a href="tg://user?id={user_id}">{safe_op}</a>' if user_id else f" {safe_op}"
+                msg_id = r.get('message_id', 0)
+                if group_id and msg_id:
+                    chat_id_num = abs(int(group_id)) - 1000000000000
+                    time_link = f'<a href="https://t.me/c/{chat_id_num}/{msg_id}">{time_str}</a>'
+                else:
+                    time_link = time_str
                 amount_str = f"{r['amount']:+.2f}"
-                message += f"  `{time_str} {amount_str} {fee_info} = {r['amount_usdt']:.2f} USDT`{mention}\n"
+                message += f"  {time_link} {amount_str} {fee_info} = {r['amount_usdt']:.2f} USDT{mention}\n"
             # 显示该组小计
             group_total_cny = sum(r['amount'] for r in group_records)
             group_total_usdt = sum(r['amount_usdt'] for r in group_records)
@@ -3795,44 +4269,75 @@ async def send_bill_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         message += "📈 入款 0 笔\n\n"
 
+    # ========== 代付出款记录（fee_rate<0）==========
+    if daifu_records:
+        message += f"<blockquote>📤 代付出款 {len(daifu_records)} 笔</blockquote>\n"
+        for r in daifu_records:
+            dt = beijing_time(r['created_at'])
+            time_str = dt.strftime('%m-%d %H:%M')
+            fee_rate = r.get('fee_rate', 0)
+            rate = r.get('rate', 0)
+            fee_info = format_fee_info(fee_rate, rate)
+            display_name = r.get('display_name', '未知用户')
+            safe_op = safe_escape_markdown(display_name)
+            user_id = r.get('user_id')
+            mention = f' <a href="tg://user?id={user_id}">{safe_op}</a>' if user_id else f" {safe_op}"
+            msg_id = r.get('message_id', 0)
+            if group_id and msg_id:
+                chat_id_num = abs(int(group_id)) - 1000000000000
+                time_link = f'<a href="https://t.me/c/{chat_id_num}/{msg_id}">{time_str}</a>'
+            else:
+                time_link = time_str
+            amount_str = f"{r['amount']:+.2f}"
+            message += f"  {time_link} {amount_str} {fee_info} = {r['amount_usdt']:.2f} USDT{mention}\n"
+        message += "\n"
+
     # ========== 出款记录 ==========
     if expense_records:
-        message += f"📉 出款 {len(expense_records)} 笔\n"
+        message += f"<blockquote>📉 出款 {len(expense_records)} 笔</blockquote>\n"
         for r in expense_records:
             dt = beijing_time(r['created_at'])
             time_str = dt.strftime('%m-%d %H:%M')
             amount_usdt = r['amount_usdt']
             display_name = r.get('display_name', '未知用户')
+            safe_op = safe_escape_markdown(display_name)
             user_id = r.get('user_id')
-            mention = f" [{display_name}](tg://user?id={user_id})" if user_id else f" {display_name}"
-            if amount_usdt > 0:
-                message += f"  `{time_str} -{amount_usdt:.2f} USDT`{mention}\n"
+            mention = f' <a href="tg://user?id={user_id}">{safe_op}</a>' if user_id else f" {safe_op}"
+            msg_id = r.get('message_id', 0)
+            if group_id and msg_id:
+                chat_id_num = abs(int(group_id)) - 1000000000000
+                time_link = f'<a href="https://t.me/c/{chat_id_num}/{msg_id}">{time_str}</a>'
             else:
-                message += f"  `{time_str} +{abs(amount_usdt):.2f} USDT (修正)`{mention}\n"
+                time_link = time_str
+            message += f"  {time_link} {amount_usdt:.2f} USDT{mention}\n"
         message += "\n"
+    else:
+        message += "📉 出款 0 笔\n\n"
 
-    # ========== 入款分组统计（使用全局 stats 中的分类汇总，而不是当前页） ==========
+    # ========== 统计信息（和 format_bill_message 一致）==========
     stats = context.user_data.get("bill_stats", {})
-    if stats.get('income_count', 0) > 0:
-        # 注意：分类统计无法从当前页准确得出，所以这里直接使用传入的 stats
-        # 但 stats 可能没有包含分类信息，所以保留原样或显示默认信息
-        pass
-
-    # ========== 统计信息 ==========
     fee_rate = stats.get('fee_rate', 0)
     exchange_rate = stats.get('exchange_rate', 1)
     per_transaction_fee = stats.get('per_transaction_fee', 0)
     total_income_cny = stats.get('income_total', 0)
     total_income_usdt = stats.get('income_usdt', 0)
+    daifu_total_cny = stats.get('daifu_total', 0)
+    daifu_usdt = stats.get('daifu_usdt', 0)
+    daifu_count = stats.get('daifu_count', 0)
     total_expense_usdt = stats.get('expense_usdt', 0)
-    pending_usdt = total_income_usdt - total_expense_usdt
+    pending_usdt = stats.get('pending_usdt', total_income_usdt + daifu_usdt - total_expense_usdt)
 
     message += f"💰 费率：{fee_rate}%\n"
     message += f"💱 汇率：{exchange_rate}\n"
     message += f"📝 单笔费用：{per_transaction_fee} 元\n\n"
     message += f"📊 总入款：{total_income_cny:.2f} = {total_income_usdt:.2f} USDT\n"
-    message += f"📤 总出款：{total_expense_usdt:.2f} USDT\n"
-    message += f"⏳ 待下发：{pending_usdt:.2f} USDT"
+    if daifu_count > 0:
+        message += f"📤 总出款：{daifu_total_cny:.2f} = {daifu_usdt:.2f} USDT\n"
+    message += f"📤 已下发：{total_expense_usdt:.2f} USDT\n"
+    if title == "总计账单":
+        message += f"📋 总待出款：{pending_usdt:.2f} USDT"
+    else:
+        message += f"⏳ 待下发：{pending_usdt:.2f} USDT"
 
     # 分页按钮
     keyboard = []
@@ -3850,14 +4355,14 @@ async def send_bill_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.edit_message_text(
             message,
             reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown",
+            parse_mode="HTML",
             disable_web_page_preview=True
         )
     else:
         await update.message.reply_text(
             message,
             reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown",
+            parse_mode="HTML",
             disable_web_page_preview=True
         )
 
@@ -4595,11 +5100,12 @@ def generate_beautiful_bill_html(stats: Dict, records: List[Dict], title: str = 
     """
     from datetime import datetime
 
-    # 分离入款和出款
-    income_records = [r for r in records if r['type'] == 'income']
+    # 分离入款、代付出款(fee_rate<0)和出款
+    income_records = [r for r in records if r['type'] == 'income' and r.get('fee_rate', 0) >= 0]
+    daifu_records = [r for r in records if r['type'] == 'income' and r.get('fee_rate', 0) < 0]
     expense_records = [r for r in records if r['type'] == 'expense']
 
-    # 按备注分组
+    # 按备注分组（仅正常入款）
     categories = {}
     no_category_records = []
     for r in income_records:
@@ -4617,8 +5123,11 @@ def generate_beautiful_bill_html(stats: Dict, records: List[Dict], title: str = 
     per_transaction_fee = stats.get('per_transaction_fee', 0)
     total_income_cny = stats.get('income_total', 0)
     total_income_usdt = stats.get('income_usdt', 0)
+    total_daifu_cny = stats.get('daifu_total', 0)
+    total_daifu_usdt = stats.get('daifu_usdt', 0)
+    total_daifu_count = stats.get('daifu_count', 0)
     total_expense_usdt = stats.get('expense_usdt', 0)
-    pending_usdt = total_income_usdt - total_expense_usdt
+    pending_usdt = stats.get('pending_usdt', total_income_usdt + total_daifu_usdt - total_expense_usdt)
 
     now = datetime.now(BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S')
 
@@ -4666,6 +5175,34 @@ def generate_beautiful_bill_html(stats: Dict, records: List[Dict], title: str = 
             <td>{operator}</td>
         </tr>"""
 
+    # ========== 生成总体代付出款记录表格（fee_rate<0）==========
+    daifu_rows = ""
+    for r in daifu_records:
+        dt = beijing_time(r['created_at'])
+        date_str = dt.strftime('%Y-%m-%d')
+        time_str = dt.strftime('%H:%M')
+        cat = r.get('category', '') or ''
+        flag = get_flag(cat)
+        cat_display = f"{flag} {cat}" if flag else (cat or '无')
+        fr = r.get('fee_rate', 0)
+        rate = r.get('rate', 0)
+        per_fee = r.get('per_transaction_fee', 0)
+        fee_display = f"{fmt(fr)}%" if fr == int(fr) else f"{fr}%"
+        rate_display = fmt(rate) if rate == int(rate) else f"{rate:.2f}"
+        per_fee_display = f"{fmt(per_fee)}元" if per_fee > 0 else "-"
+        operator = r.get('display_name', r.get('username', '未知'))
+        daifu_rows += f"""
+        <tr>
+            <td>{date_str} {time_str}</td>
+            <td class="expense-amount">-{fmt(r['amount'])}</td>
+            <td>{fee_display}</td>
+            <td>{rate_display}</td>
+            <td>{per_fee_display}</td>
+            <td style="color:#8b5cf6;font-weight:600;">{fmt(r['amount_usdt'])} USDT</td>
+            <td>{cat_display}</td>
+            <td>{operator}</td>
+        </tr>"""
+
     # ========== 生成总体出款记录表格 ==========
     expense_rows = ""
     for r in expense_records:
@@ -4680,7 +5217,7 @@ def generate_beautiful_bill_html(stats: Dict, records: List[Dict], title: str = 
             <td>{operator}</td>
         </tr>"""
 
-    # ========== 按操作人分组 ==========
+    # ========== 按操作人分组（分离代付） ==========
     operator_income = {}
     for r in income_records:
         operator = r.get('display_name', r.get('username', '未知'))
@@ -4697,6 +5234,23 @@ def generate_beautiful_bill_html(stats: Dict, records: List[Dict], title: str = 
         operator_income[key]['records'].append(r)
         operator_income[key]['total_cny'] += r['amount']
         operator_income[key]['total_usdt'] += r['amount_usdt']
+
+    operator_daifu = {}
+    for r in daifu_records:
+        operator = r.get('display_name', r.get('username', '未知'))
+        user_id = r.get('user_id', 0)
+        key = f"op_{user_id}_{hash(operator) % 10000}"
+        if key not in operator_daifu:
+            operator_daifu[key] = {
+                'name': operator,
+                'user_id': user_id,
+                'records': [],
+                'total_cny': 0.0,
+                'total_usdt': 0.0,
+            }
+        operator_daifu[key]['records'].append(r)
+        operator_daifu[key]['total_cny'] += r['amount']
+        operator_daifu[key]['total_usdt'] += r['amount_usdt']
 
     operator_expense = {}
     for r in expense_records:
@@ -4715,25 +5269,39 @@ def generate_beautiful_bill_html(stats: Dict, records: List[Dict], title: str = 
 
     # ========== 生成每个操作人的可折叠记录 ==========
     operator_sections = ""
-    all_operator_keys = set(list(operator_income.keys()) + list(operator_expense.keys()))
+    all_operator_keys = set(list(operator_income.keys()) + list(operator_daifu.keys()) + list(operator_expense.keys()))
 
     if all_operator_keys:
         for idx, key in enumerate(sorted(all_operator_keys, key=lambda k: operator_income.get(k, {}).get('total_cny', 0), reverse=True)):
             safe_key = key.replace('.', '_').replace('-', '_')
             op_income = operator_income.get(key, {})
+            op_daifu = operator_daifu.get(key, {})
             op_expense = operator_expense.get(key, {})
 
-            name = op_income.get('name') or op_expense.get('name', '未知')
+            name = op_income.get('name') or op_daifu.get('name') or op_expense.get('name', '未知')
             income_count = len(op_income.get('records', []))
             income_cny = op_income.get('total_cny', 0)
             income_usdt = op_income.get('total_usdt', 0)
+            daifu_count = len(op_daifu.get('records', []))
+            daifu_cny = op_daifu.get('total_cny', 0)
+            daifu_usdt = op_daifu.get('total_usdt', 0)
             expense_count = len(op_expense.get('records', []))
             expense_usdt = op_expense.get('total_usdt', 0)
+
+            # 头部拼接
+            header_parts = [f"👤 {name}"]
+            if income_count:
+                header_parts.append(f"入款{income_count}笔 {fmt(income_cny)}元 ≈ {fmt(income_usdt)}USDT")
+            if daifu_count:
+                header_parts.append(f"代付{daifu_count}笔 {fmt(daifu_cny)}元 ≈ {fmt(daifu_usdt)}USDT")
+            if expense_count:
+                header_parts.append(f"出款{expense_count}笔 {fmt(expense_usdt)}USDT")
+            header_text = " · ".join(header_parts)
 
             operator_sections += f"""
         <div class="card operator-card">
             <div class="operator-header" onclick="toggleSection('op_{safe_key}')">
-                <span>👤 {name} · 入款{income_count}笔 {fmt(income_cny)}元 ≈ {fmt(income_usdt)}USDT · 出款{expense_count}笔 {fmt(expense_usdt)}USDT</span>
+                <span>{header_text}</span>
                 <span class="toggle-icon" id="icon_op_{safe_key}">▼</span>
             </div>
             <div class="operator-content" id="op_{safe_key}">
@@ -4770,6 +5338,46 @@ def generate_beautiful_bill_html(stats: Dict, records: List[Dict], title: str = 
                                     <td>{rate_display}</td>
                                     <td>{per_fee_display}</td>
                                     <td class="usdt-amount">{fmt(r['amount_usdt'])} USDT</td>
+                                    <td>{cat_display}</td>
+                                </tr>"""
+                operator_sections += """
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+"""
+            if op_daifu.get('records'):
+                operator_sections += f"""
+                <div style="margin-bottom:12px;">
+                    <div class="section-label" style="background:linear-gradient(135deg,#8b5cf6,#6d28d9);color:white;">📤 代付明细（{daifu_count}笔）</div>
+                    <div class="table-responsive">
+                        <table>
+                            <thead>
+                                <tr><th>日期时间</th><th>金额(元)</th><th>手续费</th><th>汇率</th><th>单笔费用</th><th>USDT</th><th>分类</th></tr>
+                            </thead>
+                            <tbody>
+"""
+                for r in op_daifu['records']:
+                    dt = beijing_time(r['created_at'])
+                    date_str = dt.strftime('%Y-%m-%d')
+                    time_str = dt.strftime('%H:%M')
+                    cat = r.get('category', '') or ''
+                    flag = get_flag(cat)
+                    cat_display = f"{flag} {cat}" if flag else (cat or '无')
+                    fr = r.get('fee_rate', 0)
+                    rate = r.get('rate', 0)
+                    per_fee = r.get('per_transaction_fee', 0)
+                    fee_display = f"{fmt(fr)}%" if fr == int(fr) else f"{fr}%"
+                    rate_display = fmt(rate) if rate == int(rate) else f"{rate:.2f}"
+                    per_fee_display = f"{fmt(per_fee)}元" if per_fee > 0 else "-"
+                    operator_sections += f"""
+                                <tr>
+                                    <td>{date_str} {time_str}</td>
+                                    <td class="expense-amount">-{fmt(r['amount'])}</td>
+                                    <td>{fee_display}</td>
+                                    <td>{rate_display}</td>
+                                    <td>{per_fee_display}</td>
+                                    <td style="color:#8b5cf6;font-weight:600;">{fmt(r['amount_usdt'])} USDT</td>
                                     <td>{cat_display}</td>
                                 </tr>"""
                 operator_sections += """
@@ -4864,6 +5472,19 @@ def generate_beautiful_bill_html(stats: Dict, records: List[Dict], title: str = 
             </div>
         </div>
 """
+
+    # 条件式的代付汇总卡片（避免嵌套 f-string）
+    if total_daifu_count > 0:
+        daifu_summary_card2 = f"""
+            <div class="summary-card" style="border-bottom:4px solid #8b5cf6;">
+                <div class="icon">📤</div>
+                <div class="label" style="color:#8b5cf6;">总出款</div>
+                <div class="value" style="color:#8b5cf6;">{fmt(total_daifu_cny)} 元</div>
+                <div style="font-size:14px;color:#8b5cf6;">≈ {fmt(total_daifu_usdt)} USDT</div>
+            </div>
+"""
+    else:
+        daifu_summary_card2 = ""
 
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -5086,9 +5707,10 @@ def generate_beautiful_bill_html(stats: Dict, records: List[Dict], title: str = 
                 <div class="value">{fmt(total_income_cny)} 元</div>
                 <div style="font-size:14px;color:#666;">≈ {fmt(total_income_usdt)} USDT</div>
             </div>
+            {daifu_summary_card2}
             <div class="summary-card expense">
                 <div class="icon">📤</div>
-                <div class="label">总出款</div>
+                <div class="label">已下发</div>
                 <div class="value">{fmt(total_expense_usdt)} USDT</div>
             </div>
             <div class="summary-card pending">
@@ -5113,10 +5735,46 @@ def generate_beautiful_bill_html(stats: Dict, records: List[Dict], title: str = 
                             <tr><th>日期时间</th><th>金额(元)</th><th>手续费</th><th>汇率</th><th>单笔费用</th><th>USDT</th><th>分类</th><th>操作人</th></tr>
                         </thead>
                         <tbody>{income_rows if income_rows else '<tr><td colspan="8" style="text-align:center;color:#999;">暂无入款记录</td></tr>'}</tbody>
+                        <tfoot>
+                            <tr style="background:#10b981;color:white;font-weight:600;">
+                                <td colspan="1">📊 总入款</td>
+                                <td>{fmt(total_income_cny)} 元</td>
+                                <td colspan="4"></td>
+                                <td colspan="2">≈ {fmt(total_income_usdt)} USDT</td>
+                            </tr>
+                        </tfoot>
                     </table>
                 </div>
             </div>
         </div>
+
+        <!-- ===== 所有代付出款记录（可折叠） ===== -->
+        {f'''
+        <div class="card collapsible-card">
+            <div class="collapsible-header" onclick="toggleSection('all_daifu')" style="background: linear-gradient(135deg, #8b5cf6 0%, #6d28d9 100%);">
+                <span>📤 所有代付出款记录（{len(daifu_records)}笔）</span>
+                <span class="toggle-icon" id="icon_all_daifu">▼</span>
+            </div>
+            <div class="collapsible-content" id="all_daifu">
+                <div class="table-responsive">
+                    <table>
+                        <thead>
+                            <tr><th>日期时间</th><th>金额(元)</th><th>手续费</th><th>汇率</th><th>单笔费用</th><th>USDT</th><th>分类</th><th>操作人</th></tr>
+                        </thead>
+                        <tbody>{daifu_rows if daifu_rows else '<tr><td colspan="8" style="text-align:center;color:#999;">暂无代付记录</td></tr>'}</tbody>
+                        <tfoot>
+                            <tr style="background:#8b5cf6;color:white;font-weight:600;">
+                                <td colspan="1">📤 总出款</td>
+                                <td>{fmt(total_daifu_cny)} 元</td>
+                                <td colspan="4"></td>
+                                <td colspan="2">≈ {fmt(total_daifu_usdt)} USDT</td>
+                            </tr>
+                        </tfoot>
+                    </table>
+                </div>
+            </div>
+        </div>
+        ''' if daifu_records else ''}
 
         <!-- ===== 所有出款记录（可折叠） ===== -->
         <div class="card collapsible-card">
@@ -5131,6 +5789,13 @@ def generate_beautiful_bill_html(stats: Dict, records: List[Dict], title: str = 
                             <tr><th>日期时间</th><th>金额(USDT)</th><th>操作人</th></tr>
                         </thead>
                         <tbody>{expense_rows if expense_rows else '<tr><td colspan="3" style="text-align:center;color:#999;">暂无出款记录</td></tr>'}</tbody>
+                        <tfoot>
+                            <tr style="background:#ef4444;color:white;font-weight:600;">
+                                <td>📤 总下发</td>
+                                <td>{fmt(total_expense_usdt)} USDT</td>
+                                <td></td>
+                            </tr>
+                        </tfoot>
                     </table>
                 </div>
             </div>
@@ -5202,16 +5867,27 @@ async def handle_view_current_bill(update: Update, context: ContextTypes.DEFAULT
             temp_path = f.name
 
         try:
+            caption_lines = [
+                f"📊 {group_name} 当前账单\n",
+                f"💰 总入款：{stats['income_total']:.2f} 元 ≈ {stats['income_usdt']:.2f} USDT"
+            ]
+            daifu_count = stats.get('daifu_count', 0)
+            if daifu_count > 0:
+                caption_lines.append(
+                    f"📤 总出款：{stats['daifu_total']:.2f} 元 ≈ {stats['daifu_usdt']:.2f} USDT"
+                )
+            caption_lines.append(f"📤 已下发：{stats['expense_usdt']:.2f} USDT")
+            caption_lines.append(f"⏳ 待下发：{stats['pending_usdt']:.2f} USDT")
+            caption_lines.append(
+                f"📝 共 {stats['income_count'] + stats.get('daifu_count', 0) + stats['expense_count']} 条记录"
+            )
+
             # 发送文件
             with open(temp_path, 'rb') as f:
                 await query.message.reply_document(
                     document=f,
                     filename=f"账单_{group_name}_当前.html",
-                    caption=f"📊 {group_name} 当前账单\n\n"
-                            f"💰 总入款：{stats['income_total']:.2f} 元 ≈ {stats['income_usdt']:.2f} USDT\n"
-                            f"📤 总出款：{stats['expense_usdt']:.2f} USDT\n"
-                            f"⏳ 待下发：{stats['pending_usdt']:.2f} USDT\n"
-                            f"📝 共 {stats['income_count'] + stats['expense_count']} 条记录",
+                    caption="\n".join(caption_lines),
                     parse_mode='Markdown'
                 )
         finally:
@@ -5587,6 +6263,174 @@ async def handle_delete_user_config(update: Update, context: ContextTypes.DEFAUL
         await message.reply_text("❌ 删除失败，请稍后重试")
 
 
+# ========== 日切命令处理 ==========
+
+async def handle_daily_cutoff_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """日切当前：手动触发日切，账单重新计算（不清空历史）"""
+    chat = update.effective_chat
+    user = update.effective_user
+
+    if not is_authorized(user.id, require_full_access=False):
+        await update.message.reply_text("❌ 此操作需要管理员权限")
+        return
+
+    if chat.type not in ['group', 'supergroup']:
+        await update.message.reply_text("❌ 此功能仅在群组中可用")
+        return
+
+    group_id = str(chat.id)
+
+    # 日切前先获取当前账单快照
+    stats = accounting_manager.get_current_stats(group_id)
+    records = accounting_manager.get_current_records(group_id)
+
+    if stats['income_count'] == 0 and stats['expense_count'] == 0 and stats.get('daifu_count', 0) == 0:
+        await update.message.reply_text("📭 当前没有账单记录，无需日切")
+        return
+
+    final_bill = format_bill_message(stats, records, "日切前账单", group_id)
+
+    # 执行日切
+    result = accounting_manager.do_daily_cutoff(group_id)
+
+    if result is not None:
+        await update.message.reply_text(
+            f"🕐 <b>日切完成！</b>当前账单已重新开始计算\n\n"
+            f"{final_bill}\n\n"
+            f"💡 费率/汇率配置已保留，历史账单可通过「查询账单」查看",
+            parse_mode='HTML'
+        )
+    else:
+        # result 为 None 可能是会话无记录，也算成功（新会话已创建）
+        await update.message.reply_text(
+            f"🕐 <b>日切完成！</b>当前账单已重新开始计算\n\n"
+            f"💡 费率/汇率配置已保留，历史账单可通过「查询账单」查看",
+            parse_mode='HTML'
+        )
+
+
+async def handle_daily_cutoff_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """开启日切：默认4点日切"""
+    chat = update.effective_chat
+    user = update.effective_user
+
+    if not is_authorized(user.id, require_full_access=True):
+        await update.message.reply_text("❌ 此操作需要管理员权限")
+        return
+
+    if chat.type not in ['group', 'supergroup']:
+        await update.message.reply_text("❌ 此功能仅在群组中可用")
+        return
+
+    group_id = str(chat.id)
+
+    if accounting_manager.set_daily_cutoff_enabled(group_id, enabled=True, hour=4):
+        await update.message.reply_text(
+            "✅ <b>日切功能已开启</b>\n\n"
+            "⏰ 默认日切时间：每日凌晨 4:00\n"
+            "💡 可使用「设置日切N」调整时间（N=1-24）\n"
+            "📌 今日不会立即日切，明日开始生效",
+            parse_mode='HTML'
+        )
+    else:
+        await update.message.reply_text("❌ 开启日切失败，请稍后重试")
+
+
+async def handle_daily_cutoff_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """关闭日切"""
+    chat = update.effective_chat
+    user = update.effective_user
+
+    if not is_authorized(user.id, require_full_access=True):
+        await update.message.reply_text("❌ 此操作需要管理员权限")
+        return
+
+    if chat.type not in ['group', 'supergroup']:
+        await update.message.reply_text("❌ 此功能仅在群组中可用")
+        return
+
+    group_id = str(chat.id)
+
+    if accounting_manager.set_daily_cutoff_enabled(group_id, enabled=False):
+        await update.message.reply_text("✅ 日切功能已关闭，将使用默认记账模式")
+    else:
+        await update.message.reply_text("❌ 关闭日切失败，请稍后重试")
+
+
+async def handle_daily_cutoff_set(update: Update, context: ContextTypes.DEFAULT_TYPE, hour: int):
+    """设置日切时间（1-24）"""
+    chat = update.effective_chat
+    user = update.effective_user
+
+    if not is_authorized(user.id, require_full_access=True):
+        await update.message.reply_text("❌ 此操作需要管理员权限")
+        return
+
+    if chat.type not in ['group', 'supergroup']:
+        await update.message.reply_text("❌ 此功能仅在群组中可用")
+        return
+
+    group_id = str(chat.id)
+
+    if hour < 1 or hour > 24:
+        await update.message.reply_text("❌ 日切时间范围为 1-24（代表凌晨1点-24点）")
+        return
+
+    # 设置日切时间（如未开启会自动开启）
+    if accounting_manager.set_daily_cutoff_hour(group_id, hour):
+        hour_display = "24:00（午夜）" if hour == 24 else f"{hour}:00"
+        await update.message.reply_text(
+            f"✅ <b>日切时间已设置为 {hour_display}</b>\n\n"
+            f"💡 日切功能已自动开启，每日 {hour_display} 自动重置账单\n"
+            f"📌 今日不会立即日切，明日开始生效",
+            parse_mode='HTML'
+        )
+    else:
+        await update.message.reply_text("❌ 设置日切时间失败，请稍后重试")
+
+
+async def check_daily_cutoff(context: ContextTypes.DEFAULT_TYPE):
+    """后台检查：遍历所有开启日切的群组，到点自动日切"""
+    try:
+        groups = accounting_manager.get_all_daily_cutoff_groups()
+        if not groups:
+            return
+
+        now_ts = int(time.time())
+        now_beijing = beijing_time(now_ts)
+        current_hour = now_beijing.hour
+        today_str = now_beijing.strftime('%Y-%m-%d')
+
+        for group in groups:
+            group_id = group['group_id']
+            cutoff_hour = group['cutoff_hour']
+            last_cutoff_date = group.get('last_cutoff_date', '')
+
+            # 24点映射为0点
+            actual_hour = 0 if cutoff_hour == 24 else cutoff_hour
+
+            # 当前时间已过日切时间且今天还没日切过
+            if current_hour >= actual_hour and last_cutoff_date < today_str:
+                try:
+                    result = accounting_manager.do_daily_cutoff(group_id)
+                    accounting_manager.update_last_cutoff_date(group_id, today_str)
+                    logger.info(f"群组 {group_id} 自动日切完成")
+
+                    # 通知群组
+                    try:
+                        await context.bot.send_message(
+                            chat_id=group_id,
+                            text="🕐 <b>自动日切完成</b>\n当前账单已重新开始计算\n💡 历史账单可通过「查询账单」查看",
+                            parse_mode='HTML'
+                        )
+                    except Exception as e:
+                        logger.warning(f"日切通知发送失败 ({group_id}): {e}")
+                except Exception as e:
+                    logger.error(f"群组 {group_id} 自动日切失败: {e}")
+    except Exception as e:
+        logger.error(f"日切后台检查失败: {e}")
+
+
 async def handle_view_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """查看群组的配置信息（包括个性化配置）"""
     message = update.message
@@ -5605,6 +6449,15 @@ async def handle_view_config(update: Update, context: ContextTypes.DEFAULT_TYPE)
     reply += f"💰 手续费：{session['fee_rate']}%\n"
     reply += f"💱 汇率：{session['exchange_rate']}\n"
     reply += f"📝 单笔费用：{session.get('per_transaction_fee', 0)} 元\n"
+
+    # 日切配置
+    cutoff_config = accounting_manager.get_daily_cutoff_config(group_id)
+    if cutoff_config['enabled']:
+        cutoff_hour = cutoff_config['cutoff_hour']
+        hour_display = "24:00（午夜）" if cutoff_hour == 24 else f"{cutoff_hour}:00"
+        reply += f"🕐 日切：已开启（每日 {hour_display} 自动重置）\n"
+    else:
+        reply += f"🕐 日切：未开启\n"
 
     user_configs = accounting_manager.get_all_user_configs(group_id)
 
