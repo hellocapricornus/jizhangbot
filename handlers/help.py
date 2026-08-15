@@ -35,7 +35,11 @@ async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "设置单笔费用 ▫️ <code>设置单笔费用2</code>\n"
         "组合设置 ▫️ <code>设置手续费2 设置汇率20 设置单笔费用15</code>\n"
         "组合设置 ▫️ <code>设置手续费2 汇率20 单笔费用15</code>\n"
-        "查看配置 ▫️ <code>查看配置</code>\n\n"
+        "查看配置 ▫️ <code>查看配置</code>\n"
+        "开启日切 ▫️ <code>开启日切</code>（默认4点重置）\n"
+        "关闭日切 ▫️ <code>关闭日切</code>\n"
+        "设置日切 ▫️ <code>设置日切1</code>（1-24点）\n"
+        "手动日切 ▫️ <code>日切当前</code>（立即重置账单）\n\n"
 
         "<blockquote><b>5️⃣ 单独配置（指定人）</b></blockquote>\n"
         "设置配置 ▫️ <code>设置 @用户名 手续费5 汇率10 单笔费用12</code>\n"
@@ -82,13 +86,9 @@ async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "数学函数 ▫️ <code>sqrt(100)</code> <code>2^3</code>\n\n"
 
         "<blockquote><b>👤 个人中心</b></blockquote>\n"
-        "个人统计 ▫️ 查看个人记账汇总\n"
         "监控地址 ▫️ 管理自己的监控地址\n"
         "交易提醒 ▫️ 开关地址交易通知\n"
-        "群发附言 ▫️ 设置默认群发签名\n"
-        "每日早报 ▫️ 开启/关闭每日早报\n"
-        "数据分析 ▫️ 导出数据分析报告\n"
-        "会员系统 ▫️ 升级/续费会员\n\n"
+        "群发附言 ▫️ 设置默认群发签名\n\n"
 
         "<blockquote><b>🛡️ 权限等级</b></blockquote>\n"
         "👨‍💼 管理员 ▫️ 所有功能 + 管理操作员\n"
