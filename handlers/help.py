@@ -41,6 +41,15 @@ async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "设置日切 ▫️ <code>设置日切1</code>（1-24点）\n"
         "手动日切 ▫️ <code>日切当前</code>（立即重置账单）\n\n"
 
+        "<blockquote><b>4️⃣ 代付独立配置</b></blockquote>\n"
+        "设置代付 ▫️ <code>设置代付 手续费-6</code>\n"
+        "设置代付 ▫️ <code>设置代付 汇率12</code>\n"
+        "设置代付 ▫️ <code>设置代付 单笔费用10</code>\n"
+        "组合设置 ▫️ <code>设置代付 手续费-6 汇率12 单笔费用10</code>\n"
+        "代付记账 ▫️ <code>代付+10000</code>（自动用代付汇率）\n"
+        "代付记账 ▫️ <code>代付+10000 德国</code>（带分组）\n"
+        "删除代付 ▫️ <code>删除代付配置</code>\n\n"
+
         "<blockquote><b>5️⃣ 单独配置（指定人）</b></blockquote>\n"
         "设置配置 ▫️ <code>设置 @用户名 手续费5 汇率10 单笔费用12</code>\n"
         "设置配置 ▫️ 回复指定人消息：<code>设置手续费5 汇率10</code>\n"
