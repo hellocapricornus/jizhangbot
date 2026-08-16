@@ -833,6 +833,19 @@ class AccountingManager:
                 )
             """)
 
+            # 代付/代收独立配置表（群组级，跨会话保留）
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS accounting_category_config (
+                    group_id TEXT,
+                    config_type TEXT,
+                    fee_rate REAL DEFAULT 0,
+                    exchange_rate REAL DEFAULT 0,
+                    per_transaction_fee REAL DEFAULT 0,
+                    updated_at INTEGER DEFAULT 0,
+                    PRIMARY KEY (group_id, config_type)
+                )
+            """)
+
             # 记账记录表（添加 category 字段）
             c.execute("""
                 CREATE TABLE IF NOT EXISTS accounting_records (
@@ -1454,7 +1467,7 @@ class AccountingManager:
                 c = conn.cursor()
                 now = int(time.time())
                 c.execute("""
-                    UPDATE group_accounting_config 
+                    UPDATE group_accounting_config
                     SET per_transaction_fee = ?, updated_at = ?
                     WHERE group_id = ? AND is_active = 1
                 """, (fee, now, group_id))
@@ -1463,6 +1476,91 @@ class AccountingManager:
         except Exception as e:
             logger.error(f"设置单笔费用失败: {e}")
             return False
+
+    # ========== 代付/代收独立配置 ==========
+    def set_category_config(self, group_id: str, config_type: str,
+                            fee_rate=None, exchange_rate=None,
+                            per_transaction_fee=None) -> bool:
+        """设置代付/代收配置（None 表示不修改该字段）"""
+        try:
+            with self._get_conn() as conn:
+                c = conn.cursor()
+                now = int(time.time())
+                # 先查是否已有记录
+                c.execute(
+                    "SELECT fee_rate, exchange_rate, per_transaction_fee FROM accounting_category_config WHERE group_id = ? AND config_type = ?",
+                    (group_id, config_type)
+                )
+                row = c.fetchone()
+                if row:
+                    new_fee = fee_rate if fee_rate is not None else row[0]
+                    new_rate = exchange_rate if exchange_rate is not None else row[1]
+                    new_per = per_transaction_fee if per_transaction_fee is not None else row[2]
+                    c.execute("""
+                        UPDATE accounting_category_config
+                        SET fee_rate = ?, exchange_rate = ?, per_transaction_fee = ?, updated_at = ?
+                        WHERE group_id = ? AND config_type = ?
+                    """, (new_fee, new_rate, new_per, now, group_id, config_type))
+                else:
+                    new_fee = fee_rate if fee_rate is not None else 0
+                    new_rate = exchange_rate if exchange_rate is not None else 0
+                    new_per = per_transaction_fee if per_transaction_fee is not None else 0
+                    c.execute("""
+                        INSERT INTO accounting_category_config
+                        (group_id, config_type, fee_rate, exchange_rate, per_transaction_fee, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    """, (group_id, config_type, new_fee, new_rate, new_per, now))
+                conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"设置代付/代收配置失败: {e}")
+            return False
+
+    def get_category_config(self, group_id: str, config_type: str) -> dict:
+        """获取代付/代收配置，没有则返回 None"""
+        try:
+            with self._get_conn() as conn:
+                c = conn.cursor()
+                c.execute(
+                    "SELECT fee_rate, exchange_rate, per_transaction_fee FROM accounting_category_config WHERE group_id = ? AND config_type = ?",
+                    (group_id, config_type)
+                )
+                row = c.fetchone()
+            if row:
+                return {
+                    'fee_rate': row[0],
+                    'exchange_rate': row[1],
+                    'per_transaction_fee': row[2],
+                    'has_config': True
+                }
+            return None
+        except Exception as e:
+            logger.error(f"获取代付/代收配置失败: {e}")
+            return None
+
+    def get_all_category_configs(self, group_id: str) -> dict:
+        """获取该群代付配置，返回 {'daifu': {...}} 或空 dict"""
+        result = {}
+        cfg = self.get_category_config(group_id, 'daifu')
+        if cfg:
+            result['daifu'] = cfg
+        return result
+
+    def delete_category_config(self, group_id: str, config_type: str) -> bool:
+        """删除代付配置"""
+        try:
+            with self._get_conn() as conn:
+                c = conn.cursor()
+                c.execute(
+                    "DELETE FROM accounting_category_config WHERE group_id = ? AND config_type = ?",
+                    (group_id, config_type)
+                )
+                conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"删除代付配置失败: {e}")
+            return False
+
 
     # ========== 日切功能 ==========
 
@@ -1686,6 +1784,19 @@ class AccountingManager:
         except Exception as e:
             logger.error(f"删除用户配置失败: {e}")
             return False
+
+    def clear_all_user_configs(self, group_id: str) -> int:
+        """删除该群所有用户的个性化配置，返回删除条数"""
+        try:
+            with self._get_conn() as conn:
+                c = conn.cursor()
+                c.execute("DELETE FROM user_config WHERE group_id = ?", (group_id,))
+                deleted = c.rowcount
+                conn.commit()
+            return deleted
+        except Exception as e:
+            logger.error(f"清理群组个性化配置失败: {e}")
+            return 0
 
     def get_all_user_configs(self, group_id: str) -> list:
         """获取群组中所有用户的个性化配置"""
@@ -2745,9 +2856,14 @@ async def handle_end_bill(update: Update, context: ContextTypes.DEFAULT_TYPE):
     result = accounting_manager.end_session(group_id)
 
     if result:
+        # 清理所有个性化配置和代付配置
+        cleared_users = accounting_manager.clear_all_user_configs(group_id)
+        accounting_manager.delete_category_config(group_id, 'daifu')
+
         await update.message.reply_text(
             f"✅ <b>账单已结束并保存！</b>\n\n{final_bill}\n\n"
             f"💡 提示：费率已重置为0%，汇率已重置为1 = 1 USDT\n"
+            f"🧹 已清理{cleared_users}人个性化配置及代付配置\n"
             f"可使用「设置手续费」和「设置汇率」重新配置",
             parse_mode='HTML'
         )
@@ -3795,7 +3911,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
     ])
     params_count = sum([1 for k in ['手续费', '汇率', '单笔费用'] if k in text])
 
-    if settings_with_prefix >= 2 or (text.startswith('设置') and params_count >= 2):
+    if not text.startswith('设置代付') and (settings_with_prefix >= 2 or (text.startswith('设置') and params_count >= 2)):
         await handle_batch_settings(update, context, text)
         return
 
@@ -3869,6 +3985,60 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
         await handle_daily_cutoff_now(update, context)
         return
 
+    # ========== 9.6 代付配置 ==========
+    elif text.startswith('设置代付'):
+        if not _is_authorized_in_group(update, full_access=True):
+            await message.reply_text("❌ 此操作需要管理员权限")
+            return
+        group_id = str(chat.id)
+        config_type = 'daifu'
+        type_name = '代付'
+        rest = text[4:]  # 去掉"设置代付"
+
+        # 正则提取各字段（支持任意组合）
+        fee_match = re.search(r'手续费\s*(-?\d+(?:\.\d+)?)', rest)
+        rate_match = re.search(r'汇率\s*(\d+(?:\.\d+)?)', rest)
+        per_match = re.search(r'单笔费用\s*(\d+(?:\.\d+)?)', rest)
+
+        if not (fee_match or rate_match or per_match):
+            await message.reply_text(
+                f"❌ 格式错误\n"
+                f"用法：\n"
+                f"`设置{type_name} 手续费-6`\n"
+                f"`设置{type_name} 汇率12`\n"
+                f"`设置{type_name} 单笔费用10`\n"
+                f"`设置{type_name} 手续费-6 汇率12 单笔费用10`",
+                parse_mode="Markdown"
+            )
+            return
+
+        fee_val = float(fee_match.group(1)) if fee_match else None
+        rate_val = float(rate_match.group(1)) if rate_match else None
+        per_val = float(per_match.group(1)) if per_match else None
+
+        accounting_manager.set_category_config(
+            group_id, config_type,
+            fee_rate=fee_val, exchange_rate=rate_val, per_transaction_fee=per_val
+        )
+
+        # 读取更新后的完整配置
+        cfg = accounting_manager.get_category_config(group_id, config_type)
+        reply = f"✅ {type_name}配置已更新\n\n"
+        reply += f"💰 手续费：{cfg['fee_rate']}%\n"
+        reply += f"💱 汇率：{cfg['exchange_rate']}\n"
+        reply += f"📝 单笔费用：{cfg['per_transaction_fee']} 元\n\n"
+        reply += f"💡 记账时输入 `{type_name}+金额` 即可使用此配置"
+        await message.reply_text(reply, parse_mode="Markdown")
+        return
+    elif text == '删除代付配置':
+        if not _is_authorized_in_group(update, full_access=True):
+            await message.reply_text("❌ 此操作需要管理员权限")
+            return
+        group_id = str(chat.id)
+        accounting_manager.delete_category_config(group_id, 'daifu')
+        await message.reply_text("✅ 代付配置已删除")
+        return
+
     # ========== 10. 账单命令 ==========
     elif text == '结束账单':
         await handle_end_bill(update, context)
@@ -3899,6 +4069,129 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     elif text == '撤销账单':
         await handle_revoke_record(update, context)
+        return
+
+    # ========== 10.5 代付记账 ==========
+    elif text.startswith('代付+'):
+        if not _is_authorized_in_group(update, full_access=False):
+            await message.reply_text("❌ 此操作需要记账权限")
+            return
+        group_id = str(chat.id)
+        config_type = 'daifu'
+        type_name = '代付'
+
+        # 读取代付配置
+        cfg = accounting_manager.get_category_config(group_id, config_type)
+        if not cfg:
+            await message.reply_text(
+                f"❌ 尚未设置{type_name}配置\n"
+                f"请先使用：`设置{type_name} 手续费-6 汇率12`",
+                parse_mode="Markdown"
+            )
+            return
+
+        # 获取当前会话默认配置，用于回退未设置的字段
+        session = accounting_manager.get_or_create_session(group_id)
+        default_rate = session['exchange_rate'] or 1.0
+        default_per_fee = session.get('per_transaction_fee', 0)
+
+        # 去掉"代付"前缀，变成 "+金额..." 复用现有解析
+        new_text = text[2:]
+        # 重新走 +金额 的解析逻辑，但把配置值作为默认 temp 参数
+        # 汇率为 None/0 时回退到会话默认值，防止除零
+        try:
+            content = new_text[1:].strip()
+            temp_rate = cfg['exchange_rate'] if cfg['exchange_rate'] else default_rate
+            temp_fee = cfg['fee_rate']
+            temp_per_fee = cfg['per_transaction_fee'] if cfg['per_transaction_fee'] is not None else default_per_fee
+            category = ""
+            amount_str = content
+
+            if '#' in content:
+                hash_index = content.index('#')
+                before_hash = content[:hash_index]
+                after_hash = content[hash_index + 1:]
+                per_fee_match = re.match(r'^(\d+(?:\.\d+)?)', after_hash)
+                if per_fee_match:
+                    temp_per_fee = float(per_fee_match.group(1))
+                    remaining = after_hash[per_fee_match.end():].strip()
+                    if remaining:
+                        category = remaining
+                else:
+                    await message.reply_text("❌ 单笔费用格式错误：#数字 或 #数字 备注")
+                    return
+                content = before_hash.strip()
+                if not content:
+                    await message.reply_text("❌ # 前面需要输入金额")
+                    return
+                amount_str = content
+
+            if '*' in content:
+                star_parts = content.split('*', 1)
+                amount_str = star_parts[0].strip()
+                rest = star_parts[1].strip()
+                if '/' in rest:
+                    fee_part, rate_part = rest.split('/', 1)
+                    temp_fee_str = fee_part.replace('%', '').strip()
+                    try:
+                        temp_fee = float(temp_fee_str)
+                    except ValueError:
+                        pass
+                    rate_part_clean = rate_part.split(' ', 1)[0].strip()
+                    try:
+                        temp_rate = float(rate_part_clean)
+                    except ValueError:
+                        pass
+                    if ' ' in rate_part and not category:
+                        category = rate_part.split(' ', 1)[1].strip()
+                else:
+                    fee_part = rest.split(' ', 1)[0].strip()
+                    temp_fee_str = fee_part.replace('%', '').strip()
+                    try:
+                        temp_fee = float(temp_fee_str)
+                    except ValueError:
+                        pass
+                    if ' ' in rest and not category:
+                        category = rest.split(' ', 1)[1].strip()
+            elif '/' in content:
+                parts = content.split('/', 1)
+                amount_str = parts[0].strip()
+                rest = parts[1].strip()
+                if ' ' in rest:
+                    rate_part, cat = rest.split(' ', 1)
+                    try:
+                        temp_rate = float(rate_part)
+                        if not category:
+                            category = cat
+                    except ValueError:
+                        if not category:
+                            category = rest
+                        temp_rate = cfg['exchange_rate']
+                else:
+                    try:
+                        temp_rate = float(rest)
+                    except ValueError:
+                        if not category:
+                            category = rest
+                        temp_rate = cfg['exchange_rate']
+            else:
+                if ' ' in amount_str and not category:
+                    parts = amount_str.split(' ', 1)
+                    amount_str = parts[0]
+                    category = parts[1]
+
+            if amount_str:
+                amount = float(amount_str)
+                await handle_add_income(update, context, amount, is_correction=False,
+                                       category=category, temp_rate=temp_rate,
+                                       temp_fee=temp_fee, temp_per_fee=temp_per_fee)
+            else:
+                await message.reply_text(f"❌ 格式错误：{type_name}+金额 或 {type_name}+金额 备注")
+        except ValueError:
+            await message.reply_text("❌ 金额格式错误，请输入数字")
+        except Exception as e:
+            logger.error(f"解析{type_name}记账失败: {e}")
+            await message.reply_text("❌ 格式错误")
         return
 
     # ========== 11. 入款 +金额 ==========
@@ -6449,6 +6742,14 @@ async def handle_view_config(update: Update, context: ContextTypes.DEFAULT_TYPE)
     reply += f"💰 手续费：{session['fee_rate']}%\n"
     reply += f"💱 汇率：{session['exchange_rate']}\n"
     reply += f"📝 单笔费用：{session.get('per_transaction_fee', 0)} 元\n"
+
+    # 代付配置（有设置才显示）
+    daifu_cfg = accounting_manager.get_category_config(group_id, 'daifu')
+    if daifu_cfg:
+        reply += f"\n📤 **代付配置**\n"
+        reply += f"💰 手续费：{daifu_cfg['fee_rate']}%\n"
+        reply += f"💱 汇率：{daifu_cfg['exchange_rate']}\n"
+        reply += f"📝 单笔费用：{daifu_cfg['per_transaction_fee']} 元\n"
 
     # 日切配置
     cutoff_config = accounting_manager.get_daily_cutoff_config(group_id)
