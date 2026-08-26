@@ -97,7 +97,11 @@ async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<blockquote><b>👤 个人中心</b></blockquote>\n"
         "监控地址 ▫️ 管理自己的监控地址\n"
         "交易提醒 ▫️ 开关地址交易通知\n"
-        "群发附言 ▫️ 设置默认群发签名\n\n"
+        "群发附言 ▫️ 设置默认群发签名\n"
+        "规则管理 ▫️ 设置国家默认规则\n"
+        "业绩汇总 ▫️ 自动计算员工业绩\n"
+        "响应速度 ▫️ 员工响应速度实时统计\n"
+        "员工管理 ▫️ 发布任务、设置底薪、设置激励奖\n\n"
 
         "<blockquote><b>🛡️ 权限等级</b></blockquote>\n"
         "👨‍💼 管理员 ▫️ 所有功能 + 管理操作员\n"
