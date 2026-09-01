@@ -759,6 +759,10 @@ async def profile_performance_menu(update: Update, context: ContextTypes.DEFAULT
     text += f"<b>公司总利润：{summary['total_profit']:.2f} USDT</b>\n"
     if summary.get('total_loss', 0) > 0:
         text += f"<b>本月亏损：{summary['total_loss']:.2f} USDT</b>\n"
+    _view_fees = summary.get('company_fees', {})
+    _total_fees = _view_fees.get('channel_fee', 0) + _view_fees.get('tech_fee', 0) + _view_fees.get('response_award', 0)
+    if _total_fees > 0:
+        text += f"<b>公司费用（渠道费/技术费/响应速度奖）：{_total_fees:.2f} USDT</b>\n"
     text += "</blockquote>\n"
 
     # 业绩记录表格
@@ -817,35 +821,52 @@ async def profile_performance_menu(update: Update, context: ContextTypes.DEFAULT
             actual_base = data.get('actual_base_salary', 0)
             incentive = data.get('incentive', 0)
             loss_bear = data['loss_bear']
+            channel_fee = data.get('channel_fee', 0)
+            tech_fee = data.get('tech_fee', 0)
+            response_award = data.get('response_award', 0)
 
-            total_income = gross_commission + actual_base + incentive - loss_bear
+            total_income = gross_commission + actual_base + incentive - loss_bear + channel_fee + tech_fee + response_award
 
-            commission_info = f"• <a href=\"tg://user?id={emp_id}\">{data['name']}</a>：总收入 {total_income:.2f} USDT\n"
+            # 明细行（最后一行用 └─，其余用 ├─）
+            details = [f"业绩：{data['performance']:.2f} USDT（提成：{gross_commission:.2f} USDT）"]
 
-            commission_info += f"  ├─ 业绩：{data['performance']:.2f} USDT（提成：{gross_commission:.2f} USDT）\n"
-
-            has_base_salary = data.get('base_salary', 0) > 0
-            has_actual_base = actual_base > 0
-            has_loss = loss_bear > 0
-            has_incentive = incentive > 0
-
-            if has_actual_base:
-                base_salary = data.get('base_salary', 0)
+            base_salary = data.get('base_salary', 0)
+            if base_salary > 0:
                 completion_rate = data.get('completion_rate', 0)
-                if completion_rate > 0:
-                    commission_info += f"  ├─ 实际底薪：{actual_base:.2f} USDT（底薪 {base_salary:.2f} USDT × 完成率 {completion_rate}%）\n"
+                if data.get('has_month_tasks'):
+                    details.append(f"实际底薪：{actual_base:.2f} USDT（底薪 {base_salary:.2f} USDT × 完成率 {completion_rate}%）")
                 else:
-                    commission_info += f"  ├─ 底薪：{actual_base:.2f} USDT\n"
+                    details.append(f"底薪：{base_salary:.2f} USDT（本月无任务，全额发放）")
 
-            if has_incentive:
+            if incentive > 0:
                 threshold = data.get('incentive_threshold', 0)
                 rate = data.get('incentive_rate', 0)
-                commission_info += f"  ├─ 激励奖：{incentive:.2f} USDT（达到门槛 {threshold:.0f} USDT，{rate*100:.1f}%）\n"
+                details.append(f"激励奖：{incentive:.2f} USDT（达到门槛 {threshold:.0f} USDT，{rate*100:.1f}%）")
 
-            if has_loss:
-                commission_info += f"  └─ 承担亏损：{loss_bear:.2f} USDT\n\n"
-            else:
-                commission_info += "\n"
+            if channel_fee > 0:
+                details.append(f"渠道费：{channel_fee:.2f} USDT")
+            if tech_fee > 0:
+                details.append(f"技术费：{tech_fee:.2f} USDT")
+
+            if response_award > 0:
+                award_rate = data.get('response_award_rate', 0)
+                award_rank = data.get('response_award_rank', 1)
+                award_cap = data.get('response_award_cap', 0)
+                if award_cap > 0 and data.get('response_award_capped'):
+                    details.append(f"响应速度奖：{response_award:.2f} USDT（公司总收益 × {award_rate*100:.1f}%，已达上限 {award_cap:g} USDT，响应速度第{award_rank}名）")
+                elif award_cap > 0:
+                    details.append(f"响应速度奖：{response_award:.2f} USDT（公司总收益 × {award_rate*100:.1f}%，上限 {award_cap:g} USDT，响应速度第{award_rank}名）")
+                else:
+                    details.append(f"响应速度奖：{response_award:.2f} USDT（公司总收益 × {award_rate*100:.1f}%，响应速度第{award_rank}名）")
+
+            if loss_bear > 0:
+                details.append(f"承担亏损：{loss_bear:.2f} USDT")
+
+            commission_info = f"• <a href=\"tg://user?id={emp_id}\">{data['name']}</a>：总收入 {total_income:.2f} USDT\n"
+            for i, detail in enumerate(details):
+                prefix = "  └─" if i == len(details) - 1 else "  ├─"
+                commission_info += f"{prefix} {detail}\n"
+            commission_info += "\n"
             text += commission_info
     else:
         for emp_id, data in summary['employee_commission'].items():
@@ -859,6 +880,25 @@ async def profile_performance_menu(update: Update, context: ContextTypes.DEFAULT
     text += "</blockquote>"
     text += f"• 通道提成：{channel_commission_pct}% | 客户提成：{customer_commission_pct}%\n"
     text += f"• 亏损分摊：通道{channel_loss_pct}% | 客户{customer_loss_pct}% | 公司{company_loss_pct}%\n"
+    company_fees = summary.get('company_fees', {})
+    fee_parts = []
+    if (settings.get('channel_fee_rate') or 0) > 0 or company_fees.get('channel_fee_emp'):
+        ch_fee_rate = settings.get('channel_fee_rate') or 0
+        fee_parts.append(f"渠道费：{ch_fee_rate*100:.1f}%（{company_fees.get('channel_fee_emp_name', '') or '未指定员工'}）")
+    if (settings.get('tech_fee_rate') or 0) > 0 or company_fees.get('tech_fee_emp'):
+        tech_fee_rate = settings.get('tech_fee_rate') or 0
+        fee_parts.append(f"技术费：{tech_fee_rate*100:.1f}%（{company_fees.get('tech_fee_emp_name', '') or '未指定员工'}）")
+    if (settings.get('response_award_rate') or 0) > 0:
+        resp_award_rate = settings.get('response_award_rate') or 0
+        resp_award_cap = settings.get('response_award_cap') or 0
+        cap_text = f"，上限{resp_award_cap:g}" if resp_award_cap > 0 else ""
+        winner_name = company_fees.get('response_award_emp_name', '')
+        if winner_name:
+            fee_parts.append(f"响应速度奖：{resp_award_rate*100:.1f}%（{winner_name}，响应第{company_fees.get('response_award_rank', 1)}名{cap_text}）")
+        else:
+            fee_parts.append(f"响应速度奖：{resp_award_rate*100:.1f}%（本月无符合条件员工{cap_text}）")
+    if fee_parts:
+        text += f"• 公司费用：{' | '.join(fee_parts)}\n"
     text += f"💡 业绩 = 利润 × 50% | 提成 = 利润 × 提成比例 - 亏损承担\n"
 
     # 按钮布局（一排两个）
@@ -1213,6 +1253,10 @@ async def profile_performance_view_show(update: Update, context: ContextTypes.DE
     text += f"<b>公司总利润：{summary['total_profit']:.2f} USDT</b>\n"
     if summary.get('total_loss', 0) > 0:
         text += f"<b>本月亏损：{summary['total_loss']:.2f} USDT</b>\n"
+    _view_fees = summary.get('company_fees', {})
+    _total_fees = _view_fees.get('channel_fee', 0) + _view_fees.get('tech_fee', 0) + _view_fees.get('response_award', 0)
+    if _total_fees > 0:
+        text += f"<b>公司费用（渠道费/技术费/响应速度奖）：{_total_fees:.2f} USDT</b>\n"
     text += "</blockquote>\n"
 
     # 业绩记录表格
@@ -1271,35 +1315,52 @@ async def profile_performance_view_show(update: Update, context: ContextTypes.DE
             actual_base = data.get('actual_base_salary', 0)
             incentive = data.get('incentive', 0)
             loss_bear = data['loss_bear']
+            channel_fee = data.get('channel_fee', 0)
+            tech_fee = data.get('tech_fee', 0)
+            response_award = data.get('response_award', 0)
 
-            total_income = gross_commission + actual_base + incentive - loss_bear
+            total_income = gross_commission + actual_base + incentive - loss_bear + channel_fee + tech_fee + response_award
 
-            commission_info = f"• <a href=\"tg://user?id={emp_id}\">{data['name']}</a>：总收入 {total_income:.2f} USDT\n"
+            # 明细行（最后一行用 └─，其余用 ├─）
+            details = [f"业绩：{data['performance']:.2f} USDT（提成：{gross_commission:.2f} USDT）"]
 
-            commission_info += f"  ├─ 业绩：{data['performance']:.2f} USDT（提成：{gross_commission:.2f} USDT）\n"
-
-            has_base_salary = data.get('base_salary', 0) > 0
-            has_actual_base = actual_base > 0
-            has_loss = loss_bear > 0
-            has_incentive = incentive > 0
-
-            if has_actual_base:
-                base_salary = data.get('base_salary', 0)
+            base_salary = data.get('base_salary', 0)
+            if base_salary > 0:
                 completion_rate = data.get('completion_rate', 0)
-                if completion_rate > 0:
-                    commission_info += f"  ├─ 实际底薪：{actual_base:.2f} USDT（底薪 {base_salary:.2f} USDT × 完成率 {completion_rate}%）\n"
+                if data.get('has_month_tasks'):
+                    details.append(f"实际底薪：{actual_base:.2f} USDT（底薪 {base_salary:.2f} USDT × 完成率 {completion_rate}%）")
                 else:
-                    commission_info += f"  ├─ 底薪：{actual_base:.2f} USDT\n"
+                    details.append(f"底薪：{base_salary:.2f} USDT（本月无任务，全额发放）")
 
-            if has_incentive:
+            if incentive > 0:
                 threshold = data.get('incentive_threshold', 0)
                 rate = data.get('incentive_rate', 0)
-                commission_info += f"  ├─ 激励奖：{incentive:.2f} USDT（达到门槛 {threshold:.0f} USDT，{rate*100:.1f}%）\n"
+                details.append(f"激励奖：{incentive:.2f} USDT（达到门槛 {threshold:.0f} USDT，{rate*100:.1f}%）")
 
-            if has_loss:
-                commission_info += f"  └─ 承担亏损：{loss_bear:.2f} USDT\n\n"
-            else:
-                commission_info += "\n"
+            if channel_fee > 0:
+                details.append(f"渠道费：{channel_fee:.2f} USDT")
+            if tech_fee > 0:
+                details.append(f"技术费：{tech_fee:.2f} USDT")
+
+            if response_award > 0:
+                award_rate = data.get('response_award_rate', 0)
+                award_rank = data.get('response_award_rank', 1)
+                award_cap = data.get('response_award_cap', 0)
+                if award_cap > 0 and data.get('response_award_capped'):
+                    details.append(f"响应速度奖：{response_award:.2f} USDT（公司总收益 × {award_rate*100:.1f}%，已达上限 {award_cap:g} USDT，响应速度第{award_rank}名）")
+                elif award_cap > 0:
+                    details.append(f"响应速度奖：{response_award:.2f} USDT（公司总收益 × {award_rate*100:.1f}%，上限 {award_cap:g} USDT，响应速度第{award_rank}名）")
+                else:
+                    details.append(f"响应速度奖：{response_award:.2f} USDT（公司总收益 × {award_rate*100:.1f}%，响应速度第{award_rank}名）")
+
+            if loss_bear > 0:
+                details.append(f"承担亏损：{loss_bear:.2f} USDT")
+
+            commission_info = f"• <a href=\"tg://user?id={emp_id}\">{data['name']}</a>：总收入 {total_income:.2f} USDT\n"
+            for i, detail in enumerate(details):
+                prefix = "  └─" if i == len(details) - 1 else "  ├─"
+                commission_info += f"{prefix} {detail}\n"
+            commission_info += "\n"
             text += commission_info
     else:
         for emp_id, data in summary['employee_commission'].items():
@@ -1313,6 +1374,25 @@ async def profile_performance_view_show(update: Update, context: ContextTypes.DE
     text += "</blockquote>"
     text += f"• 通道提成：{channel_commission_pct}% | 客户提成：{customer_commission_pct}%\n"
     text += f"• 亏损分摊：通道{channel_loss_pct}% | 客户{customer_loss_pct}% | 公司{company_loss_pct}%\n"
+    company_fees = summary.get('company_fees', {})
+    fee_parts = []
+    if (settings.get('channel_fee_rate') or 0) > 0 or company_fees.get('channel_fee_emp'):
+        ch_fee_rate = settings.get('channel_fee_rate') or 0
+        fee_parts.append(f"渠道费：{ch_fee_rate*100:.1f}%（{company_fees.get('channel_fee_emp_name', '') or '未指定员工'}）")
+    if (settings.get('tech_fee_rate') or 0) > 0 or company_fees.get('tech_fee_emp'):
+        tech_fee_rate = settings.get('tech_fee_rate') or 0
+        fee_parts.append(f"技术费：{tech_fee_rate*100:.1f}%（{company_fees.get('tech_fee_emp_name', '') or '未指定员工'}）")
+    if (settings.get('response_award_rate') or 0) > 0:
+        resp_award_rate = settings.get('response_award_rate') or 0
+        resp_award_cap = settings.get('response_award_cap') or 0
+        cap_text = f"，上限{resp_award_cap:g}" if resp_award_cap > 0 else ""
+        winner_name = company_fees.get('response_award_emp_name', '')
+        if winner_name:
+            fee_parts.append(f"响应速度奖：{resp_award_rate*100:.1f}%（{winner_name}，响应第{company_fees.get('response_award_rank', 1)}名{cap_text}）")
+        else:
+            fee_parts.append(f"响应速度奖：{resp_award_rate*100:.1f}%（本月无符合条件员工{cap_text}）")
+    if fee_parts:
+        text += f"• 公司费用：{' | '.join(fee_parts)}\n"
     text += f"💡 业绩 = 利润 × 50% | 提成 = 利润 × 提成比例 - 亏损承担\n"
 
     keyboard = [[InlineKeyboardButton("◀️ 返回月份选择", callback_data="profile_performance_view")]]
@@ -1882,30 +1962,62 @@ async def profile_performance_export_do(update: Update, context: ContextTypes.DE
     data = query.data
 
     if data == "perf_export_all":
-        # 导出全部
-        from db import get_performance_records
-        records = get_performance_records()
-        if not records:
+        # 导出全部：按月汇总后合并，口径与月度导出完全一致（含公司费用）
+        from db import get_performance_available_months, get_performance_summary
+        months = get_performance_available_months()
+        if not months:
             await query.answer("暂无业绩记录", show_alert=True)
             return
+
         year_str = "全部"
         month_str = ""
-        total_profit = sum(r['profit'] for r in records)
+        records = []
+        loss_records = []
+        total_profit = 0
+        employee_data = {}
+        company_fees = {}
+        settings = {}
 
-        # 按员工汇总
-        employee_commission = {}
-        employee_performance = {}
-        for r in records:
-            profit = r['profit']
-            for emp_id, emp_name, key_prefix in [
-                (r['channel_employee_id'], r['channel_employee_name'], 'ch'),
-                (r['customer_employee_id'], r['customer_employee_name'], 'cu')
-            ]:
-                if emp_id not in employee_commission:
-                    employee_commission[emp_id] = {"name": emp_name or f"ID{emp_id}", "commission": 0}
-                    employee_performance[emp_id] = {"name": emp_name or f"ID{emp_id}", "performance": 0}
-                employee_commission[emp_id]["commission"] += profit * 0.1
-                employee_performance[emp_id]["performance"] += profit / 2
+        for m in months:
+            y, mo = m.split('-')
+            month_summary = get_performance_summary(int(y), int(mo))
+            if not settings:
+                settings = month_summary.get('settings', {})
+
+            records.extend(month_summary.get('records', []))
+            loss_records.extend(month_summary.get('loss_records', []))
+            total_profit += month_summary.get('total_profit', 0)
+
+            # 合并公司费用（金额累加，员工/比例信息保留最新）
+            mf = month_summary.get('company_fees', {})
+            for k in ('channel_fee', 'tech_fee', 'response_award'):
+                company_fees[k] = company_fees.get(k, 0) + mf.get(k, 0)
+            for k in ('channel_fee_emp', 'tech_fee_emp', 'response_award_emp',
+                      'channel_fee_emp_name', 'tech_fee_emp_name', 'response_award_emp_name',
+                      'response_award_rank', 'avg_response_count',
+                      'response_award_cap', 'response_award_capped'):
+                if mf.get(k) is not None and mf.get(k) != 0 and mf.get(k) is not False:
+                    company_fees[k] = mf[k]
+
+            # 合并员工数据（数值累加，布尔取或，文本/比例保留首个非零）
+            for emp_id, emp in month_summary.get('employee_data', {}).items():
+                if emp_id not in employee_data:
+                    employee_data[emp_id] = dict(emp)
+                    continue
+                dst = employee_data[emp_id]
+                for k, v in emp.items():
+                    if k in ('is_channel', 'is_customer', 'has_month_tasks', 'response_award_capped'):
+                        dst[k] = dst.get(k, False) or v
+                    elif isinstance(v, (int, float)) and k not in (
+                            'completion_rate', 'incentive_threshold', 'incentive_rate',
+                            'response_award_rank', 'channel_fee_rate', 'tech_fee_rate',
+                            'response_award_rate', 'response_award_cap'):
+                        dst[k] = dst.get(k, 0) + v
+                    elif dst.get(k) in (None, 0, '', False):
+                        dst[k] = v
+
+        employee_commission = {k: {"name": v["name"], "commission": v["commission"]} for k, v in employee_data.items()}
+        employee_performance = {k: {"name": v["name"], "performance": v["performance"]} for k, v in employee_data.items()}
     else:
         month_str = data.replace("perf_export_", "")
         year, month = month_str.split('-')
@@ -1921,11 +2033,13 @@ async def profile_performance_export_do(update: Update, context: ContextTypes.DE
         employee_performance = summary['employee_performance']
         loss_records = summary.get('loss_records', [])
         settings = summary.get('settings', {})
+        employee_data = summary.get('employee_data')
+        company_fees = summary.get('company_fees', {})
 
     await query.answer("正在生成HTML...")
 
     # 生成HTML
-    html = generate_performance_html(records, total_profit, employee_commission, employee_performance, year_str, month_str, loss_records, settings, summary.get('employee_data'))
+    html = generate_performance_html(records, total_profit, employee_commission, employee_performance, year_str, month_str, loss_records, settings, employee_data, company_fees)
 
     import tempfile, os
     with tempfile.NamedTemporaryFile(mode='w', suffix='.html', encoding='utf-8', delete=False) as f:
@@ -1943,7 +2057,7 @@ async def profile_performance_export_do(update: Update, context: ContextTypes.DE
         os.unlink(temp_path)
 
 
-def generate_performance_html(records, total_profit, employee_commission, employee_performance, title, subtitle="", loss_records=None, settings=None, employee_data=None):
+def generate_performance_html(records, total_profit, employee_commission, employee_performance, title, subtitle="", loss_records=None, settings=None, employee_data=None, company_fees=None):
     """生成业绩HTML"""
     total_loss = sum(l['amount'] for l in loss_records) if loss_records else 0
     commission_pct = int((settings or {}).get('commission_rate', 0.1) * 100)
@@ -1952,6 +2066,8 @@ def generate_performance_html(records, total_profit, employee_commission, employ
     channel_loss_pct = int((settings or {}).get('channel_loss_rate', 0.25) * 100)
     customer_loss_pct = int((settings or {}).get('customer_loss_rate', 0.25) * 100)
     company_loss_pct = int((settings or {}).get('company_loss_rate', 0.50) * 100)
+    company_fees = company_fees or {}
+    total_company_fees = company_fees.get('channel_fee', 0) + company_fees.get('tech_fee', 0) + company_fees.get('response_award', 0)
 
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -2005,6 +2121,7 @@ def generate_performance_html(records, total_profit, employee_commission, employ
         .employee-perf {{ color: #94a3b8; font-size: 14px; margin-left: 10px; }}
         .employee-loss {{ color: #ef4444; font-size: 14px; margin-left: 10px; }}
         .employee-incentive {{ color: #8b5cf6; font-size: 14px; margin-left: 10px; }}
+        .employee-fee {{ color: #22d3ee; font-size: 14px; margin-left: 10px; }}
         .settings-section {{
             background: rgba(255,255,255,0.05); border-radius: 16px; padding: 24px;
             margin-bottom: 30px; backdrop-filter: blur(10px);
@@ -2020,6 +2137,7 @@ def generate_performance_html(records, total_profit, employee_commission, employ
         <h1>📊 {title} 业绩汇总</h1>
         <div class="profit">公司总利润：{total_profit:.2f} USDT</div>
         {f'<div class="loss">📉 本月亏损：{total_loss:.2f} USDT</div>' if total_loss > 0 else ''}
+        {f'<div class="loss">公司费用（渠道费/技术费/响应速度奖）：{total_company_fees:.2f} USDT</div>' if total_company_fees > 0 else ''}
     </div>
     <div class="table-container">
         <div class="section-title">📈 业绩记录</div>
@@ -2088,23 +2206,42 @@ def generate_performance_html(records, total_profit, employee_commission, employ
         actual_base = emp_data.get('actual_base_salary', 0)
         incentive = emp_data.get('incentive', 0)
         loss_bear = emp_data.get('loss_bear', 0)
+        channel_fee = emp_data.get('channel_fee', 0)
+        tech_fee = emp_data.get('tech_fee', 0)
+        response_award = emp_data.get('response_award', 0)
 
-        total_income = gross_commission + actual_base + incentive - loss_bear
+        total_income = gross_commission + actual_base + incentive - loss_bear + channel_fee + tech_fee + response_award
 
         details = f"<span class=\"employee-perf\">业绩 {perf:.2f} USDT（提成 {gross_commission:.2f} USDT）</span>"
 
         base_salary = emp_data.get('base_salary', 0)
         completion_rate = emp_data.get('completion_rate', 0)
-        if actual_base > 0:
-            if completion_rate > 0:
+        if base_salary > 0:
+            if emp_data.get('has_month_tasks'):
                 details += f"<span class=\"employee-base\">实际底薪 {actual_base:.2f} USDT（底薪 {base_salary:.2f} USDT × 完成率 {completion_rate}%）</span>"
             else:
-                details += f"<span class=\"employee-base\">底薪 {actual_base:.2f} USDT</span>"
+                details += f"<span class=\"employee-base\">底薪 {base_salary:.2f} USDT（本月无任务，全额发放）</span>"
 
         incentive_threshold = emp_data.get('incentive_threshold', 0)
         incentive_rate = emp_data.get('incentive_rate', 0)
         if incentive > 0:
             details += f"<span class=\"employee-incentive\">激励奖 {incentive:.2f} USDT（达到门槛 {incentive_threshold:.0f} USDT，{incentive_rate*100:.1f}%）</span>"
+
+        if channel_fee > 0:
+            details += f"<span class=\"employee-fee\">渠道费 {channel_fee:.2f} USDT</span>"
+        if tech_fee > 0:
+            details += f"<span class=\"employee-fee\">技术费 {tech_fee:.2f} USDT</span>"
+
+        if response_award > 0:
+            award_rate = emp_data.get('response_award_rate', 0)
+            award_rank = emp_data.get('response_award_rank', 1)
+            award_cap = emp_data.get('response_award_cap', 0)
+            if award_cap > 0 and emp_data.get('response_award_capped'):
+                details += f"<span class=\"employee-fee\">响应速度奖 {response_award:.2f} USDT（公司总收益 × {award_rate*100:.1f}%，已达上限 {award_cap:g} USDT，响应第{award_rank}名）</span>"
+            elif award_cap > 0:
+                details += f"<span class=\"employee-fee\">响应速度奖 {response_award:.2f} USDT（公司总收益 × {award_rate*100:.1f}%，上限 {award_cap:g} USDT，响应第{award_rank}名）</span>"
+            else:
+                details += f"<span class=\"employee-fee\">响应速度奖 {response_award:.2f} USDT（公司总收益 × {award_rate*100:.1f}%，响应第{award_rank}名）</span>"
 
         if loss_bear > 0:
             details += f"<span class=\"employee-loss\">承担亏损 {loss_bear:.2f} USDT</span>"
@@ -2118,12 +2255,32 @@ def generate_performance_html(records, total_profit, employee_commission, employ
         </div>
 """
 
+    # 公司费用设置行
+    fee_settings_parts = []
+    if (settings or {}).get('channel_fee_rate', 0) > 0 or company_fees.get('channel_fee_emp'):
+        ch_fee_rate = (settings or {}).get('channel_fee_rate', 0)
+        fee_settings_parts.append(f"渠道费：{ch_fee_rate*100:.1f}%（{company_fees.get('channel_fee_emp_name', '') or '未指定员工'}）")
+    if (settings or {}).get('tech_fee_rate', 0) > 0 or company_fees.get('tech_fee_emp'):
+        tech_fee_rate = (settings or {}).get('tech_fee_rate', 0)
+        fee_settings_parts.append(f"技术费：{tech_fee_rate*100:.1f}%（{company_fees.get('tech_fee_emp_name', '') or '未指定员工'}）")
+    if (settings or {}).get('response_award_rate', 0) > 0:
+        resp_award_rate = (settings or {}).get('response_award_rate', 0)
+        resp_award_cap = (settings or {}).get('response_award_cap', 0)
+        cap_text = f"，上限{resp_award_cap:g}" if resp_award_cap > 0 else ""
+        winner_name = company_fees.get('response_award_emp_name', '')
+        if winner_name:
+            fee_settings_parts.append(f"响应速度奖：{resp_award_rate*100:.1f}%（{winner_name}，响应第{company_fees.get('response_award_rank', 1)}名{cap_text}）")
+        else:
+            fee_settings_parts.append(f"响应速度奖：{resp_award_rate*100:.1f}%（无符合条件员工{cap_text}）")
+    fee_settings_html = f'<div class="settings-item">• 公司费用：{" | ".join(fee_settings_parts)}</div>' if fee_settings_parts else ''
+
     # 比例设置
     html += f"""    </div>
     <div class="settings-section">
         <h2>📊 当前比例设置</h2>
         <div class="settings-item">• 通道提成：{channel_commission_pct}% | 客户提成：{customer_commission_pct}%</div>
         <div class="settings-item">• 亏损分摊：通道{channel_loss_pct}% | 客户{customer_loss_pct}% | 公司{company_loss_pct}%</div>
+        {fee_settings_html}
     </div>
     <div class="footer">由记账机器人自动生成 · 业绩=利润×50% · 提成=利润×提成比例-亏损承担</div>
 </div>
