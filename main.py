@@ -710,7 +710,7 @@ async def ai_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 员工管理状态
     if context.user_data.get("task_title") or context.user_data.get("task_description") or \
        context.user_data.get("set_salary_employee_id") or context.user_data.get("complete_assignment_id") or \
-       context.user_data.get("modify_assignment_id"):
+       context.user_data.get("modify_assignment_id") or context.user_data.get("fee_type"):
         logger.debug(f"员工管理状态中，跳过AI")
         return
 
