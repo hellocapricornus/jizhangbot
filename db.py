@@ -643,6 +643,24 @@ def init_db():
         c.execute("ALTER TABLE performance_settings ADD COLUMN incentive_tiers TEXT DEFAULT ''")
         logger.info("已为 performance_settings 表添加激励奖励阶梯字段")
 
+    # 迁移：添加公司费用字段（渠道费/技术费/响应速度奖，按公司总收益百分比）
+    try:
+        c.execute("SELECT channel_fee_rate FROM performance_settings LIMIT 1")
+    except sqlite3.OperationalError:
+        c.execute("ALTER TABLE performance_settings ADD COLUMN channel_fee_employee_id INTEGER DEFAULT 0")
+        c.execute("ALTER TABLE performance_settings ADD COLUMN channel_fee_rate REAL DEFAULT 0")
+        c.execute("ALTER TABLE performance_settings ADD COLUMN tech_fee_employee_id INTEGER DEFAULT 0")
+        c.execute("ALTER TABLE performance_settings ADD COLUMN tech_fee_rate REAL DEFAULT 0")
+        c.execute("ALTER TABLE performance_settings ADD COLUMN response_award_rate REAL DEFAULT 0")
+        logger.info("已为 performance_settings 表添加公司费用字段")
+
+    # 迁移：添加响应速度奖上限字段（0 = 不封顶）
+    try:
+        c.execute("SELECT response_award_cap FROM performance_settings LIMIT 1")
+    except sqlite3.OperationalError:
+        c.execute("ALTER TABLE performance_settings ADD COLUMN response_award_cap REAL DEFAULT 0")
+        logger.info("已为 performance_settings 表添加响应速度奖上限字段")
+
     # 初始化默认设置
     c.execute("INSERT OR IGNORE INTO performance_settings (id, commission_rate, channel_commission_rate, customer_commission_rate, channel_loss_rate, customer_loss_rate, company_loss_rate) VALUES (1, 0.1, 0.1, 0.1, 0.25, 0.25, 0.50)")
 
@@ -1663,8 +1681,11 @@ def get_performance_summary(year: int, month: int) -> dict:
     for emp_id in employee_data:
         base_salary = get_employee_base_salary(emp_id)
         completion_rate = get_employee_monthly_completion_rate(emp_id, year, month)
+        # 本月是否有派发任务（仅统计本月，历史任务不影响）
+        has_month_tasks = has_assigned_tasks(emp_id, year, month)
 
-        if not has_assigned_tasks(emp_id):
+        if not has_month_tasks:
+            # 本月无任务：底薪全额发放
             actual_base_salary = base_salary
         elif completion_rate > 0:
             actual_base_salary = base_salary * completion_rate / 100
@@ -1674,7 +1695,93 @@ def get_performance_summary(year: int, month: int) -> dict:
         employee_data[emp_id]["base_salary"] = base_salary
         employee_data[emp_id]["actual_base_salary"] = round(actual_base_salary, 2)
         employee_data[emp_id]["completion_rate"] = round(completion_rate, 1)
+        employee_data[emp_id]["has_month_tasks"] = has_month_tasks
         employee_data[emp_id]["commission"] += actual_base_salary
+
+    # ========== 公司费用：渠道费/技术费/响应速度奖（按公司总收益的百分比计算） ==========
+    for emp in employee_data.values():
+        emp['channel_fee'] = 0
+        emp['tech_fee'] = 0
+        emp['response_award'] = 0
+
+    company_fees = {
+        'channel_fee': 0, 'channel_fee_emp': 0, 'channel_fee_emp_name': '',
+        'tech_fee': 0, 'tech_fee_emp': 0, 'tech_fee_emp_name': '',
+        'response_award': 0, 'response_award_emp': 0, 'response_award_emp_name': '',
+        'response_award_rank': 0, 'avg_response_count': 0,
+        'response_award_cap': 0, 'response_award_capped': False
+    }
+
+    def _ensure_fee_employee(emp_id):
+        """确保领取费用的员工存在于员工数据中"""
+        if emp_id not in employee_data:
+            op_info = current_operators.get(emp_id, {})
+            employee_data[emp_id] = {
+                "name": op_info.get('first_name', op_info.get('username', f"员工{emp_id}")),
+                "performance": 0, "profit": 0, "loss_bear": 0, "commission": 0,
+                "is_channel": False, "is_customer": False,
+                "base_salary": 0, "actual_base_salary": 0, "completion_rate": 0, "incentive": 0,
+                "channel_fee": 0, "tech_fee": 0, "response_award": 0
+            }
+
+    if company_total_profit > 0:
+        # 渠道费：指定员工按比例领取
+        ch_fee_emp = int(settings.get('channel_fee_employee_id') or 0)
+        ch_fee_rate = settings.get('channel_fee_rate') or 0
+        if ch_fee_emp and ch_fee_rate > 0:
+            _ensure_fee_employee(ch_fee_emp)
+            fee = round(company_total_profit * ch_fee_rate, 2)
+            employee_data[ch_fee_emp]['channel_fee'] = fee
+            employee_data[ch_fee_emp]['channel_fee_rate'] = ch_fee_rate
+            company_fees['channel_fee'] = fee
+            company_fees['channel_fee_emp'] = ch_fee_emp
+            company_fees['channel_fee_emp_name'] = employee_data[ch_fee_emp]['name']
+
+        # 技术费：指定员工按比例领取
+        tech_fee_emp = int(settings.get('tech_fee_employee_id') or 0)
+        tech_fee_rate = settings.get('tech_fee_rate') or 0
+        if tech_fee_emp and tech_fee_rate > 0:
+            _ensure_fee_employee(tech_fee_emp)
+            fee = round(company_total_profit * tech_fee_rate, 2)
+            employee_data[tech_fee_emp]['tech_fee'] = fee
+            employee_data[tech_fee_emp]['tech_fee_rate'] = tech_fee_rate
+            company_fees['tech_fee'] = fee
+            company_fees['tech_fee_emp'] = tech_fee_emp
+            company_fees['tech_fee_emp_name'] = employee_data[tech_fee_emp]['name']
+
+        # 响应速度奖：当月响应速度第一名获得；若其响应次数低于平均值则顺延到下一名
+        response_award_rate = settings.get('response_award_rate') or 0
+        if response_award_rate > 0:
+            resp_stats = get_all_employee_response_stats(year, month)
+            ranked = [(emp_id, s) for emp_id, s in resp_stats.items() if emp_id in current_operators]
+            if ranked:
+                avg_count = sum(s['total_count'] for _, s in ranked) / len(ranked)
+                company_fees['avg_response_count'] = round(avg_count, 1)
+                winner, winner_rank = None, 0
+                for rank, (emp_id, s) in enumerate(ranked, start=1):
+                    if s['total_count'] >= avg_count:
+                        winner, winner_rank = emp_id, rank
+                        break
+                if winner:
+                    _ensure_fee_employee(winner)
+                    award = company_total_profit * response_award_rate
+                    award_cap = settings.get('response_award_cap') or 0
+                    capped = False
+                    if award_cap > 0 and award > award_cap:
+                        award = award_cap
+                        capped = True
+                    award = round(award, 2)
+                    employee_data[winner]['response_award'] = award
+                    employee_data[winner]['response_award_rate'] = response_award_rate
+                    employee_data[winner]['response_award_rank'] = winner_rank
+                    employee_data[winner]['response_award_cap'] = award_cap
+                    employee_data[winner]['response_award_capped'] = capped
+                    company_fees['response_award'] = award
+                    company_fees['response_award_emp'] = winner
+                    company_fees['response_award_emp_name'] = employee_data[winner]['name']
+                    company_fees['response_award_rank'] = winner_rank
+                    company_fees['response_award_cap'] = award_cap
+                    company_fees['response_award_capped'] = capped
 
     # 为了兼容旧代码，保持原有结构
     employee_commission = {k: {"name": v["name"], "commission": v["commission"]} for k, v in employee_data.items()}
@@ -1689,6 +1796,7 @@ def get_performance_summary(year: int, month: int) -> dict:
         "employee_commission": employee_commission,
         "employee_performance": employee_performance,
         "employee_data": employee_data,
+        "company_fees": company_fees,
         "settings": settings
     }
 
@@ -2071,7 +2179,15 @@ def get_performance_settings(conn=None) -> dict:
         c.execute("SELECT * FROM performance_settings WHERE id=1")
         row = c.fetchone()
         if row:
-            return dict(row)
+            data = dict(row)
+            # 兼容旧数据库缺失的公司费用字段
+            data.setdefault('channel_fee_employee_id', 0)
+            data.setdefault('channel_fee_rate', 0)
+            data.setdefault('tech_fee_employee_id', 0)
+            data.setdefault('tech_fee_rate', 0)
+            data.setdefault('response_award_rate', 0)
+            data.setdefault('response_award_cap', 0)
+            return data
         return {
             'commission_rate': 0.1,
             'channel_commission_rate': 0.1,
@@ -2079,7 +2195,13 @@ def get_performance_settings(conn=None) -> dict:
             'channel_loss_rate': 0.25,
             'customer_loss_rate': 0.25,
             'company_loss_rate': 0.50,
-            'incentive_tiers': ''
+            'incentive_tiers': '',
+            'channel_fee_employee_id': 0,
+            'channel_fee_rate': 0,
+            'tech_fee_employee_id': 0,
+            'tech_fee_rate': 0,
+            'response_award_rate': 0,
+            'response_award_cap': 0
         }
     except Exception as e:
         logger.error(f"获取比例设置失败: {e}")
@@ -2090,7 +2212,13 @@ def get_performance_settings(conn=None) -> dict:
             'channel_loss_rate': 0.25,
             'customer_loss_rate': 0.25,
             'company_loss_rate': 0.50,
-            'incentive_tiers': ''
+            'incentive_tiers': '',
+            'channel_fee_employee_id': 0,
+            'channel_fee_rate': 0,
+            'tech_fee_employee_id': 0,
+            'tech_fee_rate': 0,
+            'response_award_rate': 0,
+            'response_award_cap': 0
         }
     finally:
         if own_conn:
@@ -2167,6 +2295,32 @@ def update_performance_settings(commission_rate: float, channel_commission_rate:
         return True
     except Exception as e:
         logger.error(f"更新比例设置失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def update_company_fee_settings(channel_fee_employee_id: int, channel_fee_rate: float,
+                                tech_fee_employee_id: int, tech_fee_rate: float,
+                                response_award_rate: float, updated_by: int,
+                                response_award_cap: float = 0) -> bool:
+    """更新公司费用设置（渠道费/技术费/响应速度奖，按公司总收益百分比计算；响应速度奖上限 0 = 不封顶）"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        now = int(time.time())
+        c.execute("""
+            UPDATE performance_settings
+            SET channel_fee_employee_id=?, channel_fee_rate=?,
+                tech_fee_employee_id=?, tech_fee_rate=?,
+                response_award_rate=?, response_award_cap=?, updated_by=?, updated_at=?
+            WHERE id=1
+        """, (channel_fee_employee_id, channel_fee_rate, tech_fee_employee_id,
+              tech_fee_rate, response_award_rate, response_award_cap, updated_by, now))
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"更新公司费用设置失败: {e}")
         return False
     finally:
         conn.close()
@@ -2818,12 +2972,19 @@ def get_employee_monthly_completion_rate(employee_id: int, year: int, month: int
         conn.close()
 
 
-def has_assigned_tasks(employee_id: int) -> bool:
-    """判断员工是否收到过任务"""
+def has_assigned_tasks(employee_id: int, year: int = None, month: int = None) -> bool:
+    """判断员工是否收到过任务（指定年月时仅统计该月派发的任务）"""
     conn = get_db_connection()
     c = conn.cursor()
     try:
-        c.execute("SELECT COUNT(*) FROM task_assignments WHERE employee_id = ?", (employee_id,))
+        if year is not None and month is not None:
+            c.execute("""
+                SELECT COUNT(*) FROM task_assignments ta
+                JOIN tasks t ON ta.task_id = t.id
+                WHERE ta.employee_id = ? AND strftime('%Y-%m', t.date) = ?
+            """, (employee_id, f"{year}-{month:02d}"))
+        else:
+            c.execute("SELECT COUNT(*) FROM task_assignments WHERE employee_id = ?", (employee_id,))
         row = c.fetchone()
         return row[0] > 0 if row else False
     except Exception as e:
