@@ -14,7 +14,8 @@ from db import (
     set_employee_base_salary, get_employee_base_salary,
     get_all_employee_salaries, set_employee_incentive, get_employee_incentive_setting,
     get_all_employee_incentive_settings, get_task_completion_stats, get_employee_task_summary,
-    get_db_connection, update_task_assignment_detail
+    get_db_connection, update_task_assignment_detail,
+    get_performance_settings, update_company_fee_settings
 )
 import logging
 logger = logging.getLogger(__name__)
@@ -27,6 +28,14 @@ COMPLETE_DETAIL = range(1)
 MODIFY_DETAIL = range(1)
 SET_SALARY_AMOUNT = range(1)
 SET_INCENTIVE_STATUS = range(1)
+FEE_RATE_INPUT, FEE_CAP_INPUT, FEE_RESPONSE_MENU = range(3)
+
+# 公司费用类型 → （显示名，比例设置键，员工设置键）
+FEE_TYPES = {
+    'channel': ('渠道费', 'channel_fee_rate', 'channel_fee_employee_id'),
+    'tech': ('技术费', 'tech_fee_rate', 'tech_fee_employee_id'),
+    'response': ('响应速度奖', 'response_award_rate', None),
+}
 
 async def my_tasks(update: Update, context: CallbackContext):
     query = update.callback_query
@@ -157,6 +166,7 @@ async def employee_menu(update: Update, context: CallbackContext):
         [InlineKeyboardButton(f"✅ {pending_text}", callback_data='employee_pending_review')],
         [InlineKeyboardButton("💰 设置底薪", callback_data='employee_set_salary')],
         [InlineKeyboardButton("🏆 激励奖开关", callback_data='employee_incentive_settings')],
+        [InlineKeyboardButton("🏢 公司费用设置", callback_data='employee_company_fee')],
         [InlineKeyboardButton("📊 统计报表", callback_data='employee_statistics')],
         [InlineKeyboardButton("⬅️ 返回", callback_data='profile')]
     ]
@@ -934,6 +944,316 @@ async def toggle_incentive(update: Update, context: CallbackContext):
     await incentive_settings_menu(update, context)
 
 
+# ==================== 公司费用设置（渠道费/技术费/响应速度奖） ====================
+
+def _render_company_fee_menu(settings):
+    """渲染公司费用设置菜单文本与按钮"""
+    operators = list_operators()
+
+    def _emp_name(emp_id):
+        if not emp_id:
+            return ''
+        op_info = operators.get(emp_id, {})
+        return op_info.get('first_name', op_info.get('username', f"员工{emp_id}"))
+
+    ch_emp = int(settings.get('channel_fee_employee_id') or 0)
+    ch_rate = settings.get('channel_fee_rate') or 0
+    tech_emp = int(settings.get('tech_fee_employee_id') or 0)
+    tech_rate = settings.get('tech_fee_rate') or 0
+    resp_rate = settings.get('response_award_rate') or 0
+    resp_cap = settings.get('response_award_cap') or 0
+
+    ch_text = f"{ch_rate*100:.1f}% → {_emp_name(ch_emp)}" if ch_emp and ch_rate > 0 else "未设置"
+    tech_text = f"{tech_rate*100:.1f}% → {_emp_name(tech_emp)}" if tech_emp and tech_rate > 0 else "未设置"
+    if resp_rate > 0:
+        resp_text = f"{resp_rate*100:.1f}%" + (f"（上限 {resp_cap:g} USDT）" if resp_cap > 0 else "（不封顶）")
+    else:
+        resp_text = "未设置"
+
+    text = (
+        "🏢 **公司费用设置**\n\n"
+        f"渠道费：{ch_text}\n"
+        f"技术费：{tech_text}\n"
+        f"响应速度奖：{resp_text}\n\n"
+        "费用金额 = 公司总收益 × 比例\n"
+        "响应速度奖自动发放给当月响应速度第一名（若其响应次数低于平均值则顺延到下一名）"
+    )
+
+    keyboard = [
+        [InlineKeyboardButton("设置渠道费", callback_data='employee_feecfg_channel'),
+         InlineKeyboardButton("设置技术费", callback_data='employee_feecfg_tech')],
+        [InlineKeyboardButton("设置响应速度奖", callback_data='employee_feecfg_response')],
+        [InlineKeyboardButton("⬅️ 返回", callback_data='employee_menu')]
+    ]
+    return text, InlineKeyboardMarkup(keyboard)
+
+
+async def company_fee_menu(update: Update, context: CallbackContext):
+    """公司费用设置主菜单"""
+    query = update.callback_query
+    await query.answer()
+
+    settings = get_performance_settings()
+    text, markup = _render_company_fee_menu(settings)
+
+    await query.edit_message_text(text, reply_markup=markup, parse_mode='Markdown')
+
+
+async def fee_config_menu(update: Update, context: CallbackContext):
+    """选择费用类型：渠道费/技术费选员工，响应速度奖直接输入比例"""
+    query = update.callback_query
+    await query.answer()
+
+    fee_type = query.data.split('_')[-1]
+    label, rate_key, emp_key = FEE_TYPES[fee_type]
+
+    settings = get_performance_settings()
+    current_rate = settings.get(rate_key) or 0
+
+    if emp_key is None:
+        # 响应速度奖：显示设置菜单（比例/上限分开设置）
+        context.user_data['fee_type'] = fee_type
+        rate = settings.get(rate_key) or 0
+        cap = settings.get('response_award_cap') or 0
+        rate_text = f"{rate*100:.1f}%" if rate > 0 else "未设置"
+        cap_text = f"{cap:g} USDT" if cap > 0 else "不封顶"
+        keyboard = [
+            [InlineKeyboardButton("设置比例", callback_data='employee_feecfg_response_rate')],
+            [InlineKeyboardButton("设置奖励上限", callback_data='employee_feecfg_response_cap')],
+            [InlineKeyboardButton("⬅️ 返回", callback_data='employee_company_fee')],
+        ]
+        await query.edit_message_text(
+            f"⚙️ 设置{label}\n\n"
+            f"当前比例：{rate_text}\n"
+            f"当前上限：{cap_text}\n\n"
+            "奖励 = 公司总收益 × 比例，发放给当月响应速度第一名，最高不超过上限",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
+        return FEE_RESPONSE_MENU
+
+    current_emp = int(settings.get(emp_key) or 0)
+    operators = list_operators()
+    if not operators:
+        keyboard = [[InlineKeyboardButton("⬅️ 返回", callback_data='employee_company_fee')]]
+        await query.edit_message_text(
+            f"设置{label}\n\n暂无正式操作员",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
+        return
+
+    keyboard = []
+    for op_id, op_info in operators.items():
+        name = op_info.get('first_name', f"员工{op_id}")
+        mark = "（当前）" if op_id == current_emp else ""
+        keyboard.append([InlineKeyboardButton(f"{name}{mark}", callback_data=f'employee_fee_emp_{fee_type}_{op_id}')])
+    keyboard.append([InlineKeyboardButton("关闭该费用（不发放）", callback_data=f'employee_fee_off_{fee_type}')])
+    keyboard.append([InlineKeyboardButton("⬅️ 返回", callback_data='employee_company_fee')])
+
+    current_text = f"当前比例：{current_rate*100:.1f}%" if current_rate > 0 else "当前未设置"
+    await query.edit_message_text(
+        f"设置{label}\n\n{current_text}\n\n请选择指定员工（费用 = 公司总收益 × 比例，发放给该员工）：",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+
+
+async def fee_response_menu(update: Update, context: CallbackContext):
+    """响应速度奖设置菜单：选择设置比例或设置奖励上限"""
+    query = update.callback_query
+    await query.answer()
+
+    if context.user_data.get('fee_type') != 'response':
+        return ConversationHandler.END
+
+    if query.data == 'employee_feecfg_response_rate':
+        await query.edit_message_text(
+            "请输入响应速度奖比例（%），发送 0 表示关闭：\n\n"
+            "将按公司总收益 × 比例发放给当月响应速度第一名",
+            parse_mode='Markdown'
+        )
+        return FEE_RATE_INPUT
+
+    if query.data == 'employee_feecfg_response_cap':
+        settings = get_performance_settings()
+        cap = settings.get('response_award_cap') or 0
+        cap_text = f"{cap:g} USDT" if cap > 0 else "不封顶"
+        await query.edit_message_text(
+            f"当前奖励上限：{cap_text}\n\n"
+            "请输入奖励上限（USDT），奖励最高按上限发放，发送 0 表示不封顶：",
+            parse_mode='Markdown'
+        )
+        return FEE_CAP_INPUT
+
+    # 返回公司费用菜单
+    return await company_fee_menu(update, context)
+
+
+def _save_fee_settings(fee_type, rate, emp_id, user_id, response_award_cap=None):
+    """保存某项费用设置（保留其他费用类型的原设置；response_award_cap=None 表示保留原上限）"""
+    settings = get_performance_settings()
+    ch_emp = int(settings.get('channel_fee_employee_id') or 0)
+    ch_rate = settings.get('channel_fee_rate') or 0
+    tech_emp = int(settings.get('tech_fee_employee_id') or 0)
+    tech_rate = settings.get('tech_fee_rate') or 0
+    resp_rate = settings.get('response_award_rate') or 0
+    resp_cap = settings.get('response_award_cap') or 0
+
+    if fee_type == 'channel':
+        ch_rate = rate
+        ch_emp = emp_id if rate > 0 else 0
+    elif fee_type == 'tech':
+        tech_rate = rate
+        tech_emp = emp_id if rate > 0 else 0
+    else:
+        if rate is not None:
+            resp_rate = rate
+        if response_award_cap is not None:
+            resp_cap = response_award_cap
+
+    return update_company_fee_settings(ch_emp, ch_rate, tech_emp, tech_rate, resp_rate, user_id, resp_cap)
+
+
+async def fee_pick_employee(update: Update, context: CallbackContext):
+    """选择费用指定员工后，输入比例"""
+    query = update.callback_query
+    await query.answer()
+
+    # employee_fee_emp_<type>_<empid>
+    parts = query.data.split('_')
+    fee_type, emp_id = parts[3], int(parts[4])
+    context.user_data['fee_type'] = fee_type
+    context.user_data['fee_employee_id'] = emp_id
+
+    label, _, _ = FEE_TYPES[fee_type]
+    operators = list_operators()
+    op_info = operators.get(emp_id, {})
+    name = op_info.get('first_name', f"员工{emp_id}")
+
+    await query.edit_message_text(
+        f"请输入 {name} 的{label}比例（%），发送 0 表示不发放：",
+        parse_mode='Markdown'
+    )
+    return FEE_RATE_INPUT
+
+
+async def fee_disable(update: Update, context: CallbackContext):
+    """关闭某项费用"""
+    query = update.callback_query
+    await query.answer()
+
+    fee_type = query.data.split('_')[-1]
+    label, _, _ = FEE_TYPES[fee_type]
+    ok = _save_fee_settings(fee_type, 0, 0, update.effective_user.id)
+
+    settings = get_performance_settings()
+    text, markup = _render_company_fee_menu(settings)
+    if ok:
+        text = f"✅ {label}已关闭\n\n" + text
+    else:
+        text = f"❌ 设置失败\n\n" + text
+    await query.edit_message_text(text, reply_markup=markup, parse_mode='Markdown')
+
+
+async def fee_rate_input(update: Update, context: CallbackContext):
+    """保存费用比例"""
+    # 本消息由费用设置会话处理，标记防止更高group的AI处理器识别
+    context.user_data["_message_handled"] = True
+
+    text = update.message.text.strip().rstrip('%')
+    try:
+        rate_pct = float(text)
+    except ValueError:
+        await update.message.reply_text("❌ 请输入有效的数字比例")
+        return FEE_RATE_INPUT
+
+    if rate_pct < 0 or rate_pct > 100:
+        await update.message.reply_text("❌ 比例需在 0-100 之间")
+        return FEE_RATE_INPUT
+
+    fee_type = context.user_data.get('fee_type')
+    if fee_type not in FEE_TYPES:
+        return ConversationHandler.END
+
+    label, _, _ = FEE_TYPES[fee_type]
+
+    if fee_type == 'response':
+        # 响应速度奖：仅更新比例，保留原上限
+        ok = _save_fee_settings(fee_type, rate_pct / 100.0, 0, update.effective_user.id)
+        context.user_data.pop('fee_type', None)
+        context.user_data.pop('fee_rate', None)
+
+        if ok:
+            if rate_pct == 0:
+                await update.message.reply_text("✅ 响应速度奖已关闭")
+            else:
+                await update.message.reply_text(
+                    f"✅ 响应速度奖比例已设置为 {rate_pct:g}%（按公司总收益计算）\n\n"
+                    "如需设置奖励上限，请通过「设置奖励上限」按钮操作"
+                )
+        else:
+            await update.message.reply_text("❌ 设置失败")
+
+        return ConversationHandler.END
+
+    emp_id = context.user_data.get('fee_employee_id', 0)
+    ok = _save_fee_settings(fee_type, rate_pct / 100.0, emp_id, update.effective_user.id)
+
+    context.user_data.pop('fee_type', None)
+    context.user_data.pop('fee_employee_id', None)
+
+    if ok:
+        if rate_pct == 0:
+            await update.message.reply_text(f"✅ {label}已关闭")
+        else:
+            await update.message.reply_text(f"✅ {label}比例已设置为 {rate_pct:g}%（按公司总收益计算）")
+    else:
+        await update.message.reply_text("❌ 设置失败")
+
+    return ConversationHandler.END
+
+
+async def fee_cap_input(update: Update, context: CallbackContext):
+    """保存响应速度奖上限"""
+    # 本消息由费用设置会话处理，标记防止更高group的AI处理器识别
+    context.user_data["_message_handled"] = True
+
+    text = update.message.text.strip().upper().replace('USDT', '').strip()
+    try:
+        cap = float(text)
+    except ValueError:
+        await update.message.reply_text("❌ 请输入有效的金额")
+        return FEE_CAP_INPUT
+
+    if cap < 0:
+        await update.message.reply_text("❌ 上限不能为负数")
+        return FEE_CAP_INPUT
+
+    fee_type = context.user_data.get('fee_type')
+    if fee_type != 'response':
+        return ConversationHandler.END
+
+    # 仅更新上限，保留原比例
+    ok = _save_fee_settings(fee_type, None, 0, update.effective_user.id, response_award_cap=cap)
+
+    context.user_data.pop('fee_type', None)
+    context.user_data.pop('fee_rate', None)
+
+    if ok:
+        if cap > 0:
+            await update.message.reply_text(
+                f"✅ 响应速度奖上限已设置为 {cap:g} USDT\n"
+                "（奖励最高按上限发放，发送 0 可取消上限）"
+            )
+        else:
+            await update.message.reply_text("✅ 响应速度奖已设置为不封顶")
+    else:
+        await update.message.reply_text("❌ 设置失败")
+
+    return ConversationHandler.END
+
+
 async def statistics_menu(update: Update, context: CallbackContext):
     query = update.callback_query
     await query.answer()
@@ -1163,10 +1483,28 @@ def register_employee_handlers(application):
         allow_reentry=True
     )
 
+    fee_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(fee_pick_employee, pattern='^employee_fee_emp_'),
+            CallbackQueryHandler(fee_config_menu, pattern='^employee_feecfg_response$'),
+        ],
+        states={
+            FEE_RATE_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, fee_rate_input)],
+            FEE_CAP_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, fee_cap_input)],
+            FEE_RESPONSE_MENU: [
+                CallbackQueryHandler(fee_response_menu, pattern='^employee_feecfg_response_(rate|cap)$'),
+                CallbackQueryHandler(company_fee_menu, pattern='^employee_company_fee$'),
+            ],
+        },
+        fallbacks=[CallbackQueryHandler(company_fee_menu, pattern='^employee_company_fee$'), CommandHandler('cancel', employee_cancel)],
+        allow_reentry=True
+    )
+
     application.add_handler(publish_conv, group=-1)
     application.add_handler(complete_conv, group=-1)
     application.add_handler(modify_conv, group=-1)
     application.add_handler(salary_conv, group=-1)
+    application.add_handler(fee_conv, group=-1)
 
     application.add_handler(CallbackQueryHandler(employee_menu, pattern='^employee_menu$'), group=-1)
     application.add_handler(CallbackQueryHandler(pending_review_menu, pattern='^employee_pending_review$'), group=-1)
@@ -1182,6 +1520,9 @@ def register_employee_handlers(application):
     application.add_handler(CallbackQueryHandler(set_salary_menu, pattern='^employee_set_salary$'), group=-1)
     application.add_handler(CallbackQueryHandler(incentive_settings_menu, pattern='^employee_incentive_settings$'), group=-1)
     application.add_handler(CallbackQueryHandler(toggle_incentive, pattern='^employee_toggle_incentive_'), group=-1)
+    application.add_handler(CallbackQueryHandler(company_fee_menu, pattern='^employee_company_fee$'), group=-1)
+    application.add_handler(CallbackQueryHandler(fee_config_menu, pattern='^employee_feecfg_(channel|tech)$'), group=-1)
+    application.add_handler(CallbackQueryHandler(fee_disable, pattern='^employee_fee_off_'), group=-1)
     application.add_handler(CallbackQueryHandler(statistics_menu, pattern='^employee_statistics$'), group=-1)
     application.add_handler(CallbackQueryHandler(task_progress, pattern='^employee_task_progress$'), group=-1)
     application.add_handler(CallbackQueryHandler(progress_detail, pattern='^employee_progress_detail_'), group=-1)
