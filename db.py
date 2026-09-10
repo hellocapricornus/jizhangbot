@@ -661,6 +661,13 @@ def init_db():
         c.execute("ALTER TABLE performance_settings ADD COLUMN response_award_cap REAL DEFAULT 0")
         logger.info("已为 performance_settings 表添加响应速度奖上限字段")
 
+    # 迁移：添加响应速度奖参考人字段（逗号分隔的员工ID，空=使用旧第一名逻辑）
+    try:
+        c.execute("SELECT response_award_reference_ids FROM performance_settings LIMIT 1")
+    except sqlite3.OperationalError:
+        c.execute("ALTER TABLE performance_settings ADD COLUMN response_award_reference_ids TEXT DEFAULT ''")
+        logger.info("已为 performance_settings 表添加响应速度奖参考人字段")
+
     # 初始化默认设置
     c.execute("INSERT OR IGNORE INTO performance_settings (id, commission_rate, channel_commission_rate, customer_commission_rate, channel_loss_rate, customer_loss_rate, company_loss_rate) VALUES (1, 0.1, 0.1, 0.1, 0.25, 0.25, 0.50)")
 
@@ -1608,6 +1615,8 @@ def get_performance_summary(year: int, month: int) -> dict:
         else:
             gross_commission = emp["profit"] * commission_rate
 
+        emp["gross_commission"] = round(gross_commission, 2)
+        emp["scaled_commission"] = round(gross_commission, 2)  # 完成率折算后的值，在底薪循环中更新
         emp["commission"] = gross_commission - emp["loss_bear"]
 
     # 计算激励奖励（根据员工激励奖开关）
@@ -1677,26 +1686,32 @@ def get_performance_summary(year: int, month: int) -> dict:
                     "incentive": 0
                 }
 
-    # 获取员工底薪并根据任务完成率计算实际底薪
+    # 底薪始终按100%发放；任务完成率影响业绩提成（无任务则全额提成）
     for emp_id in employee_data:
+        emp = employee_data[emp_id]
         base_salary = get_employee_base_salary(emp_id)
         completion_rate = get_employee_monthly_completion_rate(emp_id, year, month)
         # 本月是否有派发任务（仅统计本月，历史任务不影响）
         has_month_tasks = has_assigned_tasks(emp_id, year, month)
 
-        if not has_month_tasks:
-            # 本月无任务：底薪全额发放
-            actual_base_salary = base_salary
-        elif completion_rate > 0:
-            actual_base_salary = base_salary * completion_rate / 100
-        else:
-            actual_base_salary = 0
+        # 完成系数：无任务=1.0（全额提成），有任务=完成率/100
+        completion_factor = 1.0 if not has_month_tasks else completion_rate / 100
 
-        employee_data[emp_id]["base_salary"] = base_salary
-        employee_data[emp_id]["actual_base_salary"] = round(actual_base_salary, 2)
-        employee_data[emp_id]["completion_rate"] = round(completion_rate, 1)
-        employee_data[emp_id]["has_month_tasks"] = has_month_tasks
-        employee_data[emp_id]["commission"] += actual_base_salary
+        # 业绩提成按完成系数折算（此前 commission = 毛提成 - 亏损 + 激励奖）
+        gross = emp.get("gross_commission", 0)
+        scaled_gross = gross * completion_factor
+        emp["scaled_commission"] = round(scaled_gross, 2)
+        emp["commission"] = emp["commission"] - gross + scaled_gross
+
+        # 底薪始终全额发放
+        actual_base_salary = base_salary
+        emp["commission"] += actual_base_salary
+
+        emp["base_salary"] = base_salary
+        emp["actual_base_salary"] = round(actual_base_salary, 2)
+        emp["completion_rate"] = round(completion_rate, 1)
+        emp["has_month_tasks"] = has_month_tasks
+        emp["completion_factor"] = completion_factor
 
     # ========== 公司费用：渠道费/技术费/响应速度奖（按公司总收益的百分比计算） ==========
     for emp in employee_data.values():
@@ -1709,7 +1724,10 @@ def get_performance_summary(year: int, month: int) -> dict:
         'tech_fee': 0, 'tech_fee_emp': 0, 'tech_fee_emp_name': '',
         'response_award': 0, 'response_award_emp': 0, 'response_award_emp_name': '',
         'response_award_rank': 0, 'avg_response_count': 0,
-        'response_award_cap': 0, 'response_award_capped': False
+        'response_award_cap': 0, 'response_award_capped': False,
+        'response_award_ref_ids': [], 'response_award_ref_names': '',
+        'response_award_ref_unqualified_names': '',
+        'response_award_mode': 'rank'
     }
 
     def _ensure_fee_employee(emp_id):
@@ -1749,12 +1767,100 @@ def get_performance_summary(year: int, month: int) -> dict:
             company_fees['tech_fee_emp'] = tech_fee_emp
             company_fees['tech_fee_emp_name'] = employee_data[tech_fee_emp]['name']
 
-        # 响应速度奖：当月响应速度第一名获得；若其响应次数低于平均值则顺延到下一名
+        # 响应速度奖
         response_award_rate = settings.get('response_award_rate') or 0
         if response_award_rate > 0:
             resp_stats = get_all_employee_response_stats(year, month)
             ranked = [(emp_id, s) for emp_id, s in resp_stats.items() if emp_id in current_operators]
-            if ranked:
+            award_cap = settings.get('response_award_cap') or 0
+
+            # 解析参考人（仅保留当前仍是正式操作员的）
+            ref_raw = (settings.get('response_award_reference_ids') or '').strip()
+            ref_ids = set()
+            if ref_raw:
+                for rid in ref_raw.split(','):
+                    rid = rid.strip()
+                    if rid.isdigit():
+                        rid_int = int(rid)
+                        if rid_int in current_operators:
+                            ref_ids.add(rid_int)
+
+            if ref_ids:
+                # ===== 参考人模式：非参考人按击败参考人数比例获奖 =====
+                company_fees['response_award_mode'] = 'reference'
+                ref_names = []
+                for rid in sorted(ref_ids):
+                    op_info = current_operators.get(rid, {})
+                    ref_names.append(op_info.get('first_name', op_info.get('username', f"员工{rid}")))
+                company_fees['response_award_ref_ids'] = sorted(ref_ids)
+                company_fees['response_award_ref_names'] = '、'.join(ref_names)
+
+                # 全体正式操作员的平均响应次数：未达到平均次数的员工不参与评奖
+                avg_count = sum(s['total_count'] for _, s in ranked) / len(ranked)
+                company_fees['avg_response_count'] = round(avg_count, 1)
+
+                # 参考人数据：参考人自身响应次数未达到平均时，视为标杆失效，任何达标员工自动算击败该参考人；
+                # 达标的参考人则按平均响应秒数比较
+                ref_qualified = {}
+                ref_resp = {}
+                unqualified_ref_names = []
+                for rid in ref_ids:
+                    r_stat = resp_stats.get(rid, {})
+                    r_count = r_stat.get('total_count', 0) or 0
+                    qualified = r_count >= avg_count
+                    ref_qualified[rid] = qualified
+                    ref_resp[rid] = r_stat.get('avg_response_seconds', float('inf')) or float('inf')
+                    if not qualified:
+                        op_info = current_operators.get(rid, {})
+                        unqualified_ref_names.append(
+                            op_info.get('first_name', op_info.get('username', f"员工{rid}"))
+                        )
+                total_ref = len(ref_ids)
+                if unqualified_ref_names:
+                    company_fees['response_award_ref_unqualified_names'] = '、'.join(unqualified_ref_names)
+
+                total_award = 0
+                first_winner = 0
+                for emp_id, s in ranked:
+                    if emp_id in ref_ids:
+                        continue  # 参考人本人不参与评奖
+                    if s['total_count'] < avg_count:
+                        continue  # 响应次数未达到平均值，不发放奖励
+                    emp_resp = s.get('avg_response_seconds', 0) or 0
+                    if emp_resp <= 0:
+                        continue  # 无有效响应记录
+                    # 击败参考人数：参考人次数未达标自动算击败；达标则需响应更快
+                    beaten = sum(
+                        1 for rid in ref_ids
+                        if not ref_qualified[rid] or emp_resp < ref_resp[rid]
+                    )
+                    if beaten <= 0:
+                        continue
+                    factor = beaten / total_ref
+                    award = company_total_profit * response_award_rate * factor
+                    capped = False
+                    if award_cap > 0 and award > award_cap:
+                        award = award_cap
+                        capped = True
+                    award = round(award, 2)
+                    _ensure_fee_employee(emp_id)
+                    employee_data[emp_id]['response_award'] = award
+                    employee_data[emp_id]['response_award_rate'] = response_award_rate
+                    employee_data[emp_id]['response_award_cap'] = award_cap
+                    employee_data[emp_id]['response_award_capped'] = capped
+                    employee_data[emp_id]['response_award_beaten'] = beaten
+                    employee_data[emp_id]['response_award_total_ref'] = total_ref
+                    total_award += award
+                    if first_winner == 0:
+                        first_winner = emp_id
+
+                company_fees['response_award'] = round(total_award, 2)
+                company_fees['response_award_emp'] = first_winner
+                company_fees['response_award_emp_name'] = employee_data.get(first_winner, {}).get('name', '') if first_winner else ''
+                company_fees['response_award_cap'] = award_cap
+            elif ranked:
+                # ===== 旧逻辑（未设参考人）：第一名获奖，响应次数低于平均值则顺延 =====
+                company_fees['response_award_mode'] = 'rank'
                 avg_count = sum(s['total_count'] for _, s in ranked) / len(ranked)
                 company_fees['avg_response_count'] = round(avg_count, 1)
                 winner, winner_rank = None, 0
@@ -1765,7 +1871,6 @@ def get_performance_summary(year: int, month: int) -> dict:
                 if winner:
                     _ensure_fee_employee(winner)
                     award = company_total_profit * response_award_rate
-                    award_cap = settings.get('response_award_cap') or 0
                     capped = False
                     if award_cap > 0 and award > award_cap:
                         award = award_cap
@@ -2187,6 +2292,7 @@ def get_performance_settings(conn=None) -> dict:
             data.setdefault('tech_fee_rate', 0)
             data.setdefault('response_award_rate', 0)
             data.setdefault('response_award_cap', 0)
+            data.setdefault('response_award_reference_ids', '')
             return data
         return {
             'commission_rate': 0.1,
@@ -2201,7 +2307,8 @@ def get_performance_settings(conn=None) -> dict:
             'tech_fee_employee_id': 0,
             'tech_fee_rate': 0,
             'response_award_rate': 0,
-            'response_award_cap': 0
+            'response_award_cap': 0,
+            'response_award_reference_ids': ''
         }
     except Exception as e:
         logger.error(f"获取比例设置失败: {e}")
@@ -2218,7 +2325,8 @@ def get_performance_settings(conn=None) -> dict:
             'tech_fee_employee_id': 0,
             'tech_fee_rate': 0,
             'response_award_rate': 0,
-            'response_award_cap': 0
+            'response_award_cap': 0,
+            'response_award_reference_ids': ''
         }
     finally:
         if own_conn:
@@ -2303,20 +2411,3519 @@ def update_performance_settings(commission_rate: float, channel_commission_rate:
 def update_company_fee_settings(channel_fee_employee_id: int, channel_fee_rate: float,
                                 tech_fee_employee_id: int, tech_fee_rate: float,
                                 response_award_rate: float, updated_by: int,
-                                response_award_cap: float = 0) -> bool:
-    """更新公司费用设置（渠道费/技术费/响应速度奖，按公司总收益百分比计算；响应速度奖上限 0 = 不封顶）"""
+                                response_award_cap: float = 0,
+                                response_award_reference_ids: str = None) -> bool:
+    """更新公司费用设置（渠道费/技术费/响应速度奖，按公司总收益百分比计算；响应速度奖上限 0 = 不封顶；reference_ids=None 表示保留原值）"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        now = int(time.time())
+        if response_award_reference_ids is None:
+            # 保留原有参考人设置
+            c.execute("SELECT response_award_reference_ids FROM performance_settings WHERE id=1")
+            row = c.fetchone()
+            response_award_reference_ids = row[0] if row else ''
+        c.execute("""
+            UPDATE performance_settings
+            SET channel_fee_employee_id=?, channel_fee_rate=?,
+                tech_fee_employee_id=?, tech_fee_rate=?,
+                response_award_rate=?, response_award_cap=?,
+                response_award_reference_ids=?, updated_by=?, updated_at=?
+            WHERE id=1
+        """, (channel_fee_employee_id, channel_fee_rate, tech_fee_employee_id,
+              tech_fee_rate, response_award_rate, response_award_cap,
+              response_award_reference_ids, updated_by, now))
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"更新公司费用设置失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def update_incentive_tiers(incentive_tiers: str, updated_by: int) -> bool:
+    """更新激励奖励阶梯设置"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        import time
+        now = int(time.time())
+
+        old_settings = get_performance_settings()
+
+        c.execute("""
+            UPDATE performance_settings 
+            SET incentive_tiers=?, updated_by=?, updated_at=?
+            WHERE id=1
+        """, (incentive_tiers, updated_by, now))
+
+        import json
+        c.execute("""
+            INSERT INTO performance_logs (record_type, record_id, action, old_data, new_data, operated_by, operated_at, date)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, ('settings', '1', 'update',
+              json.dumps(old_settings, ensure_ascii=False) if old_settings else None,
+              json.dumps({
+                  'commission_rate': old_settings.get('commission_rate', 0.1),
+                  'channel_commission_rate': old_settings.get('channel_commission_rate', 0.1),
+                  'customer_commission_rate': old_settings.get('customer_commission_rate', 0.1),
+                  'channel_loss_rate': old_settings.get('channel_loss_rate', 0.25),
+                  'customer_loss_rate': old_settings.get('customer_loss_rate', 0.25),
+                  'company_loss_rate': old_settings.get('company_loss_rate', 0.50),
+                  'incentive_tiers': incentive_tiers
+              }, ensure_ascii=False),
+              updated_by, now, datetime.now().strftime('%Y-%m-%d')))
+
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"更新激励奖励设置失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+# ========== 操作日志相关操作 ==========
+
+def log_performance_action(record_type: str, record_id: str, action: str,
+                           old_data: dict, new_data: dict, operated_by: int, conn=None):
+    """记录操作日志"""
+    import time
+    import json
+    from datetime import datetime
+
+    own_conn = conn is None
+    if own_conn:
+        conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        now = int(time.time())
+        date_str = datetime.fromtimestamp(now, tz=timezone(timedelta(hours=8))).strftime('%Y-%m-%d')
+        c.execute("""
+            INSERT INTO performance_logs (record_type, record_id, action, old_data, new_data, operated_by, operated_at, date)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (record_type, record_id, action,
+              json.dumps(old_data, ensure_ascii=False) if old_data else None,
+              json.dumps(new_data, ensure_ascii=False) if new_data else None,
+              operated_by, now, date_str))
+        if own_conn:
+            conn.commit()
+    except Exception as e:
+        logger.error(f"记录操作日志失败: {e}")
+    finally:
+        if own_conn:
+            conn.close()
+
+
+def get_performance_logs(record_type: str = None, limit: int = 100, offset: int = 0) -> list:
+    """获取操作日志"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        if record_type:
+            c.execute("""
+                SELECT * FROM performance_logs 
+                WHERE record_type = ? 
+                ORDER BY operated_at DESC 
+                LIMIT ? OFFSET ?
+            """, (record_type, limit, offset))
+        else:
+            c.execute("""
+                SELECT * FROM performance_logs 
+                ORDER BY operated_at DESC 
+                LIMIT ? OFFSET ?
+            """, (limit, offset))
+        rows = c.fetchall()
+        return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(f"获取操作日志失败: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+def get_performance_logs_count(record_type: str = None) -> int:
+    """获取操作日志总数"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        if record_type:
+            c.execute("SELECT COUNT(*) FROM performance_logs WHERE record_type = ?", (record_type,))
+        else:
+            c.execute("SELECT COUNT(*) FROM performance_logs")
+        result = c.fetchone()
+        return result[0] if result else 0
+    except Exception as e:
+        logger.error(f"获取操作日志总数失败: {e}")
+        return 0
+    finally:
+        conn.close()
+
+
+# ========== 员工管理：任务相关操作 ==========
+
+def add_task(title: str, description: str, period_type: str, deadline: int,
+             remind_time: int, remind_enabled: int, created_by: int) -> int:
+    """添加任务"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        now = int(time.time())
+        date_str = datetime.fromtimestamp(now, tz=timezone(timedelta(hours=8))).strftime('%Y-%m-%d')
+
+        c.execute("""
+            INSERT INTO tasks (title, description, period_type, deadline, 
+                              remind_time, remind_enabled, created_by, created_at, date)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (title, description, period_type, deadline, remind_time, remind_enabled, created_by, now, date_str))
+
+        conn.commit()
+        return c.lastrowid
+    except Exception as e:
+        logger.error(f"添加任务失败: {e}")
+        return 0
+    finally:
+        conn.close()
+
+
+def assign_task(task_id: int, employee_id: int, employee_name: str) -> bool:
+    """分配任务给员工"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("""
+            INSERT OR IGNORE INTO task_assignments (task_id, employee_id, employee_name)
+            VALUES (?, ?, ?)
+        """, (task_id, employee_id, employee_name))
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"分配任务失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def get_tasks(period_type: str = None, status: str = None, date: str = None) -> list:
+    """获取任务列表"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        query = "SELECT * FROM tasks WHERE 1=1"
+        params = []
+
+        if period_type:
+            query += " AND period_type = ?"
+            params.append(period_type)
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+        if date:
+            query += " AND date LIKE ?"
+            params.append(f"{date}%")
+
+        query += " ORDER BY created_at DESC"
+        c.execute(query, params)
+        rows = c.fetchall()
+        return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(f"获取任务列表失败: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+def get_task_by_id(task_id: int) -> dict:
+    """根据ID获取任务"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("SELECT * FROM tasks WHERE id = ?", (task_id,))
+        row = c.fetchone()
+        return dict(row) if row else None
+    except Exception as e:
+        logger.error(f"获取任务失败: {e}")
+        return None
+    finally:
+        conn.close()
+
+
+def get_task_assignments(task_id: int) -> list:
+    """获取任务分配列表"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("SELECT * FROM task_assignments WHERE task_id = ?", (task_id,))
+        rows = c.fetchall()
+        return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(f"获取任务分配列表失败: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+def get_employee_tasks(employee_id: int) -> list:
+    """获取员工的任务列表"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("""
+            SELECT t.*, ta.id as assignment_id, ta.status as assignment_status, 
+                   ta.completion_detail, ta.completed_at, ta.completion_percent
+            FROM tasks t
+            JOIN task_assignments ta ON t.id = ta.task_id
+            WHERE ta.employee_id = ?
+            ORDER BY t.deadline ASC
+        """, (employee_id,))
+        rows = c.fetchall()
+        return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(f"获取员工任务列表失败: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+def update_task_status(task_id: int, status: str) -> bool:
+    """更新任务状态"""
     conn = get_db_connection()
     c = conn.cursor()
     try:
         now = int(time.time())
         c.execute("""
+            UPDATE tasks 
+            SET status = ?, completed_at = ?
+            WHERE id = ?
+        """, (status, now if status == 'completed' else 0, task_id))
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"更新任务状态失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def complete_task_assignment(assignment_id: int, detail: str) -> bool:
+    """员工提交任务（等待管理员确认）"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        now = int(time.time())
+        c.execute("""
+            UPDATE task_assignments 
+            SET status = 'pending_review', completion_detail = ?, completed_at = ?, completion_percent = 100.0
+            WHERE id = ?
+        """, (detail, now, assignment_id))
+
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"提交任务失败: {e}")
+        return False
+
+
+def update_task_assignment_detail(assignment_id: int, detail: str) -> bool:
+    """员工修改任务详情（等待管理员审核）"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        now = int(time.time())
+        c.execute("""
+            UPDATE task_assignments 
+            SET status = 'pending_review', completion_detail = ?, completed_at = ?, completion_percent = 100.0
+            WHERE id = ?
+        """, (detail, now, assignment_id))
+
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"修改任务详情失败: {e}")
+        return False
+
+
+def confirm_task_assignment(assignment_id: int, completion_percent: float) -> bool:
+    """管理员确认任务并设置完成百分比"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        now = int(time.time())
+        c.execute("""
+            UPDATE task_assignments 
+            SET status = 'completed', completion_percent = ?
+            WHERE id = ?
+        """, (completion_percent, assignment_id))
+
+        c.execute("SELECT task_id FROM task_assignments WHERE id = ?", (assignment_id,))
+        task_id = c.fetchone()[0]
+
+        c.execute("SELECT COUNT(*) FROM task_assignments WHERE task_id = ? AND status != 'completed'", (task_id,))
+        remaining = c.fetchone()[0]
+
+        if remaining == 0:
+            c.execute("""
+                UPDATE tasks 
+                SET status = 'completed', completed_at = ?
+                WHERE id = ?
+            """, (now, task_id))
+
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"确认任务失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def delete_task(task_id: int) -> bool:
+    """删除任务"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("DELETE FROM task_assignments WHERE task_id = ?", (task_id,))
+        c.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"删除任务失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def mark_task_notified(assignment_id: int) -> bool:
+    """标记任务已通知"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("UPDATE task_assignments SET notified = 1 WHERE id = ?", (assignment_id,))
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"标记任务已通知失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def get_unnotified_tasks() -> list:
+    """获取未通知的任务分配"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("""
+            SELECT ta.*, t.title, t.description, t.deadline
+            FROM task_assignments ta
+            JOIN tasks t ON ta.task_id = t.id
+            WHERE ta.notified = 0 AND t.status = 'pending'
+        """)
+        rows = c.fetchall()
+        return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(f"获取未通知任务失败: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+def get_pending_review_tasks() -> list:
+    """获取待确认的任务（员工已提交，等待管理员确认）"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("""
+            SELECT ta.*, t.title, t.description, t.deadline, t.date
+            FROM task_assignments ta
+            JOIN tasks t ON ta.task_id = t.id
+            WHERE ta.status = 'pending_review'
+            ORDER BY ta.completed_at DESC
+        """)
+        rows = c.fetchall()
+        return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(f"获取待确认任务失败: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+def get_tasks_needing_reminder() -> list:
+    """获取需要提醒的任务"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        now = int(time.time())
+        c.execute("""
+            SELECT ta.*, t.title, t.description, t.deadline, t.remind_time
+            FROM task_assignments ta
+            JOIN tasks t ON ta.task_id = t.id
+            WHERE t.remind_enabled = 1 AND t.remind_time <= ? 
+            AND t.status = 'pending' AND ta.status = 'pending'
+        """, (now,))
+        rows = c.fetchall()
+        return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(f"获取需要提醒的任务失败: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+def get_overdue_tasks() -> list:
+    """获取已超时但未完成的任务"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        now = int(time.time())
+        c.execute("""
+            SELECT ta.*, t.title, t.description, t.deadline
+            FROM task_assignments ta
+            JOIN tasks t ON ta.task_id = t.id
+            WHERE t.deadline < ? AND ta.status = 'pending'
+        """, (now,))
+        rows = c.fetchall()
+        return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(f"获取超时任务失败: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+def handle_overdue_task(assignment_id: int) -> bool:
+    """处理超时任务：设置为待审核状态，完成度0%"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        now = int(time.time())
+        c.execute("""
+            UPDATE task_assignments 
+            SET status = 'pending_review', completion_detail = '超时未提交', 
+                completed_at = ?, completion_percent = 0.0
+            WHERE id = ? AND status = 'pending'
+        """, (now, assignment_id))
+
+        conn.commit()
+        return c.rowcount > 0
+    except Exception as e:
+        logger.error(f"处理超时任务失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+# ========== 员工管理：底薪相关操作 ==========
+
+def set_employee_base_salary(employee_id: int, monthly_base: float, updated_by: int) -> bool:
+    """设置员工底薪"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        now = int(time.time())
+        c.execute("""
+            INSERT OR REPLACE INTO employee_salary (employee_id, monthly_base, updated_by, updated_at)
+            VALUES (?, ?, ?, ?)
+        """, (employee_id, monthly_base, updated_by, now))
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"设置员工底薪失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def get_employee_base_salary(employee_id: int) -> float:
+    """获取员工底薪"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("SELECT monthly_base FROM employee_salary WHERE employee_id = ?", (employee_id,))
+        row = c.fetchone()
+        return row[0] if row else 0.0
+    except Exception as e:
+        logger.error(f"获取员工底薪失败: {e}")
+        return 0.0
+    finally:
+        conn.close()
+
+
+def get_all_employee_salaries() -> list:
+    """获取所有员工底薪设置"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("SELECT * FROM employee_salary")
+        rows = c.fetchall()
+        return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(f"获取所有员工底薪失败: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+# ========== 员工管理：激励奖开关相关操作 ==========
+
+def set_employee_incentive(employee_id: int, enabled: int, updated_by: int) -> bool:
+    """设置员工激励奖开关"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        now = int(time.time())
+        c.execute("""
+            INSERT OR REPLACE INTO employee_incentive_settings (employee_id, incentive_enabled, updated_by, updated_at)
+            VALUES (?, ?, ?, ?)
+        """, (employee_id, enabled, updated_by, now))
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"设置员工激励奖开关失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def get_employee_incentive_setting(employee_id: int) -> int:
+    """获取员工激励奖设置"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("SELECT incentive_enabled FROM employee_incentive_settings WHERE employee_id = ?", (employee_id,))
+        row = c.fetchone()
+        return row[0] if row else 1
+    except Exception as e:
+        logger.error(f"获取员工激励奖设置失败: {e}")
+        return 1
+    finally:
+        conn.close()
+
+
+def get_all_employee_incentive_settings() -> list:
+    """获取所有员工激励奖设置"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("SELECT * FROM employee_incentive_settings")
+        rows = c.fetchall()
+        return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(f"获取所有员工激励奖设置失败: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+# ========== 员工管理：统计相关操作 ==========
+
+def get_task_completion_stats() -> dict:
+    """获取任务完成统计"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("SELECT COUNT(*) FROM tasks")
+        total_tasks = c.fetchone()[0]
+
+        c.execute("SELECT COUNT(*) FROM tasks WHERE status = 'completed'")
+        completed_tasks = c.fetchone()[0]
+
+        c.execute("""
+            SELECT ta.employee_id, ta.employee_name, 
+                   COUNT(*) as total_assigned,
+                   SUM(CASE WHEN ta.status = 'completed' THEN 1 ELSE 0 END) as completed_count
+            FROM task_assignments ta
+            GROUP BY ta.employee_id, ta.employee_name
+        """)
+        employee_stats = []
+        rows = c.fetchall()
+        for row in rows:
+            stats = dict(row)
+            stats['completion_rate'] = round(stats['completed_count'] / stats['total_assigned'] * 100, 1) if stats['total_assigned'] > 0 else 0
+            employee_stats.append(stats)
+
+        return {
+            'total_tasks': total_tasks,
+            'completed_tasks': completed_tasks,
+            'completion_rate': round(completed_tasks / total_tasks * 100, 1) if total_tasks > 0 else 0,
+            'employee_stats': employee_stats
+        }
+    except Exception as e:
+        logger.error(f"获取任务完成统计失败: {e}")
+        return {
+            'total_tasks': 0,
+            'completed_tasks': 0,
+            'completion_rate': 0,
+            'employee_stats': []
+        }
+    finally:
+        conn.close()
+
+
+def get_employee_monthly_completion_rate(employee_id: int, year: int, month: int) -> float:
+    """计算员工本月任务完成率（所有已确认任务的平均完成百分比）"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        query = """
+            SELECT AVG(completion_percent) as avg_percent
+            FROM task_assignments ta
+            JOIN tasks t ON ta.task_id = t.id
+            WHERE ta.employee_id = ? AND ta.status = 'completed'
+            AND strftime('%Y-%m', t.date) = ?
+        """
+        params = [employee_id, f"{year}-{month:02d}"]
+
+        c.execute(query, params)
+        row = c.fetchone()
+
+        avg_percent = row[0] if row and row[0] else 0
+        return float(avg_percent)
+    except Exception as e:
+        logger.error(f"计算员工任务完成率失败: {e}")
+        return 0.0
+    finally:
+        conn.close()
+
+
+def has_assigned_tasks(employee_id: int, year: int = None, month: int = None) -> bool:
+    """判断员工是否收到过任务（指定年月时仅统计该月派发的任务）"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        if year is not None and month is not None:
+            c.execute("""
+                SELECT COUNT(*) FROM task_assignments ta
+                JOIN tasks t ON ta.task_id = t.id
+                WHERE ta.employee_id = ? AND strftime('%Y-%m', t.date) = ?
+            """, (employee_id, f"{year}-{month:02d}"))
+        else:
+            c.execute("SELECT COUNT(*) FROM task_assignments WHERE employee_id = ?", (employee_id,))
+        row = c.fetchone()
+        return row[0] > 0 if row else False
+    except Exception as e:
+        logger.error(f"判断员工是否收到过任务失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def get_employee_task_summary(employee_id: int, year: int = None, month: int = None) -> dict:
+    """获取员工任务完成汇总"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        query = """
+            SELECT COUNT(*) as total,
+                   SUM(CASE WHEN ta.status = 'completed' THEN 1 ELSE 0 END) as completed,
+                   SUM(CASE WHEN ta.status = 'pending' THEN 1 ELSE 0 END) as pending,
+                   SUM(CASE WHEN t.deadline < strftime('%s', 'now') AND ta.status = 'pending' THEN 1 ELSE 0 END) as overdue
+            FROM task_assignments ta
+            JOIN tasks t ON ta.task_id = t.id
+            WHERE ta.employee_id = ?
+        """
+        params = [employee_id]
+
+        if year and month:
+            query += " AND strftime('%Y-%m', t.date) = ?"
+            params.append(f"{year}-{month:02d}")
+
+        c.execute(query, params)
+        row = c.fetchone()
+
+        total = row[0] if row else 0
+        completed = row[1] if row else 0
+
+        return {
+            'total': total,
+            'completed': completed,
+            'pending': row[2] if row else 0,
+            'overdue': row[3] if row else 0,
+            'completion_rate': round(completed / total * 100, 1) if total > 0 else 0
+        }
+    except Exception as e:
+        logger.error(f"获取员工任务汇总失败: {e}")
+        return {
+            'total': 0,
+            'completed': 0,
+            'pending': 0,
+            'overdue': 0,
+            'completion_rate': 0
+        }
+    finally:
+        conn.close()
+
+
+# ========== 响应速度检测相关 ==========
+
+def init_response_tables():
+    """初始化响应速度相关表"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS response_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                customer_user_id INTEGER,
+                customer_message_time INTEGER,
+                responder_user_id INTEGER,
+                responder_message_time INTEGER,
+                response_seconds REAL,
+                is_work_time INTEGER DEFAULT 1,
+                created_at INTEGER
+            )
+        """)
+
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS employee_work_time (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                employee_id INTEGER UNIQUE,
+                work_start TEXT DEFAULT '09:00',
+                work_end TEXT DEFAULT '18:00',
+                created_at INTEGER,
+                updated_at INTEGER
+            )
+        """)
+
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS response_rating_config (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                level_name TEXT,
+                min_seconds REAL DEFAULT 0,
+                max_seconds REAL DEFAULT 0,
+                emoji TEXT,
+                color TEXT,
+                created_at INTEGER,
+                updated_at INTEGER
+            )
+        """)
+
+        c.execute("SELECT COUNT(*) FROM response_rating_config")
+        if c.fetchone()[0] == 0:
+            default_config = [
+                ('优秀', 0, 300, '⚡', 'green'),
+                ('良好', 300, 900, '✅', 'blue'),
+                ('一般', 900, 1800, '⚠️', 'yellow'),
+                ('较慢', 1800, 3600, '❌', 'orange'),
+                ('超时', 3600, 999999, '🔴', 'red'),
+            ]
+            c.executemany("""
+                INSERT INTO response_rating_config 
+                (level_name, min_seconds, max_seconds, emoji, color, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, [(name, min_s, max_s, emoji, color, int(time.time()), int(time.time())) 
+                  for name, min_s, max_s, emoji, color in default_config])
+
+        conn.commit()
+    except Exception as e:
+        logger.error(f"初始化响应速度表失败: {e}")
+    finally:
+        conn.close()
+
+
+def add_response_record(customer_user_id: int, customer_message_time: int,
+                        responder_user_id: int, responder_message_time: int,
+                        is_work_time: bool = True):
+    """添加响应记录"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        response_seconds = responder_message_time - customer_message_time
+        c.execute("""
+            INSERT INTO response_records 
+            (customer_user_id, customer_message_time, responder_user_id, 
+             responder_message_time, response_seconds, is_work_time, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (customer_user_id, customer_message_time, responder_user_id,
+              responder_message_time, response_seconds, 1 if is_work_time else 0, int(time.time())))
+        conn.commit()
+        return c.lastrowid
+    except Exception as e:
+        logger.error(f"添加响应记录失败: {e}")
+        return None
+    finally:
+        conn.close()
+
+
+def get_employee_response_stats(employee_id: int, year: int, month: int) -> Dict:
+    """获取员工某月的响应统计"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        start_time = int(datetime(year, month, 1, tzinfo=timezone(timedelta(hours=8))).timestamp())
+        last_day = (datetime(year, month, 1) + timedelta(days=32)).replace(day=1) - timedelta(days=1)
+        end_time = int(last_day.replace(hour=23, minute=59, second=59, tzinfo=timezone(timedelta(hours=8))).timestamp())
+
+        c.execute("""
+            SELECT COUNT(*), AVG(response_seconds), SUM(CASE WHEN is_work_time = 1 THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN response_seconds <= 300 THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN response_seconds > 300 AND response_seconds <= 900 THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN response_seconds > 900 AND response_seconds <= 1800 THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN response_seconds > 1800 AND response_seconds <= 3600 THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN response_seconds > 3600 THEN 1 ELSE 0 END)
+            FROM response_records
+            WHERE responder_user_id = ? AND customer_message_time BETWEEN ? AND ?
+        """, (employee_id, start_time, end_time))
+        row = c.fetchone()
+
+        if row and row[0] > 0:
+            return {
+                'total_count': row[0],
+                'avg_response_seconds': round(row[1], 2) if row[1] else 0,
+                'work_time_count': row[2],
+                'excellent_count': row[3],
+                'good_count': row[4],
+                'normal_count': row[5],
+                'slow_count': row[6],
+                'timeout_count': row[7]
+            }
+        return {
+            'total_count': 0,
+            'avg_response_seconds': 0,
+            'work_time_count': 0,
+            'excellent_count': 0,
+            'good_count': 0,
+            'normal_count': 0,
+            'slow_count': 0,
+            'timeout_count': 0
+        }
+    except Exception as e:
+        logger.error(f"获取员工响应统计失败: {e}")
+        return {
+            'total_count': 0,
+            'avg_response_seconds': 0,
+            'work_time_count': 0,
+            'excellent_count': 0,
+            'good_count': 0,
+            'normal_count': 0,
+            'slow_count': 0,
+            'timeout_count': 0
+        }
+    finally:
+        conn.close()
+
+
+def get_all_employee_response_stats(year: int, month: int) -> Dict:
+    """获取所有员工某月的响应统计"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        start_time = int(datetime(year, month, 1, tzinfo=timezone(timedelta(hours=8))).timestamp())
+        last_day = (datetime(year, month, 1) + timedelta(days=32)).replace(day=1) - timedelta(days=1)
+        end_time = int(last_day.replace(hour=23, minute=59, second=59, tzinfo=timezone(timedelta(hours=8))).timestamp())
+
+        c.execute("""
+            SELECT responder_user_id, COUNT(*), AVG(response_seconds),
+                   SUM(CASE WHEN is_work_time = 1 THEN 1 ELSE 0 END)
+            FROM response_records
+            WHERE customer_message_time BETWEEN ? AND ?
+            GROUP BY responder_user_id
+            ORDER BY AVG(response_seconds) ASC
+        """, (start_time, end_time))
+
+        stats = {}
+        for row in c.fetchall():
+            stats[row[0]] = {
+                'total_count': row[1],
+                'avg_response_seconds': round(row[2], 2) if row[2] else 0,
+                'work_time_count': row[3]
+            }
+        return stats
+    except Exception as e:
+        logger.error(f"获取所有员工响应统计失败: {e}")
+        return {}
+    finally:
+        conn.close()
+
+
+def set_employee_work_time(employee_id: int, work_start: str, work_end: str):
+    """设置员工工作时间"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        now = int(time.time())
+        c.execute("""
+            INSERT OR REPLACE INTO employee_work_time 
+            (employee_id, work_start, work_end, created_at, updated_at)
+            VALUES (?, ?, ?, 
+                    COALESCE((SELECT created_at FROM employee_work_time WHERE employee_id = ?), ?), 
+                    ?)
+        """, (employee_id, work_start, work_end, employee_id, now, now))
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"设置员工工作时间失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def get_employee_work_time(employee_id: int) -> Optional[Dict]:
+    """获取员工工作时间"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("SELECT work_start, work_end FROM employee_work_time WHERE employee_id = ?", (employee_id,))
+        row = c.fetchone()
+        if row:
+            return {'work_start': row[0], 'work_end': row[1]}
+        return None
+    except Exception as e:
+        logger.error(f"获取员工工作时间失败: {e}")
+        return None
+    finally:
+        conn.close()
+
+
+def is_in_work_time(employee_id: int, check_time: int = None) -> bool:
+    """判断当前时间是否在员工工作时间内"""
+    if check_time is None:
+        check_time = int(time.time())
+
+    work_time = get_employee_work_time(employee_id)
+    if not work_time:
+        return True
+
+    work_start = work_time['work_start']
+    work_end = work_time['work_end']
+
+    check_dt = datetime.fromtimestamp(check_time, timezone(timedelta(hours=8)))
+    start_dt = check_dt.replace(hour=int(work_start.split(':')[0]), minute=int(work_start.split(':')[1]), second=0)
+    end_dt = check_dt.replace(hour=int(work_end.split(':')[0]), minute=int(work_end.split(':')[1]), second=0)
+
+    if start_dt <= end_dt:
+        return start_dt <= check_dt <= end_dt
+    else:
+        return check_dt >= start_dt or check_dt <= end_dt
+
+
+def get_response_rating_config() -> List[Dict]:
+    """获取响应速度评级配置"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("SELECT level_name, min_seconds, max_seconds, emoji FROM response_rating_config ORDER BY min_seconds ASC")
+        config = []
+        for row in c.fetchall():
+            config.append({
+                'level_name': row[0],
+                'min_seconds': row[1],
+                'max_seconds': row[2],
+                'emoji': row[3]
+            })
+        return config
+    except Exception as e:
+        logger.error(f"获取响应评级配置失败: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+def update_response_rating_config(level_name: str, min_seconds: float, max_seconds: float, emoji: str):
+    """更新响应速度评级配置"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("""
+            UPDATE response_rating_config 
+            SET min_seconds = ?, max_seconds = ?, emoji = ?, updated_at = ?
+            WHERE level_name = ?
+        """, (min_seconds, max_seconds, emoji, int(time.time()), level_name))
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"更新响应评级配置失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def cleanup_old_response_records(months_to_keep: int = 6):
+    """清理旧的响应记录（保留指定月份数）"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        cutoff_time = int((datetime.now(timezone(timedelta(hours=8))) - timedelta(days=months_to_keep * 30)).timestamp())
+        c.execute("DELETE FROM response_records WHERE customer_message_time < ?", (cutoff_time,))
+        conn.commit()
+        return c.rowcount
+    except Exception as e:
+        logger.error(f"清理旧响应记录失败: {e}")
+        return 0
+    finally:
+        conn.close()
+
+
+def get_months_with_response_records() -> List[Dict]:
+    """获取有响应记录的月份列表"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("""
+            SELECT strftime('%Y', customer_message_time, 'unixepoch', '+8 hours') as year,
+                   strftime('%m', customer_message_time, 'unixepoch', '+8 hours') as month
+            FROM response_records
+            GROUP BY year, month
+            ORDER BY year DESC, month DESC
+        """)
+        months = []
+        for row in c.fetchall():
+            months.append({
+                'year': int(row[0]),
+                'month': int(row[1])
+            })
+        return months
+    except Exception as e:
+        logger.error(f"获取有记录的月份失败: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+def get_response_rating_for_seconds(seconds: float) -> Dict:
+    """根据秒数获取响应评级"""
+    config = get_response_rating_config()
+    for item in config:
+        if item['min_seconds'] <= seconds < item['max_seconds']:
+            return item
+    return config[-1] if config else {'level_name': '未知', 'emoji': '❓'}
+# db.py
+
+import sqlite3
+import os
+import time
+import re
+from contextlib import contextmanager
+from typing import Optional, List, Dict, Any
+from logger import bot_logger as logger
+from datetime import datetime, timezone, timedelta
+from auth import list_operators
+
+DB_PATH = "bot.db"
+if not os.path.isabs(DB_PATH):
+    DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), DB_PATH)
+
+COUNTRY_KEYWORDS = {
+    # ========== 亚洲 ==========
+    '中国': ['中国', 'china', 'cn', '🇨🇳', 'zhongguo'],
+    '台湾': ['台湾', 'taiwan', 'tw', '🇹🇼', 'taiwan china'],
+    '香港': ['香港', 'hong kong', 'hk', '🇭🇰', 'hongkong'],
+    '澳门': ['澳门', 'macau', 'mo', '🇲🇴', 'macao'],
+    '日本': ['日本', 'japan', 'jp', '🇯🇵', 'japon'],
+    '韩国': ['韩国', 'korea', 'kr', '🇰🇷', 'south korea', 'republic of korea'],
+    '朝鲜': ['朝鲜', 'north korea', 'kp', '🇰🇵', 'democratic people republic of korea'],
+    '蒙古': ['蒙古', 'mongolia', 'mn', '🇲🇳'],
+    '印度': ['印度', 'india', 'in', '🇮🇳', 'bharat'],
+    '巴基斯坦': ['巴基斯坦', 'pakistan', 'pk', '🇵🇰'],
+    '孟加拉国': ['孟加拉国', 'bangladesh', 'bd', '🇧🇩'],
+    '尼泊尔': ['尼泊尔', 'nepal', 'np', '🇳🇵'],
+    '不丹': ['不丹', 'bhutan', 'bt', '🇧🇹'],
+    '斯里兰卡': ['斯里兰卡', 'sri lanka', 'lk', '🇱🇰'],
+    '马尔代夫': ['马尔代夫', 'maldives', 'mv', '🇲🇻'],
+    '泰国': ['泰国', 'thailand', 'th', '🇹🇭', 'siamese'],
+    '越南': ['越南', 'vietnam', 'vn', '🇻🇳'],
+    '老挝': ['老挝', 'laos', 'la', '🇱🇦'],
+    '柬埔寨': ['柬埔寨', 'cambodia', 'kh', '🇰🇭'],
+    '缅甸': ['缅甸', 'myanmar', 'mm', '🇲🇲', 'burma'],
+    '马来西亚': ['马来西亚', 'malaysia', 'my', '🇲🇾'],
+    '新加坡': ['新加坡', 'singapore', 'sg', '🇸🇬'],
+    '印度尼西亚': ['印度尼西亚', 'indonesia', 'id', '🇮🇩'],
+    '菲律宾': ['菲律宾', 'philippines', 'ph', '🇵🇭'],
+    '东帝汶': ['东帝汶', 'timor leste', 'tl', '🇹🇱'],
+    '文莱': ['文莱', 'brunei', 'bn', '🇧🇳'],
+    '阿富汗': ['阿富汗', 'afghanistan', 'af', '🇦🇫'],
+    '伊朗': ['伊朗', 'iran', 'ir', '🇮🇷', 'persia'],
+    '伊拉克': ['伊拉克', 'iraq', 'iq', '🇮🇶'],
+    '科威特': ['科威特', 'kuwait', 'kw', '🇰🇼'],
+    '沙特阿拉伯': ['沙特', 'saudi', 'saudi arabia', 'sa', '🇸🇦'],
+    '也门': ['也门', 'yemen', 'ye', '🇾🇪'],
+    '阿曼': ['阿曼', 'oman', 'om', '🇴🇲'],
+    '阿联酋': ['阿联酋', 'uae', 'united arab emirates', 'ae', '🇦🇪'],
+    '卡塔尔': ['卡塔尔', 'qatar', 'qa', '🇶🇦'],
+    '巴林': ['巴林', 'bahrain', 'bh', '🇧🇭'],
+    '约旦': ['约旦', 'jordan', 'jo', '🇯🇴'],
+    '黎巴嫩': ['黎巴嫩', 'lebanon', 'lb', '🇱🇧'],
+    '叙利亚': ['叙利亚', 'syria', 'sy', '🇸🇾'],
+    '塞浦路斯': ['塞浦路斯', 'cyprus', 'cy', '🇨🇾'],
+    '以色列': ['以色列', 'israel', 'il', '🇮🇱'],
+    '巴勒斯坦': ['巴勒斯坦', 'palestine', 'ps', '🇵🇸'],
+    '土耳其': ['土耳其', 'turkey', 'tr', '🇹🇷'],
+    '阿塞拜疆': ['阿塞拜疆', 'azerbaijan', 'az', '🇦🇿'],
+    '格鲁吉亚': ['格鲁吉亚', 'georgia', 'ge', '🇬🇪'],
+    '亚美尼亚': ['亚美尼亚', 'armenia', 'am', '🇦🇲'],
+    '哈萨克斯坦': ['哈萨克斯坦', 'kazakhstan', 'kz', '🇰🇿'],
+    '吉尔吉斯斯坦': ['吉尔吉斯斯坦', 'kyrgyzstan', 'kg', '🇰🇬'],
+    '塔吉克斯坦': ['塔吉克斯坦', 'tajikistan', 'tj', '🇹🇯'],
+    '乌兹别克斯坦': ['乌兹别克斯坦', 'uzbekistan', 'uz', '🇺🇿'],
+    '土库曼斯坦': ['土库曼斯坦', 'turkmenistan', 'tm', '🇹🇲'],
+
+    # ========== 欧洲 ==========
+    '英国': ['英国', 'uk', 'united kingdom', 'england', 'britain', 'gb', '🇬🇧'],
+    '法国': ['法国', 'france', 'fr', '🇫🇷'],
+    '德国': ['德国', 'germany', 'de', '🇩🇪'],
+    '意大利': ['意大利', 'italy', 'it', '🇮🇹'],
+    '西班牙': ['西班牙', 'spain', 'es', '🇪🇸'],
+    '葡萄牙': ['葡萄牙', 'portugal', 'pt', '🇵🇹'],
+    '荷兰': ['荷兰', 'netherlands', 'nl', '🇳🇱', 'holland'],
+    '比利时': ['比利时', 'belgium', 'be', '🇧🇪'],
+    '卢森堡': ['卢森堡', 'luxembourg', 'lu', '🇱🇺'],
+    '瑞士': ['瑞士', 'switzerland', 'ch', '🇨🇭'],
+    '奥地利': ['奥地利', 'austria', 'at', '🇦🇹'],
+    '列支敦士登': ['列支敦士登', 'liechtenstein', 'li', '🇱🇮'],
+    '波兰': ['波兰', 'poland', 'pl', '🇵🇱'],
+    '捷克': ['捷克', 'czech', 'cz', '🇨🇿', 'czech republic'],
+    '斯洛伐克': ['斯洛伐克', 'slovakia', 'sk', '🇸🇰'],
+    '匈牙利': ['匈牙利', 'hungary', 'hu', '🇭🇺'],
+    '罗马尼亚': ['罗马尼亚', 'romania', 'ro', '🇷🇴'],
+    '保加利亚': ['保加利亚', 'bulgaria', 'bg', '🇧🇬'],
+    '塞尔维亚': ['塞尔维亚', 'serbia', 'rs', '🇷🇸'],
+    '克罗地亚': ['克罗地亚', 'croatia', 'hr', '🇭🇷'],
+    '斯洛文尼亚': ['斯洛文尼亚', 'slovenia', 'si', '🇸🇮'],
+    '波黑': ['波黑', 'bosnia', 'ba', '🇧🇦', 'bosnia and herzegovina'],
+    '黑山': ['黑山', 'montenegro', 'me', '🇲🇪'],
+    '北马其顿': ['北马其顿', 'north macedonia', 'mk', '🇲🇰'],
+    '阿尔巴尼亚': ['阿尔巴尼亚', 'albania', 'al', '🇦🇱'],
+    '希腊': ['希腊', 'greece', 'gr', '🇬🇷'],
+    '爱尔兰': ['爱尔兰', 'ireland', 'ie', '🇮🇪'],
+    '丹麦': ['丹麦', 'denmark', 'dk', '🇩🇰'],
+    '瑞典': ['瑞典', 'sweden', 'se', '🇸🇪'],
+    '挪威': ['挪威', 'norway', 'no', '🇳🇴'],
+    '芬兰': ['芬兰', 'finland', 'fi', '🇫🇮'],
+    '冰岛': ['冰岛', 'iceland', 'is', '🇮🇸'],
+    '俄罗斯': ['俄罗斯', 'russia', 'ru', '🇷🇺'],
+    '爱沙尼亚': ['爱沙尼亚', 'estonia', 'ee', '🇪🇪'],
+    '拉脱维亚': ['拉脱维亚', 'latvia', 'lv', '🇱🇻'],
+    '立陶宛': ['立陶宛', 'lithuania', 'lt', '🇱🇹'],
+    '白俄罗斯': ['白俄罗斯', 'belarus', 'by', '🇧🇾'],
+    '摩尔多瓦': ['摩尔多瓦', 'moldova', 'md', '🇲🇩'],
+    '乌克兰': ['乌克兰', 'ukraine', 'ua', '🇺🇦'],
+    '摩纳哥': ['摩纳哥', 'monaco', 'mc', '🇲🇨'],
+    '安道尔': ['安道尔', 'andorra', 'ad', '🇦🇩'],
+    '圣马力诺': ['圣马力诺', 'san marino', 'sm', '🇸🇲'],
+    '梵蒂冈': ['梵蒂冈', 'vatican', 'va', '🇻🇦'],
+    '马耳他': ['马耳他', 'malta', 'mt', '🇲🇹'],
+    '直布罗陀': ['直布罗陀', 'gibraltar', 'gi', '🇬🇮'],
+    '马恩岛': ['马恩岛', 'isle of man', 'im', '🇮🇲'],
+    '泽西岛': ['泽西岛', 'jersey', 'je', '🇯🇪'],
+    '根西岛': ['根西岛', 'guernsey', 'gg', '🇬🇬'],
+    '法罗群岛': ['法罗群岛', 'faroe islands', 'fo', '🇫🇴'],
+    '奥兰群岛': ['奥兰群岛', 'aland islands', 'ax', '🇦🇽'],
+    '斯瓦尔巴群岛': ['斯瓦尔巴', 'svalbard', 'sj', '🇸🇯'],
+
+    # ========== 北美洲 ==========
+    '美国': ['美国', 'usa', 'us', 'america', 'united states', '🇺🇸'],
+    '加拿大': ['加拿大', 'canada', 'ca', '🇨🇦'],
+    '墨西哥': ['墨西哥', 'mexico', 'mx', '🇲🇽'],
+    '古巴': ['古巴', 'cuba', 'cu', '🇨🇺'],
+    '牙买加': ['牙买加', 'jamaica', 'jm', '🇯🇲'],
+    '海地': ['海地', 'haiti', 'ht', '🇭🇹'],
+    '多米尼加': ['多米尼加', 'dominican', 'do', '🇩🇴'],
+    '波多黎各': ['波多黎各', 'puerto rico', 'pr', '🇵🇷'],
+    '巴哈马': ['巴哈马', 'bahamas', 'bs', '🇧🇸'],
+    '特立尼达和多巴哥': ['特立尼达', 'trinidad', 'tt', '🇹🇹'],
+    '巴巴多斯': ['巴巴多斯', 'barbados', 'bb', '🇧🇧'],
+    '圣卢西亚': ['圣卢西亚', 'saint lucia', 'lc', '🇱🇨'],
+    '格林纳达': ['格林纳达', 'grenada', 'gd', '🇬🇩'],
+    '安提瓜和巴布达': ['安提瓜', 'antigua', 'ag', '🇦🇬'],
+    '圣基茨和尼维斯': ['圣基茨', 'saint kitts', 'kn', '🇰🇳'],
+    '伯利兹': ['伯利兹', 'belize', 'bz', '🇧🇿'],
+    '哥斯达黎加': ['哥斯达黎加', 'costa rica', 'cr', '🇨🇷'],
+    '萨尔瓦多': ['萨尔瓦多', 'el salvador', 'sv', '🇸🇻'],
+    '危地马拉': ['危地马拉', 'guatemala', 'gt', '🇬🇹'],
+    '洪都拉斯': ['洪都拉斯', 'honduras', 'hn', '🇭🇳'],
+    '尼加拉瓜': ['尼加拉瓜', 'nicaragua', 'ni', '🇳🇮'],
+    '巴拿马': ['巴拿马', 'panama', 'pa', '🇵🇦'],
+
+    # ========== 南美洲 ==========
+    '巴西': ['巴西', 'brazil', 'br', '🇧🇷'],
+    '阿根廷': ['阿根廷', 'argentina', 'ar', '🇦🇷'],
+    '乌拉圭': ['乌拉圭', 'uruguay', 'uy', '🇺🇾'],
+    '巴拉圭': ['巴拉圭', 'paraguay', 'py', '🇵🇾'],
+    '玻利维亚': ['玻利维亚', 'bolivia', 'bo', '🇧🇴'],
+    '智利': ['智利', 'chile', 'cl', '🇨🇱'],
+    '秘鲁': ['秘鲁', 'peru', 'pe', '🇵🇪'],
+    '哥伦比亚': ['哥伦比亚', 'colombia', 'co', '🇨🇴'],
+    '委内瑞拉': ['委内瑞拉', 'venezuela', 've', '🇻🇪'],
+    '厄瓜多尔': ['厄瓜多尔', 'ecuador', 'ec', '🇪🇨'],
+    '圭亚那': ['圭亚那', 'guyana', 'gy', '🇬🇾'],
+    '苏里南': ['苏里南', 'suriname', 'sr', '🇸🇷'],
+    '法属圭亚那': ['法属圭亚那', 'french guiana', 'gf', '🇬🇫'],
+
+    # ========== 非洲 ==========
+    '南非': ['南非', 'south africa', 'za', '🇿🇦'],
+    '埃及': ['埃及', 'egypt', 'eg', '🇪🇬'],
+    '摩洛哥': ['摩洛哥', 'morocco', 'ma', '🇲🇦'],
+    '阿尔及利亚': ['阿尔及利亚', 'algeria', 'dz', '🇩🇿'],
+    '突尼斯': ['突尼斯', 'tunisia', 'tn', '🇹🇳'],
+    '利比亚': ['利比亚', 'libya', 'ly', '🇱🇾'],
+    '苏丹': ['苏丹', 'sudan', 'sd', '🇸🇩'],
+    '埃塞俄比亚': ['埃塞俄比亚', 'ethiopia', 'et', '🇪🇹'],
+    '肯尼亚': ['肯尼亚', 'kenya', 'ke', '🇰🇪'],
+    '坦桑尼亚': ['坦桑尼亚', 'tanzania', 'tz', '🇹🇿'],
+    '乌干达': ['乌干达', 'uganda', 'ug', '🇺🇬'],
+    '卢旺达': ['卢旺达', 'rwanda', 'rw', '🇷🇼'],
+    '布隆迪': ['布隆迪', 'burundi', 'bi', '🇧🇮'],
+    '索马里': ['索马里', 'somalia', 'so', '🇸🇴'],
+    '吉布提': ['吉布提', 'djibouti', 'dj', '🇩🇯'],
+    '厄立特里亚': ['厄立特里亚', 'eritrea', 'er', '🇪🇷'],
+    '南苏丹': ['南苏丹', 'south sudan', 'ss', '🇸🇸'],
+    '刚果金': ['刚果金', 'congo', 'cd', '🇨🇩', 'drc'],
+    '刚果布': ['刚果布', 'congo brazzaville', 'cg', '🇨🇬'],
+    '加蓬': ['加蓬', 'gabon', 'ga', '🇬🇦'],
+    '赤道几内亚': ['赤道几内亚', 'equatorial guinea', 'gq', '🇬🇶'],
+    '喀麦隆': ['喀麦隆', 'cameroon', 'cm', '🇨🇲'],
+    '尼日利亚': ['尼日利亚', 'nigeria', 'ng', '🇳🇬'],
+    '加纳': ['加纳', 'ghana', 'gh', '🇬🇭'],
+    '科特迪瓦': ['科特迪瓦', 'ivory coast', 'ci', '🇨🇮'],
+    '塞内加尔': ['塞内加尔', 'senegal', 'sn', '🇸🇳'],
+    '几内亚': ['几内亚', 'guinea', 'gn', '🇬🇳'],
+    '几内亚比绍': ['几内亚比绍', 'guinea bissau', 'gw', '🇬🇼'],
+    '马里': ['马里', 'mali', 'ml', '🇲🇱'],
+    '布基纳法索': ['布基纳法索', 'burkina faso', 'bf', '🇧🇫'],
+    '尼日尔': ['尼日尔', 'niger', 'ne', '🇳🇪'],
+    '乍得': ['乍得', 'chad', 'td', '🇹🇩'],
+    '中非': ['中非', 'central african', 'cf', '🇨🇫'],
+    '安哥拉': ['安哥拉', 'angola', 'ao', '🇦🇴'],
+    '纳米比亚': ['纳米比亚', 'namibia', 'na', '🇳🇦'],
+    '博茨瓦纳': ['博茨瓦纳', 'botswana', 'bw', '🇧🇼'],
+    '赞比亚': ['赞比亚', 'zambia', 'zm', '🇿🇲'],
+    '津巴布韦': ['津巴布韦', 'zimbabwe', 'zw', '🇿🇼'],
+    '莫桑比克': ['莫桑比克', 'mozambique', 'mz', '🇲🇿'],
+    '马拉维': ['马拉维', 'malawi', 'mw', '🇲🇼'],
+    '马达加斯加': ['马达加斯加', 'madagascar', 'mg', '🇲🇬'],
+    '毛里求斯': ['毛里求斯', 'mauritius', 'mu', '🇲🇺'],
+    '塞舌尔': ['塞舌尔', 'seychelles', 'sc', '🇸🇨'],
+    '科摩罗': ['科摩罗', 'comoros', 'km', '🇰🇲'],
+    '毛里塔尼亚': ['毛里塔尼亚', 'mauritania', 'mr', '🇲🇷'],
+    '西撒哈拉': ['西撒哈拉', 'western sahara', 'eh', '🇪🇭'],
+    '冈比亚': ['冈比亚', 'gambia', 'gm', '🇬🇲'],
+    '塞拉利昂': ['塞拉利昂', 'sierra leone', 'sl', '🇸🇱'],
+    '利比里亚': ['利比里亚', 'liberia', 'lr', '🇱🇷'],
+    '贝宁': ['贝宁', 'benin', 'bj', '🇧🇯'],
+    '多哥': ['多哥', 'togo', 'tg', '🇹🇬'],
+
+    # ========== 大洋洲 ==========
+    '澳大利亚': ['澳大利亚', 'australia', 'au', '🇦🇺'],
+    '新西兰': ['新西兰', 'new zealand', 'nz', '🇳🇿'],
+    '斐济': ['斐济', 'fiji', 'fj', '🇫🇯'],
+    '巴布亚新几内亚': ['巴布亚新几内亚', 'papua new guinea', 'pg', '🇵🇬'],
+    '所罗门群岛': ['所罗门群岛', 'solomon islands', 'sb', '🇸🇧'],
+    '瓦努阿图': ['瓦努阿图', 'vanuatu', 'vu', '🇻🇺'],
+    '新喀里多尼亚': ['新喀里多尼亚', 'new caledonia', 'nc', '🇳🇨'],
+    '萨摩亚': ['萨摩亚', 'samoa', 'ws', '🇼🇸'],
+    '汤加': ['汤加', 'tonga', 'to', '🇹🇴'],
+    '密克罗尼西亚': ['密克罗尼西亚', 'micronesia', 'fm', '🇫🇲'],
+    '马绍尔群岛': ['马绍尔群岛', 'marshall islands', 'mh', '🇲🇭'],
+    '帕劳': ['帕劳', 'palau', 'pw', '🇵🇼'],
+    '瑙鲁': ['瑙鲁', 'nauru', 'nr', '🇳🇷'],
+    '基里巴斯': ['基里巴斯', 'kiribati', 'ki', '🇰🇮'],
+    '图瓦卢': ['图瓦卢', 'tuvalu', 'tv', '🇹🇻'],
+}
+
+def detect_country_from_group_name(group_name: str) -> str:
+    """从群组名称中检测国家，返回国家名称，没有匹配返回 None"""
+    if not group_name:
+        return None
+
+    group_name_lower = group_name.lower()
+
+    for country, keywords in COUNTRY_KEYWORDS.items():
+        for keyword in keywords:
+            if keyword.lower() in group_name_lower:
+                return country
+
+    return None
+
+def ensure_country_category(country_name: str) -> bool:
+    """确保国家的分类存在，不存在则自动创建"""
+    categories = get_all_categories()
+    category_names = [cat['name'] for cat in categories]
+
+    if country_name not in category_names:
+        return add_category(country_name, f"自动创建的{country_name}分类")
+
+    return True
+
+def get_db_connection():
+    """获取数据库连接，带重试机制和超时设置"""
+    max_retries = 3
+    retry_delay = 0.1  # 100ms
+
+    for attempt in range(max_retries):
+        try:
+            conn = sqlite3.connect(DB_PATH, timeout=30.0)
+            conn.row_factory = sqlite3.Row  # 添加这行，使返回结果支持字典访问
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=30000")  # 30秒忙等待超时
+            return conn
+        except sqlite3.OperationalError as e:
+            if "database is locked" in str(e) and attempt < max_retries - 1:
+                logger.warning(f"数据库锁定，第{attempt + 1}次重试...")
+                time.sleep(retry_delay)
+                retry_delay *= 2  # 指数退避
+            else:
+                raise
+
+    return conn
+
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("PRAGMA journal_mode=WAL")
+    c = conn.cursor()
+
+    # 创建 operators 表
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS operators (
+            user_id TEXT PRIMARY KEY,
+            name TEXT
+        )
+    """)
+
+    # 创建 groups 表
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS groups (
+            group_id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            last_seen INTEGER DEFAULT 0,
+            category TEXT DEFAULT '未分类'
+        )
+    """)
+
+    # 创建分类表
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS group_categories (
+            category_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            category_name TEXT UNIQUE NOT NULL,
+            created_at INTEGER DEFAULT 0,
+            description TEXT
+        )
+    """)
+
+    # 🔥 创建群组记账配置表（添加 per_transaction_fee 字段）
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS group_accounting_config (
+            group_id TEXT PRIMARY KEY,
+            fee_rate REAL DEFAULT 0.0,
+            exchange_rate REAL DEFAULT 1.0,
+            per_transaction_fee REAL DEFAULT 0.0,
+            session_id TEXT,
+            session_start_time INTEGER DEFAULT 0,
+            session_end_time INTEGER DEFAULT 0,
+            is_active INTEGER DEFAULT 1,
+            updated_at INTEGER DEFAULT 0
+        )
+    """)
+
+    # 初始化默认分类
+    now = int(time.time())
+    default_categories = ['未分类']
+    for cat in default_categories:
+        c.execute("INSERT OR IGNORE INTO group_categories (category_name, created_at) VALUES (?, ?)", (cat, now))
+
+    try:
+        c.execute("SELECT notified FROM address_transactions LIMIT 1")
+    except:
+        # 表不存在时会自动创建，无需处理
+        pass
+
+    # 数据库迁移：为现有群组添加 category 字段
+    try:
+        c.execute("SELECT category FROM groups LIMIT 1")
+    except sqlite3.OperationalError:
+        c.execute("ALTER TABLE groups ADD COLUMN category TEXT DEFAULT '未分类'")
+        logger.info("已为 groups 表添加 category 字段")
+
+    # 🔥 数据库迁移：为已存在的 group_accounting_config 表添加 per_transaction_fee 字段
+    try:
+        c.execute("SELECT per_transaction_fee FROM group_accounting_config LIMIT 1")
+    except sqlite3.OperationalError:
+        c.execute("ALTER TABLE group_accounting_config ADD COLUMN per_transaction_fee REAL DEFAULT 0.0")
+        logger.info("已为 group_accounting_config 表添加 per_transaction_fee 字段")
+
+    # ========== 新增：监控地址表 ==========
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS monitored_addresses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            address TEXT NOT NULL,
+            chain_type TEXT NOT NULL,
+            added_by INTEGER NOT NULL,
+            added_at INTEGER NOT NULL,
+            last_check INTEGER DEFAULT 0,
+            last_tx_id TEXT,
+            note TEXT DEFAULT ''
+        )
+    """)
+
+    # 迁移：删除旧的唯一约束（如果存在）
+    try:
+        c.execute("DROP INDEX IF EXISTS sqlite_autoindex_monitored_addresses_1")
+        logger.info("已移除 monitored_addresses 的唯一约束")
+    except:
+        pass
+
+    # ========== 新增：自动迁移 note 字段 ==========
+    try:
+        c.execute("SELECT note FROM monitored_addresses LIMIT 1")
+    except sqlite3.OperationalError:
+        c.execute("ALTER TABLE monitored_addresses ADD COLUMN note TEXT DEFAULT ''")
+        logger.info("已为 monitored_addresses 表添加 note 字段")
+
+    # 数据库迁移：为 groups 表添加 joined_at 字段
+    try:
+        c.execute("SELECT joined_at FROM groups LIMIT 1")
+    except sqlite3.OperationalError:
+        c.execute("ALTER TABLE groups ADD COLUMN joined_at INTEGER DEFAULT 0")
+        logger.info("已为 groups 表添加 joined_at 字段")
+
+    # 先检查旧表是否存在
+    c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='address_transactions'")
+    old_table_exists = c.fetchone()
+
+    if old_table_exists:
+        # 检查 notified 字段类型
+        c.execute("PRAGMA table_info(address_transactions)")
+        columns = {row[1]: row[2] for row in c.fetchall()}
+
+        if columns.get('notified', '').upper() == 'INTEGER':
+            # 需要迁移：重建表
+            logger.info("检测到 address_transactions 表 notified 字段为 INTEGER，正在迁移...")
+            c.execute("ALTER TABLE address_transactions RENAME TO address_transactions_old")
+            c.execute("""
+                CREATE TABLE address_transactions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    address TEXT NOT NULL,
+                    tx_id TEXT NOT NULL,
+                    from_addr TEXT,
+                    to_addr TEXT,
+                    amount REAL,
+                    timestamp INTEGER NOT NULL,
+                    notified TEXT DEFAULT ''
+                )
+            """)
+            c.execute("""
+                INSERT INTO address_transactions (id, address, tx_id, from_addr, to_addr, amount, timestamp, notified)
+                SELECT id, address, tx_id, from_addr, to_addr, amount, timestamp, CAST(notified AS TEXT)
+                FROM address_transactions_old
+            """)
+            c.execute("DROP TABLE address_transactions_old")
+            logger.info("address_transactions 表迁移完成")
+    else:
+        # 表不存在，直接创建
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS address_transactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                address TEXT NOT NULL,
+                tx_id TEXT NOT NULL,
+                from_addr TEXT,
+                to_addr TEXT,
+                amount REAL,
+                timestamp INTEGER NOT NULL,
+                notified TEXT DEFAULT ''
+            )
+        """)
+
+    # 🔥 新增：记账记录表（确保存在）
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS accounting_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            user_id INTEGER NOT NULL,
+            username TEXT,
+            record_type TEXT NOT NULL,
+            amount REAL NOT NULL,
+            amount_usdt REAL NOT NULL,
+            description TEXT,
+            category TEXT DEFAULT '',
+            rate REAL DEFAULT 0,
+            created_at INTEGER NOT NULL,
+            date TEXT NOT NULL
+        )
+    """)
+
+    # 🔥 新增：群组用户表
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS group_users (
+            group_id TEXT NOT NULL,
+            user_id INTEGER NOT NULL,
+            username TEXT,
+            first_name TEXT,
+            last_name TEXT,
+            last_seen INTEGER NOT NULL,
+            PRIMARY KEY (group_id, user_id)
+        )
+    """)
+
+    # 🔥 新增：历史会话表
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS accounting_sessions (
+            session_id TEXT PRIMARY KEY,
+            group_id TEXT NOT NULL,
+            start_time INTEGER NOT NULL,
+            end_time INTEGER NOT NULL,
+            date TEXT NOT NULL,
+            fee_rate REAL DEFAULT 0.0,
+            exchange_rate REAL DEFAULT 1.0
+        )
+    """)
+
+    # ========== 员工管理：任务表 ==========
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            period_type TEXT DEFAULT 'today',
+            deadline INTEGER NOT NULL,
+            remind_time INTEGER DEFAULT 0,
+            remind_enabled INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'pending',
+            created_by INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            completed_at INTEGER DEFAULT 0,
+            date TEXT NOT NULL
+        )
+    """)
+
+    # ========== 员工管理：任务分配表 ==========
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS task_assignments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id INTEGER NOT NULL,
+            employee_id INTEGER NOT NULL,
+            employee_name TEXT DEFAULT '',
+            status TEXT DEFAULT 'pending',
+            completed_at INTEGER DEFAULT 0,
+            completion_detail TEXT DEFAULT '',
+            completion_percent REAL DEFAULT 100.0,
+            notified INTEGER DEFAULT 0,
+            FOREIGN KEY (task_id) REFERENCES tasks(id)
+        )
+    """)
+
+    try:
+        c.execute("ALTER TABLE task_assignments ADD COLUMN completion_percent REAL DEFAULT 100.0")
+    except:
+        pass
+
+    # ========== 员工管理：底薪设置表 ==========
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS employee_salary (
+            employee_id INTEGER PRIMARY KEY,
+            monthly_base REAL DEFAULT 0.0,
+            currency TEXT DEFAULT 'USDT',
+            updated_by INTEGER,
+            updated_at INTEGER DEFAULT 0
+        )
+    """)
+
+    # ========== 员工管理：激励奖开关表 ==========
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS employee_incentive_settings (
+            employee_id INTEGER PRIMARY KEY,
+            incentive_enabled INTEGER DEFAULT 1,
+            updated_by INTEGER,
+            updated_at INTEGER DEFAULT 0
+        )
+    """)
+
+    c.execute("CREATE INDEX IF NOT EXISTS idx_tasks_date ON tasks(date)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_task_assignments_task ON task_assignments(task_id)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_task_assignments_employee ON task_assignments(employee_id)")
+
+    # ========== 规则管理表 ==========
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            rule_name TEXT NOT NULL,
+            rule_content TEXT NOT NULL,
+            created_by INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            is_active INTEGER DEFAULT 1
+        )
+    """)
+    c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_rules_name ON rules(rule_name)")
+
+    # ========== 业绩记录表 ==========
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS performance_records (
+            id INTEGER PRIMARY KEY,
+            country TEXT NOT NULL,
+            channel_income REAL NOT NULL,
+            customer_expense REAL NOT NULL,
+            profit REAL NOT NULL,
+            channel_group TEXT DEFAULT '',
+            customer_group TEXT DEFAULT '',
+            channel_employee_id INTEGER NOT NULL,
+            channel_employee_name TEXT DEFAULT '',
+            customer_employee_id INTEGER NOT NULL,
+            customer_employee_name TEXT DEFAULT '',
+            created_by INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            date TEXT NOT NULL
+        )
+    """)
+    c.execute("CREATE INDEX IF NOT EXISTS idx_perf_date ON performance_records(date)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_perf_channel_emp ON performance_records(channel_employee_id)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_perf_customer_emp ON performance_records(customer_employee_id)")
+
+    # ========== 亏损记录表 ==========
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS loss_records (
+            id TEXT PRIMARY KEY,
+            amount REAL NOT NULL,
+            country TEXT NOT NULL,
+            channel_bear REAL DEFAULT 0,
+            customer_bear REAL DEFAULT 0,
+            company_bear REAL DEFAULT 0,
+            channel_employee_id INTEGER NOT NULL,
+            channel_employee_name TEXT DEFAULT '',
+            customer_employee_id INTEGER NOT NULL,
+            customer_employee_name TEXT DEFAULT '',
+            reason TEXT DEFAULT '',
+            created_by INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            date TEXT NOT NULL
+        )
+    """)
+
+    # 迁移：添加缺失的字段
+    try:
+        c.execute("SELECT channel_bear FROM loss_records LIMIT 1")
+    except sqlite3.OperationalError:
+        c.execute("ALTER TABLE loss_records ADD COLUMN channel_bear REAL DEFAULT 0")
+        c.execute("ALTER TABLE loss_records ADD COLUMN customer_bear REAL DEFAULT 0")
+        c.execute("ALTER TABLE loss_records ADD COLUMN company_bear REAL DEFAULT 0")
+        logger.info("已为 loss_records 表添加分摊字段")
+
+    c.execute("CREATE INDEX IF NOT EXISTS idx_loss_date ON loss_records(date)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_loss_channel_emp ON loss_records(channel_employee_id)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_loss_customer_emp ON loss_records(customer_employee_id)")
+
+    # ========== 比例设置表 ==========
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS performance_settings (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            commission_rate REAL DEFAULT 0.1,
+            channel_commission_rate REAL DEFAULT 0.1,
+            customer_commission_rate REAL DEFAULT 0.1,
+            channel_loss_rate REAL DEFAULT 0.25,
+            customer_loss_rate REAL DEFAULT 0.25,
+            company_loss_rate REAL DEFAULT 0.50,
+            updated_by INTEGER,
+            updated_at INTEGER
+        )
+    """)
+
+    # 迁移：添加新的提成比例字段（必须在 INSERT 之前执行）
+    try:
+        c.execute("SELECT channel_commission_rate FROM performance_settings LIMIT 1")
+    except sqlite3.OperationalError:
+        c.execute("ALTER TABLE performance_settings ADD COLUMN channel_commission_rate REAL DEFAULT 0.1")
+        c.execute("ALTER TABLE performance_settings ADD COLUMN customer_commission_rate REAL DEFAULT 0.1")
+        logger.info("已为 performance_settings 表添加分别提成比例字段")
+
+    # 迁移：添加激励奖励阶梯字段
+    try:
+        c.execute("SELECT incentive_tiers FROM performance_settings LIMIT 1")
+    except sqlite3.OperationalError:
+        c.execute("ALTER TABLE performance_settings ADD COLUMN incentive_tiers TEXT DEFAULT ''")
+        logger.info("已为 performance_settings 表添加激励奖励阶梯字段")
+
+    # 迁移：添加公司费用字段（渠道费/技术费/响应速度奖，按公司总收益百分比）
+    try:
+        c.execute("SELECT channel_fee_rate FROM performance_settings LIMIT 1")
+    except sqlite3.OperationalError:
+        c.execute("ALTER TABLE performance_settings ADD COLUMN channel_fee_employee_id INTEGER DEFAULT 0")
+        c.execute("ALTER TABLE performance_settings ADD COLUMN channel_fee_rate REAL DEFAULT 0")
+        c.execute("ALTER TABLE performance_settings ADD COLUMN tech_fee_employee_id INTEGER DEFAULT 0")
+        c.execute("ALTER TABLE performance_settings ADD COLUMN tech_fee_rate REAL DEFAULT 0")
+        c.execute("ALTER TABLE performance_settings ADD COLUMN response_award_rate REAL DEFAULT 0")
+        logger.info("已为 performance_settings 表添加公司费用字段")
+
+    # 迁移：添加响应速度奖上限字段（0 = 不封顶）
+    try:
+        c.execute("SELECT response_award_cap FROM performance_settings LIMIT 1")
+    except sqlite3.OperationalError:
+        c.execute("ALTER TABLE performance_settings ADD COLUMN response_award_cap REAL DEFAULT 0")
+        logger.info("已为 performance_settings 表添加响应速度奖上限字段")
+
+    # 迁移：添加响应速度奖参考人字段（逗号分隔的员工ID，空=使用旧第一名逻辑）
+    try:
+        c.execute("SELECT response_award_reference_ids FROM performance_settings LIMIT 1")
+    except sqlite3.OperationalError:
+        c.execute("ALTER TABLE performance_settings ADD COLUMN response_award_reference_ids TEXT DEFAULT ''")
+        logger.info("已为 performance_settings 表添加响应速度奖参考人字段")
+
+    # 初始化默认设置
+    c.execute("INSERT OR IGNORE INTO performance_settings (id, commission_rate, channel_commission_rate, customer_commission_rate, channel_loss_rate, customer_loss_rate, company_loss_rate) VALUES (1, 0.1, 0.1, 0.1, 0.25, 0.25, 0.50)")
+
+    # ========== 操作日志表（记录追溯） ==========
+    # 先检查表是否存在
+    c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='performance_logs'")
+    table_exists = c.fetchone() is not None
+
+    if not table_exists:
+        c.execute("""
+            CREATE TABLE performance_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                record_type TEXT NOT NULL,
+                record_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                old_data TEXT,
+                new_data TEXT,
+                operated_by INTEGER NOT NULL,
+                operated_at INTEGER NOT NULL,
+                date TEXT
+            )
+        """)
+    else:
+        # 迁移：添加缺失的列
+        try:
+            c.execute("SELECT record_type FROM performance_logs LIMIT 1")
+        except sqlite3.OperationalError:
+            c.execute("ALTER TABLE performance_logs ADD COLUMN record_type TEXT NOT NULL DEFAULT 'performance'")
+            logger.info("已为 performance_logs 表添加 record_type 字段")
+
+        # 迁移：添加 date 字段
+        try:
+            c.execute("SELECT date FROM performance_logs LIMIT 1")
+        except sqlite3.OperationalError:
+            c.execute("ALTER TABLE performance_logs ADD COLUMN date TEXT")
+            logger.info("已为 performance_logs 表添加 date 字段")
+
+    c.execute("CREATE INDEX IF NOT EXISTS idx_perf_logs_type ON performance_logs(record_type)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_perf_logs_id ON performance_logs(record_id)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_perf_logs_time ON performance_logs(operated_at)")
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS user_preferences (
+            user_id INTEGER PRIMARY KEY,
+            monitor_notify INTEGER DEFAULT 1,       -- 1=开启，0=关闭
+            broadcast_signature TEXT DEFAULT '',    -- 默认群发附言
+            daily_report_enabled INTEGER DEFAULT 0,    -- 新增
+            daily_report_hour INTEGER DEFAULT 9,        -- 新增
+            updated_at INTEGER DEFAULT 0
+        )
+    """)
+
+    # 迁移：为 user_preferences 添加 daily_report_enabled / daily_report_hour
+    try:
+        c.execute("SELECT daily_report_enabled FROM user_preferences LIMIT 1")
+    except sqlite3.OperationalError:
+        c.execute("ALTER TABLE user_preferences ADD COLUMN daily_report_enabled INTEGER DEFAULT 0")
+        c.execute("ALTER TABLE user_preferences ADD COLUMN daily_report_hour INTEGER DEFAULT 9")
+        logger.info("已为 user_preferences 表添加每日早报字段")
+
+    # 创建索引
+    c.execute("CREATE INDEX IF NOT EXISTS idx_records_group_id ON accounting_records(group_id)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_records_session_id ON accounting_records(session_id)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_records_date ON accounting_records(date)")
+
+    # ========== 添加索引优化（支持500个群组）==========
+    logger.info("正在创建数据库索引...")
+
+    # 记账记录表的索引
+    c.execute("CREATE INDEX IF NOT EXISTS idx_records_group_date ON accounting_records(group_id, date)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_records_created ON accounting_records(created_at)")
+
+    # 群组表的索引
+    c.execute("CREATE INDEX IF NOT EXISTS idx_groups_category ON groups(category)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_groups_last_seen ON groups(last_seen)")
+
+    # 用户表的索引
+    c.execute("CREATE INDEX IF NOT EXISTS idx_users_group_id ON group_users(group_id)")
+
+    logger.info("数据库索引创建完成")
+
+    conn.commit()
+    conn.close()
+    logger.info(f"数据库初始化完成: {DB_PATH}")
+
+# ========== 监控地址相关操作 ==========
+
+def get_monitored_addresses(user_id: int = None):
+    """获取监控地址，如果指定 user_id 则只返回该用户添加的地址"""
+    conn = get_db_connection()
+    c = conn.cursor()
+
+    if user_id is not None:
+        c.execute("SELECT id, address, chain_type, added_by, added_at, last_check, note FROM monitored_addresses WHERE added_by = ? ORDER BY added_at DESC", (user_id,))
+    else:
+        c.execute("SELECT id, address, chain_type, added_by, added_at, last_check, note FROM monitored_addresses ORDER BY added_at DESC")
+
+    rows = c.fetchall()
+    conn.close()
+    return [{"id": r[0], "address": r[1], "chain_type": r[2], "added_by": r[3], "added_at": r[4], "last_check": r[5], "note": r[6] or ""} for r in rows]
+
+
+def add_monitored_address(address: str, chain_type: str, added_by: int, note: str = ""):
+    """添加监控地址（支持备注）
+    - 不同用户可以添加同一个地址
+    - 同一用户不能重复添加同一个地址
+    """
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        # 检查该用户是否已经添加过这个地址
+        c.execute("SELECT id FROM monitored_addresses WHERE address = ? AND added_by = ?", (address, added_by))
+        if c.fetchone():
+            logger.warning(f"用户 {added_by} 已添加过地址 {address}")
+            return False
+
+        # 允许不同用户添加
+        current_time = int(time.time())
+        c.execute("""
+            INSERT INTO monitored_addresses (address, chain_type, added_by, added_at, last_check, note)
+            VALUES (?, ?, ?, ?, 0, ?)
+        """, (address, chain_type, added_by, int(time.time()), note))
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"添加监控地址失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def remove_monitored_address(address_id: int):
+    """删除监控地址"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("DELETE FROM monitored_addresses WHERE id = ?", (address_id,))
+    conn.commit()
+    conn.close()
+    return True
+
+
+def update_address_last_check(address: str, last_check: int, user_id: int = None):
+    """更新地址最后检查时间"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    if user_id is not None:
+        c.execute("UPDATE monitored_addresses SET last_check = ? WHERE address = ? AND added_by = ?", 
+                  (last_check, address, user_id))
+    else:
+        c.execute("UPDATE monitored_addresses SET last_check = ? WHERE address = ?", 
+                  (last_check, address))
+    conn.commit()
+    conn.close()
+
+def is_tx_notified(tx_id: str, user_id: int = None) -> bool:
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT notified FROM address_transactions WHERE tx_id = ?", (tx_id,))
+    row = c.fetchone()
+    conn.close()
+
+    if not row:
+        return False
+
+    if user_id is None:
+        return True
+
+    notified_str = row[0] or ""
+    if notified_str == 'all':
+        return True
+
+    notified_users = [uid.strip() for uid in notified_str.split(",") if uid.strip()]
+    return str(user_id) in notified_users
+
+
+def mark_tx_notified(tx_id: str, user_id: int = None):
+    conn = get_db_connection()
+    c = conn.cursor()
+
+    if user_id is None:
+        c.execute("UPDATE address_transactions SET notified = 'all' WHERE tx_id = ?", (tx_id,))
+    else:
+        c.execute("SELECT notified FROM address_transactions WHERE tx_id = ?", (tx_id,))
+        row = c.fetchone()
+
+        if row and row[0]:
+            notified_str = row[0]
+            if notified_str == 'all':
+                conn.close()
+                return
+            notified_users = [uid.strip() for uid in notified_str.split(",") if uid.strip()]
+        else:
+            notified_users = []
+
+        if str(user_id) not in notified_users:
+            notified_users.append(str(user_id))
+
+        c.execute("UPDATE address_transactions SET notified = ? WHERE tx_id = ?", 
+                  (",".join(notified_users), tx_id))
+
+    conn.commit()
+    conn.close()
+
+
+def add_transaction_record(address: str, tx_id: str, from_addr: str, to_addr: str, 
+                           amount: float, timestamp: int, user_id: int = None):
+    """
+    添加交易记录
+    新增 user_id 参数，初始化 notified 字段
+    """
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        # 检查是否已存在
+        c.execute("SELECT id, notified FROM address_transactions WHERE tx_id = ?", (tx_id,))
+        existing = c.fetchone()
+
+        if existing:
+            # 已存在，更新 notified 列表
+            if user_id is not None:
+                notified_str = existing[1] or ""
+                if notified_str != 'all':
+                    notified_users = [uid.strip() for uid in notified_str.split(",") if uid.strip()]
+                    if str(user_id) not in notified_users:
+                        notified_users.append(str(user_id))
+                        c.execute("UPDATE address_transactions SET notified = ? WHERE id = ?",
+                                  (",".join(notified_users), existing[0]))
+                conn.commit()
+            return True
+
+        # 新增记录
+        initial_notified = str(user_id) if user_id else ""
+        c.execute("""
+            INSERT INTO address_transactions (address, tx_id, from_addr, to_addr, amount, timestamp, notified)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (address, tx_id, from_addr, to_addr, amount, timestamp, initial_notified))
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"添加交易记录失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+
+
+# ========== 原有函数保持不变 ==========
+
+# db.py - 修复 save_group 函数
+
+def save_group(group_id: str, title: str, category: str = None):
+    """保存或更新群组信息（支持自动分类）"""
+    import time
+    conn = get_db_connection()
+    c = conn.cursor()
+
+    try:
+        # 先获取现有的 joined_at
+        c.execute("SELECT category, joined_at FROM groups WHERE group_id = ?", (group_id,))
+        row = c.fetchone()
+
+        if row:
+            existing_category = row[0]
+            joined_at = row[1] if row[1] else 0
+        else:
+            existing_category = None
+            joined_at = 0
+
+        # 确定分类
+        if category is None:
+            final_category = existing_category if existing_category else '未分类'
+        else:
+            final_category = category
+
+        # 如果是新群组（没有 joined_at），设置当前时间
+        if joined_at == 0:
+            joined_at = int(time.time())
+
+        # 如果分类是"未分类"，尝试自动识别
+        if final_category == '未分类':
+            country = detect_country_from_group_name(title)
+            if country:
+                if ensure_country_category(country):
+                    final_category = country
+                    logger.info(f"自动分类：群组「{title}」已归类到「{country}」")
+
+        c.execute("""
+            INSERT OR REPLACE INTO groups (group_id, title, last_seen, category, joined_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (group_id, title, int(time.time()), final_category, joined_at))
+
+        conn.commit()
+        logger.info(f"[DB] 群组 {title} (分类: {final_category}) 已保存。")
+
+    except Exception as e:
+        logger.error(f"[DB Error] 保存群组失败: {e}")
+        conn.rollback()
+    finally:
+        conn.close()
+
+# db.py - 添加修复函数
+
+def fix_joined_at():
+    """修复现有群组的 joined_at 字段"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT group_id, last_seen FROM groups WHERE joined_at = 0 OR joined_at IS NULL")
+    rows = c.fetchall()
+
+    count = 0
+    for row in rows:
+        group_id = row[0]
+        last_seen = row[1] if row[1] else int(time.time())
+        c.execute("UPDATE groups SET joined_at = ? WHERE group_id = ?", (last_seen, group_id))
+        count += 1
+
+    conn.commit()
+    conn.close()
+    logger.info(f"已修复 {count} 个群组的 joined_at")
+
+def delete_group_from_db(group_id: str):
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("DELETE FROM groups WHERE group_id = ?", (group_id,))
+    conn.commit()
+    count = c.execute("SELECT count(*) FROM groups").fetchone()[0]
+    logger.info(f"[DB] 群组 {group_id} 已删除。剩余群组数：{count}")
+    conn.close()
+
+def get_all_groups_from_db(category: str = None):
+    conn = get_db_connection()
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+
+    if category:
+        c.execute("SELECT group_id, title, last_seen, category, joined_at FROM groups WHERE category = ?", (category,))
+    else:
+        c.execute("SELECT group_id, title, last_seen, category, joined_at FROM groups")
+
+    rows = c.fetchall()
+    conn.close()
+
+    # ✅ 处理 joined_at 为空的情况
+    result = []
+    for row in rows:
+        joined_at = row["joined_at"]
+        if joined_at is None or joined_at == 0:
+            # 如果没有加入时间，用 last_seen 代替
+            joined_at = row["last_seen"] if row["last_seen"] else 0
+
+        result.append({
+            "id": row["group_id"], 
+            "title": row["title"], 
+            "last_seen": row["last_seen"], 
+            "category": row["category"], 
+            "joined_at": joined_at
+        })
+
+    return result
+
+def update_group_category(group_id: str, category: str):
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("UPDATE groups SET category = ? WHERE group_id = ?", (category, group_id))
+        conn.commit()
+        logger.info(f"群组 {group_id} 分类已更新为: {category}")
+        return True
+    except Exception as e:
+        logger.error(f"更新分类失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def get_all_categories():
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT category_name, description FROM group_categories ORDER BY category_id")
+    rows = c.fetchall()
+    conn.close()
+    return [{"name": row[0], "description": row[1] or ""} for row in rows]
+
+
+def add_category(category_name: str, description: str = ""):
+    import time
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("INSERT INTO group_categories (category_name, description, created_at) VALUES (?, ?, ?)",
+                  (category_name, description, int(time.time())))
+        conn.commit()
+        logger.info(f"已添加分类: {category_name}")
+        return True
+    except sqlite3.IntegrityError:
+        logger.warning(f"分类已存在: {category_name}")
+        return False
+    finally:
+        conn.close()
+
+
+def delete_category(category_name: str):
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("UPDATE groups SET category = '未分类' WHERE category = ?", (category_name,))
+        c.execute("DELETE FROM group_categories WHERE category_name = ?", (category_name,))
+        conn.commit()
+        logger.info(f"已删除分类: {category_name}")
+        return True
+    except Exception as e:
+        logger.error(f"删除分类失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def get_groups_by_category():
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("""
+        SELECT category, COUNT(*) as count 
+        FROM groups 
+        GROUP BY category 
+        ORDER BY count DESC
+    """)
+    rows = c.fetchall()
+    conn.close()
+    return {row[0]: row[1] for row in rows}
+
+def update_group_category_if_needed(group_id: str, group_name: str):
+    """
+    根据群组名称自动更新群组分类
+    如果群组名称包含国家关键词，则自动分类
+    """
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT category FROM groups WHERE group_id = ?", (group_id,))
+    row = c.fetchone()
+    conn.close()
+
+    if not row:
+        return False
+
+    current_category = row[0]
+
+    # 如果已经分类且不是"未分类"，则不再自动覆盖
+    if current_category != '未分类':
+        return False
+
+    # 检测国家
+    country = detect_country_from_group_name(group_name)
+
+    if country:
+        # 确保分类存在
+        if ensure_country_category(country):
+            conn = get_db_connection()
+            c = conn.cursor()
+            c.execute("UPDATE groups SET category = ? WHERE group_id = ?", (country, group_id))
+            conn.commit()
+            conn.close()
+            logger.info(f"自动分类：群组「{group_name}」已归类到「{country}」")
+            return True
+
+    return False
+
+def get_user_preferences(user_id: int) -> dict:
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("SELECT monitor_notify, broadcast_signature, daily_report_enabled, daily_report_hour FROM user_preferences WHERE user_id = ?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    if row:
+        return {
+            "monitor_notify": bool(row[0]),
+            "broadcast_signature": row[1] or "",
+            "daily_report_enabled": bool(row[2]),
+            "daily_report_hour": row[3] or 9
+        }
+    return {"monitor_notify": True, "broadcast_signature": "", "daily_report_enabled": False, "daily_report_hour": 9}
+
+def set_user_preference(user_id: int, key: str, value):
+    conn = get_db_connection()
+    c = conn.cursor()
+    now = int(time.time())
+    c.execute("INSERT OR IGNORE INTO user_preferences (user_id, updated_at) VALUES (?, ?)", (user_id, now))
+    if key == "monitor_notify":
+        c.execute("UPDATE user_preferences SET monitor_notify = ?, updated_at = ? WHERE user_id = ?",
+                  (1 if value else 0, now, user_id))
+    elif key == "broadcast_signature":
+        c.execute("UPDATE user_preferences SET broadcast_signature = ?, updated_at = ? WHERE user_id = ?",
+                  (value, now, user_id))
+    elif key == "daily_report_enabled":
+        c.execute("UPDATE user_preferences SET daily_report_enabled = ?, updated_at = ? WHERE user_id = ?",
+                  (1 if value else 0, now, user_id))
+    elif key == "daily_report_hour":
+        c.execute("UPDATE user_preferences SET daily_report_hour = ?, updated_at = ? WHERE user_id = ?",
+                  (int(value), now, user_id))
+    conn.commit()
+    conn.close()
+
+# 在文件末尾添加这个函数（在最后一个函数定义之后）：
+
+@contextmanager
+def safe_db_connection(db_path: str = DB_PATH):
+    """安全的数据库连接，确保异常时也能关闭"""
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        yield conn
+    except Exception as e:
+        logger.error(f"数据库操作失败: {e}")
+        raise
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+# ==================== 规则管理 ====================
+
+def add_rule(rule_name: str, rule_content: str, created_by: int) -> bool:
+    """添加新规则（如果已存在但被软删除，则恢复并更新）"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        now = int(time.time())
+
+        # 检查是否已存在（包括软删除的）
+        c.execute("SELECT id, is_active FROM rules WHERE rule_name = ?", (rule_name,))
+        existing = c.fetchone()
+
+        if existing:
+            if existing[1] == 1:
+                # 规则存在且启用中
+                logger.warning(f"规则「{rule_name}」已存在")
+                return False
+            else:
+                # 规则存在但已停用（软删除），恢复并更新内容
+                c.execute("""
+                    UPDATE rules 
+                    SET rule_content = ?, is_active = 1, updated_at = ?, created_by = ?
+                    WHERE rule_name = ?
+                """, (rule_content, now, created_by, rule_name))
+                conn.commit()
+                logger.info(f"已恢复并更新规则: {rule_name}")
+                return True
+
+        # 不存在，插入新规则
+        c.execute("""
+            INSERT INTO rules (rule_name, rule_content, created_by, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (rule_name, rule_content, created_by, now, now))
+        conn.commit()
+        logger.info(f"已添加规则: {rule_name}")
+        return True
+    except Exception as e:
+        logger.error(f"添加规则失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+def update_rule(rule_name: str, rule_content: str) -> bool:
+    """更新规则内容"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        now = int(time.time())
+        c.execute("""
+            UPDATE rules SET rule_content = ?, updated_at = ?
+            WHERE rule_name = ? AND is_active = 1
+        """, (rule_content, now, rule_name))
+        conn.commit()
+        if c.rowcount > 0:
+            logger.info(f"已更新规则: {rule_name}")
+            return True
+        logger.warning(f"未找到规则: {rule_name}")
+        return False
+    except Exception as e:
+        logger.error(f"更新规则失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+def delete_rule(rule_name: str) -> bool:
+    """软删除规则（设置 is_active = 0）"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        now = int(time.time())
+        c.execute("""
+            UPDATE rules SET is_active = 0, updated_at = ?
+            WHERE rule_name = ?
+        """, (now, rule_name))
+        conn.commit()
+        if c.rowcount > 0:
+            logger.info(f"已删除规则: {rule_name}")
+            return True
+        logger.warning(f"未找到规则: {rule_name}")
+        return False
+    except Exception as e:
+        logger.error(f"删除规则失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+def toggle_rule_status(rule_name: str, is_active: bool) -> bool:
+    """启用/停用规则"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        now = int(time.time())
+        status = 1 if is_active else 0
+        c.execute("""
+            UPDATE rules SET is_active = ?, updated_at = ?
+            WHERE rule_name = ?
+        """, (status, now, rule_name))
+        conn.commit()
+        if c.rowcount > 0:
+            status_text = "启用" if is_active else "停用"
+            logger.info(f"已{status_text}规则: {rule_name}")
+            return True
+        logger.warning(f"未找到规则: {rule_name}")
+        return False
+    except Exception as e:
+        logger.error(f"切换规则状态失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+def get_rule(rule_name: str) -> Optional[dict]:
+    """获取单个规则"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("""
+            SELECT id, rule_name, rule_content, created_by, created_at, updated_at, is_active
+            FROM rules
+            WHERE rule_name = ?
+        """, (rule_name,))
+        row = c.fetchone()
+        if row:
+            return {
+                "id": row[0],
+                "rule_name": row[1],
+                "rule_content": row[2],
+                "created_by": row[3],
+                "created_at": row[4],
+                "updated_at": row[5],
+                "is_active": row[6]
+            }
+        return None
+    except Exception as e:
+        logger.error(f"获取规则失败: {e}")
+        return None
+    finally:
+        conn.close()
+
+def get_all_rules(active_only: bool = True) -> list:
+    """获取所有规则"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        if active_only:
+            c.execute("""
+                SELECT rule_name, rule_content, created_by, created_at, updated_at, is_active
+                FROM rules
+                WHERE is_active = 1
+                ORDER BY rule_name
+            """)
+        else:
+            c.execute("""
+                SELECT rule_name, rule_content, created_by, created_at, updated_at, is_active
+                FROM rules
+                ORDER BY rule_name
+            """)
+        rows = c.fetchall()
+        return [
+            {
+                "rule_name": row[0],
+                "rule_content": row[1],
+                "created_by": row[2],
+                "created_at": row[3],
+                "updated_at": row[4],
+                "is_active": row[5]
+            }
+            for row in rows
+        ]
+    except Exception as e:
+        logger.error(f"获取所有规则失败: {e}")
+        return []
+    finally:
+        conn.close()
+
+def search_rule(rule_name: str) -> Optional[str]:
+    """搜索规则并返回内容（用于群组查询）"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("""
+            SELECT rule_content FROM rules
+            WHERE rule_name = ? AND is_active = 1
+        """, (rule_name,))
+        row = c.fetchone()
+        if row:
+            return row[0]
+        return None
+    except Exception as e:
+        logger.error(f"搜索规则失败: {e}")
+        return None
+    finally:
+        conn.close()
+
+def get_rule_global_status() -> bool:
+    """获取规则功能的全局状态（默认开启）"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        # 使用一个特殊的系统设置表
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS system_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at INTEGER DEFAULT 0
+            )
+        """)
+        c.execute("SELECT value FROM system_settings WHERE key = 'rule_enabled'")
+        row = c.fetchone()
+        if row:
+            return row[0] == '1'
+        return True  # 默认开启
+    except Exception as e:
+        logger.error(f"获取规则状态失败: {e}")
+        return True
+    finally:
+        conn.close()
+
+def set_rule_global_status(enabled: bool) -> bool:
+    """设置规则功能的全局状态"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        now = int(time.time())
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS system_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at INTEGER DEFAULT 0
+            )
+        """)
+        c.execute("""
+            INSERT OR REPLACE INTO system_settings (key, value, updated_at)
+            VALUES ('rule_enabled', ?, ?)
+        """, ('1' if enabled else '0', now))
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"设置规则状态失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+# ==================== 业绩记录管理 ====================
+
+# db.py - 替换 add_performance_record 函数
+
+def add_performance_record(country: str, channel_income: float, customer_expense: float,
+                           channel_group: str, customer_group: str,
+                           channel_employee_id: int, channel_employee_name: str,
+                           customer_employee_id: int, customer_employee_name: str,
+                           created_by: int) -> int:
+    """添加业绩记录，返回记录ID"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        profit = channel_income + customer_expense
+        now = int(time.time())
+        date_str = datetime.fromtimestamp(now, tz=timezone(timedelta(hours=8))).strftime('%Y-%m-%d')
+
+        # 生成编号：年月日 + 序号（2651401 = 2026年5月14日第01条）
+        date_prefix = datetime.fromtimestamp(now, tz=timezone(timedelta(hours=8))).strftime('%y%m%d')
+        date_min = int(f"{date_prefix}01")
+        date_max = int(f"{date_prefix}99")
+
+        # 查询当前表中当天的最大编号
+        c.execute("SELECT COALESCE(MAX(id), 0) FROM performance_records WHERE id >= ? AND id <= ?", (date_min, date_max))
+        current_max = c.fetchone()[0]
+
+        # 查询日志中当天删除记录的最大编号
+        c.execute("""
+            SELECT COALESCE(MAX(CAST(record_id AS INTEGER)), 0) 
+            FROM performance_logs 
+            WHERE record_type = 'performance' AND action = 'delete'
+            AND CAST(record_id AS INTEGER) >= ? AND CAST(record_id AS INTEGER) <= ?
+        """, (date_min, date_max))
+        deleted_max = c.fetchone()[0]
+
+        # 取两者的最大值 + 1
+        current_max = int(current_max) if current_max else 0
+        deleted_max = int(deleted_max) if deleted_max else 0
+        max_id = max(current_max, deleted_max)
+        if max_id >= date_min:
+            record_id = max_id + 1
+        else:
+            record_id = date_min
+
+        c.execute("""
+            INSERT INTO performance_records 
+            (id, country, channel_income, customer_expense, profit, channel_group, customer_group,
+             channel_employee_id, channel_employee_name, customer_employee_id, customer_employee_name,
+             created_by, created_at, date)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (record_id, country, channel_income, customer_expense, profit, channel_group, customer_group,
+              channel_employee_id, channel_employee_name, customer_employee_id, customer_employee_name,
+              created_by, now, date_str))
+
+        # 记录操作日志（复用同一个数据库连接）
+        log_performance_action('performance', str(record_id), 'create', None, {
+            'id': record_id, 'country': country, 'channel_income': channel_income,
+            'customer_expense': customer_expense, 'profit': profit,
+            'channel_group': channel_group, 'customer_group': customer_group,
+            'channel_employee_id': channel_employee_id, 'channel_employee_name': channel_employee_name,
+            'customer_employee_id': customer_employee_id, 'customer_employee_name': customer_employee_name,
+            'date': date_str
+        }, created_by, conn)
+
+        conn.commit()
+        return record_id
+    except Exception as e:
+        logger.error(f"添加业绩记录失败: {e}")
+        return 0
+    finally:
+        conn.close()
+
+def get_performance_records(year: int = None, month: int = None) -> list:
+    """获取业绩记录，可按年月筛选"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        if year and month:
+            date_prefix = f"{year}-{month:02d}"
+            c.execute("""
+                SELECT * FROM performance_records 
+                WHERE date LIKE ? 
+                ORDER BY created_at DESC
+            """, (f"{date_prefix}%",))
+        else:
+            c.execute("SELECT * FROM performance_records ORDER BY created_at DESC")
+
+        rows = c.fetchall()
+        return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(f"获取业绩记录失败: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+def get_performance_available_months() -> list:
+    """获取有业绩记录的月份列表"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("""
+            SELECT DISTINCT substr(date, 1, 7) as month 
+            FROM performance_records 
+            ORDER BY month DESC
+        """)
+        rows = c.fetchall()
+        return [row[0] for row in rows]
+    except Exception as e:
+        logger.error(f"获取业绩月份失败: {e}")
+        return []
+    finally:
+        conn.close()
+
+def get_performance_summary(year: int, month: int) -> dict:
+    """获取指定月份的业绩汇总"""
+    records = get_performance_records(year, month)
+    loss_records = get_loss_records(year, month)
+    settings = get_performance_settings()
+
+    commission_rate = settings.get('commission_rate', 0.1)
+    channel_commission_rate = settings.get('channel_commission_rate', 0.1)
+    customer_commission_rate = settings.get('customer_commission_rate', 0.1)
+
+    # 业绩总利润
+    performance_profit = sum(r['profit'] for r in records) if records else 0
+    # 亏损总金额
+    total_loss = sum(l['amount'] for l in loss_records) if loss_records else 0
+    # 公司总利润 = 业绩总利润 - 亏损总金额
+    company_total_profit = performance_profit - total_loss
+
+    # 员工业绩、亏损承担和提成
+    employee_data = {}
+
+    # 先计算每个员工的业绩（业绩 = 利润 × 50%）和累计利润
+    for r in (records or []):
+        profit = r['profit']
+
+        # 通道员工
+        ch_id = r['channel_employee_id']
+        ch_name = r['channel_employee_name'] or f"员工{ch_id}"
+        if ch_id not in employee_data:
+            employee_data[ch_id] = {"name": ch_name, "performance": 0, "profit": 0, "loss_bear": 0, "commission": 0, "is_channel": False, "is_customer": False, "base_salary": 0, "incentive": 0}
+        employee_data[ch_id]["performance"] += profit * 0.5  # 业绩 = 利润 × 50%
+        employee_data[ch_id]["profit"] += profit  # 记录累计利润用于计算提成
+        employee_data[ch_id]["is_channel"] = True
+
+        # 客户员工
+        cu_id = r['customer_employee_id']
+        cu_name = r['customer_employee_name'] or f"员工{cu_id}"
+        if cu_id not in employee_data:
+            employee_data[cu_id] = {"name": cu_name, "performance": 0, "profit": 0, "loss_bear": 0, "commission": 0, "is_channel": False, "is_customer": False, "base_salary": 0, "incentive": 0}
+        employee_data[cu_id]["performance"] += profit * 0.5  # 业绩 = 利润 × 50%
+        employee_data[cu_id]["profit"] += profit  # 记录累计利润用于计算提成
+        employee_data[cu_id]["is_customer"] = True
+
+    # 再计算每个员工的亏损承担
+    for l in (loss_records or []):
+        # 通道员工承担
+        ch_id = l['channel_employee_id']
+        if ch_id in employee_data:
+            employee_data[ch_id]["loss_bear"] += l.get('channel_bear', 0)
+
+        # 客户员工承担
+        cu_id = l['customer_employee_id']
+        if cu_id in employee_data:
+            employee_data[cu_id]["loss_bear"] += l.get('customer_bear', 0)
+
+    # 计算提成：根据员工类型使用不同的提成比例（提成 = 利润 × 提成比例）
+    for emp_id in employee_data:
+        emp = employee_data[emp_id]
+        # 如果员工既是通道又是客户，使用平均提成比例
+        if emp["is_channel"] and emp["is_customer"]:
+            avg_rate = (channel_commission_rate + customer_commission_rate) / 2
+            gross_commission = emp["profit"] * avg_rate
+        elif emp["is_channel"]:
+            gross_commission = emp["profit"] * channel_commission_rate
+        elif emp["is_customer"]:
+            gross_commission = emp["profit"] * customer_commission_rate
+        else:
+            gross_commission = emp["profit"] * commission_rate
+
+        emp["gross_commission"] = round(gross_commission, 2)
+        emp["scaled_commission"] = round(gross_commission, 2)  # 完成率折算后的值，在底薪循环中更新
+        emp["commission"] = gross_commission - emp["loss_bear"]
+
+    # 计算激励奖励（根据员工激励奖开关）
+    incentive_tiers_str = settings.get('incentive_tiers', '')
+    if incentive_tiers_str:
+        try:
+            import json
+            incentive_tiers = json.loads(incentive_tiers_str)
+            if isinstance(incentive_tiers, list) and incentive_tiers:
+                sorted_tiers = sorted(incentive_tiers, key=lambda x: x.get('threshold', 0), reverse=True)
+                for emp_id in employee_data:
+                    emp = employee_data[emp_id]
+
+                    # 获取员工激励奖开关设置
+                    incentive_enabled = get_employee_incentive_setting(emp_id)
+
+                    if incentive_enabled:
+                        performance = emp["performance"]
+                        incentive = 0
+                        achieved_threshold = 0
+                        achieved_rate = 0
+                        for tier in sorted_tiers:
+                            threshold = tier.get('threshold', 0)
+                            rate = tier.get('rate', 0)
+                            if performance >= threshold:
+                                incentive = performance * rate
+                                achieved_threshold = threshold
+                                achieved_rate = rate
+                                break
+                        emp["incentive"] = round(incentive, 2)
+                        emp["incentive_threshold"] = achieved_threshold
+                        emp["incentive_rate"] = achieved_rate
+                        emp["commission"] += incentive
+                    else:
+                        emp["incentive"] = 0
+                        emp["incentive_threshold"] = 0
+                        emp["incentive_rate"] = 0
+            else:
+                for emp_id in employee_data:
+                    employee_data[emp_id]["incentive"] = 0
+        except Exception as e:
+            logger.error(f"解析激励奖励阶梯失败: {e}")
+            for emp_id in employee_data:
+                employee_data[emp_id]["incentive"] = 0
+    else:
+        for emp_id in employee_data:
+            employee_data[emp_id]["incentive"] = 0
+
+    # 添加有底薪但无业绩记录的员工（仅限仍是正式操作员的员工）
+    all_salaries = get_all_employee_salaries()
+    current_operators = list_operators()
+    for salary in all_salaries:
+        emp_id = salary['employee_id']
+        if emp_id not in employee_data:
+            if emp_id in current_operators:
+                op_info = current_operators[emp_id]
+                emp_name = op_info.get('first_name', op_info.get('username', f"员工{emp_id}"))
+                employee_data[emp_id] = {
+                    "name": emp_name,
+                    "performance": 0,
+                    "profit": 0,
+                    "loss_bear": 0,
+                    "commission": 0,
+                    "is_channel": False,
+                    "is_customer": False,
+                    "base_salary": 0,
+                    "incentive": 0
+                }
+
+    # 底薪始终按100%发放；任务完成率影响业绩提成（无任务则全额提成）
+    for emp_id in employee_data:
+        emp = employee_data[emp_id]
+        base_salary = get_employee_base_salary(emp_id)
+        completion_rate = get_employee_monthly_completion_rate(emp_id, year, month)
+        # 本月是否有派发任务（仅统计本月，历史任务不影响）
+        has_month_tasks = has_assigned_tasks(emp_id, year, month)
+
+        # 完成系数：无任务=1.0（全额提成），有任务=完成率/100
+        completion_factor = 1.0 if not has_month_tasks else completion_rate / 100
+
+        # 业绩提成按完成系数折算（此前 commission = 毛提成 - 亏损 + 激励奖）
+        gross = emp.get("gross_commission", 0)
+        scaled_gross = gross * completion_factor
+        emp["scaled_commission"] = round(scaled_gross, 2)
+        emp["commission"] = emp["commission"] - gross + scaled_gross
+
+        # 底薪始终全额发放
+        actual_base_salary = base_salary
+        emp["commission"] += actual_base_salary
+
+        emp["base_salary"] = base_salary
+        emp["actual_base_salary"] = round(actual_base_salary, 2)
+        emp["completion_rate"] = round(completion_rate, 1)
+        emp["has_month_tasks"] = has_month_tasks
+        emp["completion_factor"] = completion_factor
+
+    # ========== 公司费用：渠道费/技术费/响应速度奖（按公司总收益的百分比计算） ==========
+    for emp in employee_data.values():
+        emp['channel_fee'] = 0
+        emp['tech_fee'] = 0
+        emp['response_award'] = 0
+
+    company_fees = {
+        'channel_fee': 0, 'channel_fee_emp': 0, 'channel_fee_emp_name': '',
+        'tech_fee': 0, 'tech_fee_emp': 0, 'tech_fee_emp_name': '',
+        'response_award': 0, 'response_award_emp': 0, 'response_award_emp_name': '',
+        'response_award_rank': 0, 'avg_response_count': 0,
+        'response_award_cap': 0, 'response_award_capped': False,
+        'response_award_ref_ids': [], 'response_award_ref_names': '',
+        'response_award_ref_unqualified_names': '',
+        'response_award_mode': 'rank'
+    }
+
+    def _ensure_fee_employee(emp_id):
+        """确保领取费用的员工存在于员工数据中"""
+        if emp_id not in employee_data:
+            op_info = current_operators.get(emp_id, {})
+            employee_data[emp_id] = {
+                "name": op_info.get('first_name', op_info.get('username', f"员工{emp_id}")),
+                "performance": 0, "profit": 0, "loss_bear": 0, "commission": 0,
+                "is_channel": False, "is_customer": False,
+                "base_salary": 0, "actual_base_salary": 0, "completion_rate": 0, "incentive": 0,
+                "channel_fee": 0, "tech_fee": 0, "response_award": 0
+            }
+
+    if company_total_profit > 0:
+        # 渠道费：指定员工按比例领取
+        ch_fee_emp = int(settings.get('channel_fee_employee_id') or 0)
+        ch_fee_rate = settings.get('channel_fee_rate') or 0
+        if ch_fee_emp and ch_fee_rate > 0:
+            _ensure_fee_employee(ch_fee_emp)
+            fee = round(company_total_profit * ch_fee_rate, 2)
+            employee_data[ch_fee_emp]['channel_fee'] = fee
+            employee_data[ch_fee_emp]['channel_fee_rate'] = ch_fee_rate
+            company_fees['channel_fee'] = fee
+            company_fees['channel_fee_emp'] = ch_fee_emp
+            company_fees['channel_fee_emp_name'] = employee_data[ch_fee_emp]['name']
+
+        # 技术费：指定员工按比例领取
+        tech_fee_emp = int(settings.get('tech_fee_employee_id') or 0)
+        tech_fee_rate = settings.get('tech_fee_rate') or 0
+        if tech_fee_emp and tech_fee_rate > 0:
+            _ensure_fee_employee(tech_fee_emp)
+            fee = round(company_total_profit * tech_fee_rate, 2)
+            employee_data[tech_fee_emp]['tech_fee'] = fee
+            employee_data[tech_fee_emp]['tech_fee_rate'] = tech_fee_rate
+            company_fees['tech_fee'] = fee
+            company_fees['tech_fee_emp'] = tech_fee_emp
+            company_fees['tech_fee_emp_name'] = employee_data[tech_fee_emp]['name']
+
+        # 响应速度奖
+        response_award_rate = settings.get('response_award_rate') or 0
+        if response_award_rate > 0:
+            resp_stats = get_all_employee_response_stats(year, month)
+            ranked = [(emp_id, s) for emp_id, s in resp_stats.items() if emp_id in current_operators]
+            award_cap = settings.get('response_award_cap') or 0
+
+            # 解析参考人（仅保留当前仍是正式操作员的）
+            ref_raw = (settings.get('response_award_reference_ids') or '').strip()
+            ref_ids = set()
+            if ref_raw:
+                for rid in ref_raw.split(','):
+                    rid = rid.strip()
+                    if rid.isdigit():
+                        rid_int = int(rid)
+                        if rid_int in current_operators:
+                            ref_ids.add(rid_int)
+
+            if ref_ids:
+                # ===== 参考人模式：非参考人按击败参考人数比例获奖 =====
+                company_fees['response_award_mode'] = 'reference'
+                ref_names = []
+                for rid in sorted(ref_ids):
+                    op_info = current_operators.get(rid, {})
+                    ref_names.append(op_info.get('first_name', op_info.get('username', f"员工{rid}")))
+                company_fees['response_award_ref_ids'] = sorted(ref_ids)
+                company_fees['response_award_ref_names'] = '、'.join(ref_names)
+
+                # 全体正式操作员的平均响应次数：未达到平均次数的员工不参与评奖
+                avg_count = sum(s['total_count'] for _, s in ranked) / len(ranked)
+                company_fees['avg_response_count'] = round(avg_count, 1)
+
+                # 参考人数据：参考人自身响应次数未达到平均时，视为标杆失效，任何达标员工自动算击败该参考人；
+                # 达标的参考人则按平均响应秒数比较
+                ref_qualified = {}
+                ref_resp = {}
+                unqualified_ref_names = []
+                for rid in ref_ids:
+                    r_stat = resp_stats.get(rid, {})
+                    r_count = r_stat.get('total_count', 0) or 0
+                    qualified = r_count >= avg_count
+                    ref_qualified[rid] = qualified
+                    ref_resp[rid] = r_stat.get('avg_response_seconds', float('inf')) or float('inf')
+                    if not qualified:
+                        op_info = current_operators.get(rid, {})
+                        unqualified_ref_names.append(
+                            op_info.get('first_name', op_info.get('username', f"员工{rid}"))
+                        )
+                total_ref = len(ref_ids)
+                if unqualified_ref_names:
+                    company_fees['response_award_ref_unqualified_names'] = '、'.join(unqualified_ref_names)
+
+                total_award = 0
+                first_winner = 0
+                for emp_id, s in ranked:
+                    if emp_id in ref_ids:
+                        continue  # 参考人本人不参与评奖
+                    if s['total_count'] < avg_count:
+                        continue  # 响应次数未达到平均值，不发放奖励
+                    emp_resp = s.get('avg_response_seconds', 0) or 0
+                    if emp_resp <= 0:
+                        continue  # 无有效响应记录
+                    # 击败参考人数：参考人次数未达标自动算击败；达标则需响应更快
+                    beaten = sum(
+                        1 for rid in ref_ids
+                        if not ref_qualified[rid] or emp_resp < ref_resp[rid]
+                    )
+                    if beaten <= 0:
+                        continue
+                    factor = beaten / total_ref
+                    award = company_total_profit * response_award_rate * factor
+                    capped = False
+                    if award_cap > 0 and award > award_cap:
+                        award = award_cap
+                        capped = True
+                    award = round(award, 2)
+                    _ensure_fee_employee(emp_id)
+                    employee_data[emp_id]['response_award'] = award
+                    employee_data[emp_id]['response_award_rate'] = response_award_rate
+                    employee_data[emp_id]['response_award_cap'] = award_cap
+                    employee_data[emp_id]['response_award_capped'] = capped
+                    employee_data[emp_id]['response_award_beaten'] = beaten
+                    employee_data[emp_id]['response_award_total_ref'] = total_ref
+                    total_award += award
+                    if first_winner == 0:
+                        first_winner = emp_id
+
+                company_fees['response_award'] = round(total_award, 2)
+                company_fees['response_award_emp'] = first_winner
+                company_fees['response_award_emp_name'] = employee_data.get(first_winner, {}).get('name', '') if first_winner else ''
+                company_fees['response_award_cap'] = award_cap
+            elif ranked:
+                # ===== 旧逻辑（未设参考人）：第一名获奖，响应次数低于平均值则顺延 =====
+                company_fees['response_award_mode'] = 'rank'
+                avg_count = sum(s['total_count'] for _, s in ranked) / len(ranked)
+                company_fees['avg_response_count'] = round(avg_count, 1)
+                winner, winner_rank = None, 0
+                for rank, (emp_id, s) in enumerate(ranked, start=1):
+                    if s['total_count'] >= avg_count:
+                        winner, winner_rank = emp_id, rank
+                        break
+                if winner:
+                    _ensure_fee_employee(winner)
+                    award = company_total_profit * response_award_rate
+                    capped = False
+                    if award_cap > 0 and award > award_cap:
+                        award = award_cap
+                        capped = True
+                    award = round(award, 2)
+                    employee_data[winner]['response_award'] = award
+                    employee_data[winner]['response_award_rate'] = response_award_rate
+                    employee_data[winner]['response_award_rank'] = winner_rank
+                    employee_data[winner]['response_award_cap'] = award_cap
+                    employee_data[winner]['response_award_capped'] = capped
+                    company_fees['response_award'] = award
+                    company_fees['response_award_emp'] = winner
+                    company_fees['response_award_emp_name'] = employee_data[winner]['name']
+                    company_fees['response_award_rank'] = winner_rank
+                    company_fees['response_award_cap'] = award_cap
+                    company_fees['response_award_capped'] = capped
+
+    # 为了兼容旧代码，保持原有结构
+    employee_commission = {k: {"name": v["name"], "commission": v["commission"]} for k, v in employee_data.items()}
+    employee_performance = {k: {"name": v["name"], "performance": v["performance"]} for k, v in employee_data.items()}
+
+    return {
+        "records": records or [],
+        "loss_records": loss_records or [],
+        "total_profit": company_total_profit,
+        "total_loss": total_loss,
+        "performance_profit": performance_profit,
+        "employee_commission": employee_commission,
+        "employee_performance": employee_performance,
+        "employee_data": employee_data,
+        "company_fees": company_fees,
+        "settings": settings
+    }
+
+def update_performance_record(record_id: int, country: str, channel_income: float, 
+                              customer_expense: float, channel_group: str, customer_group: str,
+                              channel_employee_id: int, channel_employee_name: str,
+                              customer_employee_id: int, customer_employee_name: str,
+                              operated_by: int = None) -> bool:
+    """修改业绩记录"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        # 获取旧记录
+        c.execute("SELECT * FROM performance_records WHERE id=?", (record_id,))
+        old_row = c.fetchone()
+        if not old_row:
+            return False
+        old_data = dict(old_row)
+
+        profit = channel_income + customer_expense
+        c.execute("""
+            UPDATE performance_records 
+            SET country=?, channel_income=?, customer_expense=?, profit=?,
+                channel_group=?, customer_group=?,
+                channel_employee_id=?, channel_employee_name=?,
+                customer_employee_id=?, customer_employee_name=?
+            WHERE id=?
+        """, (country, channel_income, customer_expense, profit,
+              channel_group, customer_group,
+              channel_employee_id, channel_employee_name,
+              customer_employee_id, customer_employee_name,
+              record_id))
+
+        # 记录操作日志（在同一个连接中）
+        if operated_by:
+            import json
+            import time
+            from datetime import datetime
+            now = int(time.time())
+            date_str = datetime.now().strftime('%Y-%m-%d')
+            c.execute("""
+                INSERT INTO performance_logs (record_type, record_id, action, old_data, new_data, operated_by, operated_at, date)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, ('performance', str(record_id), 'update',
+                  json.dumps(old_data, ensure_ascii=False),
+                  json.dumps({
+                      'id': record_id, 'country': country, 'channel_income': channel_income,
+                      'customer_expense': customer_expense, 'profit': profit,
+                      'channel_group': channel_group, 'customer_group': customer_group,
+                      'channel_employee_id': channel_employee_id, 'channel_employee_name': channel_employee_name,
+                      'customer_employee_id': customer_employee_id, 'customer_employee_name': customer_employee_name
+                  }, ensure_ascii=False),
+                  operated_by, now, date_str))
+
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"修改业绩记录失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def delete_performance_record(record_id: int, operated_by: int = None) -> bool:
+    """删除业绩记录"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        # 获取旧记录
+        c.execute("SELECT * FROM performance_records WHERE id=?", (record_id,))
+        old_row = c.fetchone()
+        if not old_row:
+            return False
+        old_data = dict(old_row)
+
+        c.execute("DELETE FROM performance_records WHERE id=?", (record_id,))
+
+        # 记录操作日志（在同一个连接中）
+        if operated_by:
+            import json
+            import time
+            from datetime import datetime
+            now = int(time.time())
+            date_str = datetime.now().strftime('%Y-%m-%d')
+            c.execute("""
+                INSERT INTO performance_logs (record_type, record_id, action, old_data, new_data, operated_by, operated_at, date)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, ('performance', str(record_id), 'delete',
+                  json.dumps(old_data, ensure_ascii=False),
+                  None,
+                  operated_by, now, date_str))
+
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"删除业绩记录失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def get_performance_record_by_id(record_id: int):
+    """根据ID获取单条业绩记录"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("SELECT * FROM performance_records WHERE id=?", (record_id,))
+        row = c.fetchone()
+        return dict(row) if row else None
+    except Exception as e:
+        logger.error(f"获取业绩记录失败: {e}")
+        return None
+    finally:
+        conn.close()
+
+def refresh_performance_employee_names() -> int:
+    """根据操作员表更新业绩记录中的员工名称"""
+    from auth import operators as auth_operators
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        updated = 0
+        for uid, info in auth_operators.items():
+            name = info.get('first_name') or ''
+            c.execute("""
+                UPDATE performance_records 
+                SET channel_employee_name = ? 
+                WHERE channel_employee_id = ? AND (channel_employee_name = '' OR channel_employee_name IS NULL)
+            """, (name, uid))
+            updated += c.rowcount
+            c.execute("""
+                UPDATE performance_records 
+                SET customer_employee_name = ? 
+                WHERE customer_employee_id = ? AND (customer_employee_name = '' OR customer_employee_name IS NULL)
+            """, (name, uid))
+            updated += c.rowcount
+        conn.commit()
+        return updated
+    except Exception as e:
+        logger.error(f"刷新员工名称失败: {e}")
+        return 0
+    finally:
+        conn.close()
+
+
+# ========== 亏损记录相关操作 ==========
+
+def add_loss_record(amount: float, country: str, channel_employee_id: int, channel_employee_name: str,
+                    customer_employee_id: int, customer_employee_name: str, reason: str,
+                    created_by: int, date: str = None) -> str:
+    """添加亏损记录，返回记录ID"""
+    import time
+    from datetime import datetime
+
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        # 获取比例设置（复用现有连接）
+        settings = get_performance_settings(conn)
+        channel_rate = settings['channel_loss_rate']
+        customer_rate = settings['customer_loss_rate']
+        company_rate = settings['company_loss_rate']
+
+        # 计算分摊金额
+        channel_bear = round(amount * channel_rate, 2)
+        customer_bear = round(amount * customer_rate, 2)
+        company_bear = round(amount * company_rate, 2)
+
+        # 设置日期
+        if not date:
+            date = datetime.now().strftime('%Y-%m-%d')
+
+        # 生成ID: 数字ID（确保永不重复）
+        # 查询当前表中的最大ID
+        c.execute("SELECT COALESCE(MAX(id), 0) FROM loss_records")
+        current_max = c.fetchone()[0]
+
+        # 查询日志中删除记录的最大ID
+        c.execute("""
+            SELECT COALESCE(MAX(CAST(record_id AS INTEGER)), 0) 
+            FROM performance_logs 
+            WHERE record_type = 'loss' AND action = 'delete'
+        """)
+        deleted_max = c.fetchone()[0]
+
+        # 取两者的最大值 + 1
+        current_max = int(current_max) if current_max else 0
+        deleted_max = int(deleted_max) if deleted_max else 0
+        max_id = max(current_max, deleted_max)
+        record_id = max_id + 1
+
+        now = int(time.time())
+        c.execute("""
+            INSERT INTO loss_records 
+            (id, amount, country, channel_bear, customer_bear, company_bear,
+             channel_employee_id, channel_employee_name, 
+             customer_employee_id, customer_employee_name,
+             reason, created_by, created_at, date)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (record_id, amount, country, channel_bear, customer_bear, company_bear,
+              channel_employee_id, channel_employee_name,
+              customer_employee_id, customer_employee_name,
+              reason, created_by, now, date))
+
+        # 在同一个连接中记录操作日志
+        import json
+        log_data = {
+            'id': record_id, 'amount': amount, 'country': country,
+            'channel_bear': channel_bear, 'customer_bear': customer_bear, 'company_bear': company_bear,
+            'channel_employee_id': channel_employee_id, 'channel_employee_name': channel_employee_name,
+            'customer_employee_id': customer_employee_id, 'customer_employee_name': customer_employee_name,
+            'reason': reason, 'date': date
+        }
+        c.execute("""
+            INSERT INTO performance_logs (record_type, record_id, action, old_data, new_data, operated_by, operated_at, date)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, ('loss', str(record_id), 'create', None, json.dumps(log_data, ensure_ascii=False), created_by, now, date))
+
+        conn.commit()
+        return record_id
+    except Exception as e:
+        logger.error(f"添加亏损记录失败: {e}")
+        return None
+    finally:
+        conn.close()
+
+
+def get_loss_records(year: int = None, month: int = None) -> list:
+    """获取亏损记录"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        if year and month:
+            pattern = f"{year}-{month:02d}-%"
+            c.execute("SELECT * FROM loss_records WHERE date LIKE ? ORDER BY date DESC", (pattern,))
+        else:
+            c.execute("SELECT * FROM loss_records ORDER BY date DESC")
+        rows = c.fetchall()
+        return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(f"获取亏损记录失败: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+def get_loss_record_by_id(record_id):
+    """根据ID获取单条亏损记录"""
+    # 处理 L 前缀
+    if isinstance(record_id, str) and record_id.upper().startswith('L'):
+        record_id = record_id[1:]
+
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("SELECT * FROM loss_records WHERE id=?", (record_id,))
+        row = c.fetchone()
+        return dict(row) if row else None
+    except Exception as e:
+        logger.error(f"获取亏损记录失败: {e}")
+        return None
+    finally:
+        conn.close()
+
+
+def update_loss_record(record_id, amount: float, country: str,
+                       channel_employee_id: int, channel_employee_name: str,
+                       customer_employee_id: int, customer_employee_name: str,
+                       reason: str, operated_by: int) -> bool:
+    """修改亏损记录"""
+    # 处理 L 前缀
+    if isinstance(record_id, str) and record_id.upper().startswith('L'):
+        record_id = record_id[1:]
+
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        # 获取旧记录
+        c.execute("SELECT * FROM loss_records WHERE id=?", (record_id,))
+        old_row = c.fetchone()
+        if not old_row:
+            return False
+        old_data = dict(old_row)
+
+        # 获取比例设置
+        settings = get_performance_settings()
+        channel_bear = round(amount * settings['channel_loss_rate'], 2)
+        customer_bear = round(amount * settings['customer_loss_rate'], 2)
+        company_bear = round(amount * settings['company_loss_rate'], 2)
+
+        c.execute("""
+            UPDATE loss_records 
+            SET amount=?, country=?, channel_bear=?, customer_bear=?, company_bear=?,
+                channel_employee_id=?, channel_employee_name=?,
+                customer_employee_id=?, customer_employee_name=?, reason=?
+            WHERE id=?
+        """, (amount, country, channel_bear, customer_bear, company_bear,
+              channel_employee_id, channel_employee_name,
+              customer_employee_id, customer_employee_name, reason, record_id))
+
+        # 在同一个连接中记录操作日志
+        import json
+        import time
+        from datetime import datetime
+        now = int(time.time())
+        date_str = old_data.get('date') or datetime.now().strftime('%Y-%m-%d')
+        c.execute("""
+            INSERT INTO performance_logs (record_type, record_id, action, old_data, new_data, operated_by, operated_at, date)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, ('loss', str(record_id), 'update',
+              json.dumps(old_data, ensure_ascii=False),
+              json.dumps({
+                  'id': record_id, 'amount': amount, 'country': country,
+                  'channel_bear': channel_bear, 'customer_bear': customer_bear, 'company_bear': company_bear,
+                  'channel_employee_id': channel_employee_id, 'channel_employee_name': channel_employee_name,
+                  'customer_employee_id': customer_employee_id, 'customer_employee_name': customer_employee_name,
+                  'reason': reason
+              }, ensure_ascii=False),
+              operated_by, now, date_str))
+
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"修改亏损记录失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def delete_loss_record(record_id, operated_by: int) -> bool:
+    """删除亏损记录"""
+    # 处理 L 前缀
+    if isinstance(record_id, str) and record_id.upper().startswith('L'):
+        record_id = record_id[1:]
+
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        # 获取旧记录
+        c.execute("SELECT * FROM loss_records WHERE id=?", (record_id,))
+        old_row = c.fetchone()
+        if not old_row:
+            return False
+        old_data = dict(old_row)
+
+        c.execute("DELETE FROM loss_records WHERE id=?", (record_id,))
+
+        # 在同一个连接中记录操作日志
+        import json
+        import time
+        from datetime import datetime
+        now = int(time.time())
+        date_str = old_data.get('date') or datetime.now().strftime('%Y-%m-%d')
+        c.execute("""
+            INSERT INTO performance_logs (record_type, record_id, action, old_data, new_data, operated_by, operated_at, date)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, ('loss', str(record_id), 'delete',
+              json.dumps(old_data, ensure_ascii=False),
+              None,
+              operated_by, now, date_str))
+
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"删除亏损记录失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+# ========== 比例设置相关操作 ==========
+
+def get_performance_settings(conn=None) -> dict:
+    """获取比例设置"""
+    own_conn = conn is None
+    if own_conn:
+        conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("SELECT * FROM performance_settings WHERE id=1")
+        row = c.fetchone()
+        if row:
+            data = dict(row)
+            # 兼容旧数据库缺失的公司费用字段
+            data.setdefault('channel_fee_employee_id', 0)
+            data.setdefault('channel_fee_rate', 0)
+            data.setdefault('tech_fee_employee_id', 0)
+            data.setdefault('tech_fee_rate', 0)
+            data.setdefault('response_award_rate', 0)
+            data.setdefault('response_award_cap', 0)
+            data.setdefault('response_award_reference_ids', '')
+            return data
+        return {
+            'commission_rate': 0.1,
+            'channel_commission_rate': 0.1,
+            'customer_commission_rate': 0.1,
+            'channel_loss_rate': 0.25,
+            'customer_loss_rate': 0.25,
+            'company_loss_rate': 0.50,
+            'incentive_tiers': '',
+            'channel_fee_employee_id': 0,
+            'channel_fee_rate': 0,
+            'tech_fee_employee_id': 0,
+            'tech_fee_rate': 0,
+            'response_award_rate': 0,
+            'response_award_cap': 0,
+            'response_award_reference_ids': ''
+        }
+    except Exception as e:
+        logger.error(f"获取比例设置失败: {e}")
+        return {
+            'commission_rate': 0.1,
+            'channel_commission_rate': 0.1,
+            'customer_commission_rate': 0.1,
+            'channel_loss_rate': 0.25,
+            'customer_loss_rate': 0.25,
+            'company_loss_rate': 0.50,
+            'incentive_tiers': '',
+            'channel_fee_employee_id': 0,
+            'channel_fee_rate': 0,
+            'tech_fee_employee_id': 0,
+            'tech_fee_rate': 0,
+            'response_award_rate': 0,
+            'response_award_cap': 0,
+            'response_award_reference_ids': ''
+        }
+    finally:
+        if own_conn:
+            conn.close()
+
+
+def update_performance_settings(commission_rate: float, channel_commission_rate: float,
+                                customer_commission_rate: float, channel_loss_rate: float,
+                                customer_loss_rate: float, company_loss_rate: float,
+                                updated_by: int) -> bool:
+    """更新比例设置"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        import time
+        now = int(time.time())
+
+        # 获取旧设置
+        old_settings = get_performance_settings()
+
+        c.execute("""
+            UPDATE performance_settings 
+            SET commission_rate=?, channel_commission_rate=?, customer_commission_rate=?,
+                channel_loss_rate=?, customer_loss_rate=?, company_loss_rate=?,
+                updated_by=?, updated_at=?
+            WHERE id=1
+        """, (commission_rate, channel_commission_rate, customer_commission_rate,
+              channel_loss_rate, customer_loss_rate, company_loss_rate, updated_by, now))
+
+        # 在同一个连接中记录操作日志
+        import json
+        c.execute("""
+            INSERT INTO performance_logs (record_type, record_id, action, old_data, new_data, operated_by, operated_at, date)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, ('settings', '1', 'update',
+              json.dumps(old_settings, ensure_ascii=False) if old_settings else None,
+              json.dumps({
+                  'commission_rate': commission_rate,
+                  'channel_commission_rate': channel_commission_rate,
+                  'customer_commission_rate': customer_commission_rate,
+                  'channel_loss_rate': channel_loss_rate,
+                  'customer_loss_rate': customer_loss_rate,
+                  'company_loss_rate': company_loss_rate
+              }, ensure_ascii=False),
+              updated_by, now, datetime.now().strftime('%Y-%m-%d')))
+
+        # 如果亏损分摊比例改变了，重新计算所有亏损记录的分摊金额
+        old_channel_rate = old_settings.get('channel_loss_rate', 0.25)
+        old_customer_rate = old_settings.get('customer_loss_rate', 0.25)
+        old_company_rate = old_settings.get('company_loss_rate', 0.50)
+
+        if (channel_loss_rate != old_channel_rate or 
+            customer_loss_rate != old_customer_rate or 
+            company_loss_rate != old_company_rate):
+            # 重新计算所有亏损记录的分摊金额（使用批量更新）
+            c.execute("SELECT id, amount FROM loss_records")
+            loss_records = c.fetchall()
+            if loss_records:
+                # 批量更新
+                update_data = [
+                    (round(record['amount'] * channel_loss_rate, 2),
+                     round(record['amount'] * customer_loss_rate, 2),
+                     round(record['amount'] * company_loss_rate, 2),
+                     record['id'])
+                    for record in loss_records
+                ]
+                c.executemany("""
+                    UPDATE loss_records 
+                    SET channel_bear=?, customer_bear=?, company_bear=?
+                    WHERE id=?
+                """, update_data)
+
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"更新比例设置失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def update_company_fee_settings(channel_fee_employee_id: int, channel_fee_rate: float,
+                                tech_fee_employee_id: int, tech_fee_rate: float,
+                                response_award_rate: float, updated_by: int,
+                                response_award_cap: float = 0,
+                                response_award_reference_ids: str = None) -> bool:
+    """更新公司费用设置（渠道费/技术费/响应速度奖，按公司总收益百分比计算；响应速度奖上限 0 = 不封顶；reference_ids=None 表示保留原值）"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        now = int(time.time())
+        if response_award_reference_ids is None:
+            # 保留原有参考人设置
+            c.execute("SELECT response_award_reference_ids FROM performance_settings WHERE id=1")
+            row = c.fetchone()
+            response_award_reference_ids = row[0] if row else ''
+        c.execute("""
             UPDATE performance_settings
             SET channel_fee_employee_id=?, channel_fee_rate=?,
                 tech_fee_employee_id=?, tech_fee_rate=?,
-                response_award_rate=?, response_award_cap=?, updated_by=?, updated_at=?
+                response_award_rate=?, response_award_cap=?,
+                response_award_reference_ids=?, updated_by=?, updated_at=?
             WHERE id=1
         """, (channel_fee_employee_id, channel_fee_rate, tech_fee_employee_id,
-              tech_fee_rate, response_award_rate, response_award_cap, updated_by, now))
+              tech_fee_rate, response_award_rate, response_award_cap,
+              response_award_reference_ids, updated_by, now))
         conn.commit()
         return True
     except Exception as e:
