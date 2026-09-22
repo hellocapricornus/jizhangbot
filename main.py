@@ -1777,6 +1777,7 @@ def main():
         states={},
         fallbacks=[CommandHandler("cancel", transfer.cancel_transfer)],
         per_message=False,
+        block=False
     )
     app.add_handler(transfer_conv_handler, group=1)
 
@@ -1917,6 +1918,7 @@ def main():
         fallbacks=[CommandHandler("cancel", profile_cancel)],
         per_message=False,
         allow_reentry=True,
+        block=False,
     )
     app.add_handler(profile_conv, group=1)
 
