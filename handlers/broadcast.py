@@ -36,7 +36,7 @@ def get_category_icon(category_name: str) -> str:
 
     # 默认使用📁
     return "📁"
-    
+
 # --- 核心逻辑：同步与清理 ---
 async def sync_and_clean_groups(context: ContextTypes.DEFAULT_TYPE):
     """同步并清理无效群组"""
@@ -422,7 +422,7 @@ async def bc_prepare_send(update: Update, context: ContextTypes.DEFAULT_TYPE, mo
         )
 
     return BC_INPUT_MESSAGE
-    
+
 async def bc_send_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """发送给所有群组（支持分批提示）"""
     query = update.callback_query
@@ -1235,6 +1235,7 @@ def get_handlers():
             ],
             per_message=False,
             allow_reentry=True,
+            block=False,
         )
     ]
 # handlers/broadcast.py - 添加键盘版
