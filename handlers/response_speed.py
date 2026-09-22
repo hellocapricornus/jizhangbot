@@ -591,7 +591,8 @@ def register_response_speed_handlers(application):
             CallbackQueryHandler(response_speed_menu, pattern='^response_speed_menu$'),
             CommandHandler('cancel', response_cancel),
         ],
-        allow_reentry=True
+        allow_reentry=True,
+        block=False
     )
 
     application.add_handler(main_conv, group=-1)
