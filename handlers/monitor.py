@@ -602,6 +602,7 @@ def get_monitor_conversation_handler():
         ],
         per_message=False,
         allow_reentry=True,
+        block=False,
     )
 
 def get_monitor_keyboard_markup(user_id: int = None):
