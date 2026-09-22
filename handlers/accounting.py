@@ -6241,6 +6241,7 @@ def get_conversation_handler():
         },
         fallbacks=[],
         per_message=False,
+        block=False,
     )
     return conv_handler
 
