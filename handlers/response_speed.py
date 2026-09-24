@@ -51,6 +51,71 @@ BOT_TRIGGER_REGEXES = [re.compile(p) for p in BOT_TRIGGER_PATTERNS]
 CALC_PATTERN = re.compile(r'^[\d.+\-*/%() ^]+$')
 
 
+# ========== 客户 @ 员工离线自动回复 ==========
+OFFLINE_REPLY_COOLDOWN = 300  # 同一群组同一员工 5 分钟内不重复提醒
+offline_reply_cache = {}  # {(chat_id, employee_id): last_reply_ts}
+
+
+def get_mentioned_operator_ids(message) -> set:
+    """从消息中提取被 @ 的操作员 ID（支持 @username 和无用户名用户的 text_mention）"""
+    mentioned = set()
+    operators = list_operators()
+
+    def parse_entities(entities, text):
+        if not entities or not text:
+            return
+        for entity in entities:
+            if entity.type == 'mention':
+                uname = text[entity.offset:entity.offset + entity.length].lstrip('@').lower()
+                for uid, info in operators.items():
+                    if info.get('username') and info['username'].lower() == uname:
+                        mentioned.add(uid)
+            elif entity.type == 'text_mention' and getattr(entity, 'user', None):
+                if entity.user.id in operators:
+                    mentioned.add(entity.user.id)
+
+    parse_entities(message.entities, message.text)
+    parse_entities(message.caption_entities, message.caption)
+    return mentioned
+
+
+async def reply_offline_mentioned_employees(message):
+    """客户 @ 了不在工作时间内的员工时，自动回复提示"""
+    mentioned_ids = get_mentioned_operator_ids(message)
+    if not mentioned_ids:
+        return
+
+    operators = list_operators()
+    now_ts = int(time.time())
+    offline_names = []
+
+    for emp_id in mentioned_ids:
+        work_time = get_employee_work_time(emp_id)
+        if not work_time:
+            continue  # 未设置工作时间，视为全天在线
+        if is_in_work_time(emp_id):
+            continue  # 在工作时间内，不提醒
+        cache_key = (message.chat_id, emp_id)
+        if now_ts - offline_reply_cache.get(cache_key, 0) < OFFLINE_REPLY_COOLDOWN:
+            continue  # 冷却期内不重复提醒
+        offline_reply_cache[cache_key] = now_ts
+
+        op_info = operators.get(emp_id) or {}
+        name = op_info.get('first_name') or f"员工{emp_id}"
+        offline_names.append(f"{name}（工作时间 {work_time['work_start']}-{work_time['work_end']}）")
+
+    if not offline_names:
+        return
+
+    names_text = "、".join(offline_names)
+    try:
+        await message.reply_text(
+            f"{names_text} 现在暂时不在线，会在工作时间尽快回复您，您可以先留言说明需求。"
+        )
+    except Exception as e:
+        logger.warning(f"发送员工离线提醒失败: {e}")
+
+
 def is_closing_message(text: str) -> bool:
     """判断是否为结束语消息"""
     if not text:
@@ -146,6 +211,9 @@ async def monitor_group_messages(update: Update, context: ContextTypes.DEFAULT_T
     else:
         # 客户分支
         # 命令消息已被外层 filters.COMMAND 过滤，此处无需再检查
+
+        # 客户 @ 了不在工作时间内的员工时，自动回复离线提醒
+        await reply_offline_mentioned_employees(message)
 
         # 过滤结束语：客户发送结束语不计入响应统计
         if is_closing_message(message.text):
