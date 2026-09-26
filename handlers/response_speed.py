@@ -16,7 +16,8 @@ from db import (
     init_response_tables,
     get_effective_online_status, is_effectively_online, is_scheduled_work_time,
     get_employee_weekly_rest, set_employee_weekly_rest,
-    get_employee_temp_schedules, set_employee_temp_schedule, delete_employee_temp_schedule
+    get_employee_temp_schedules, set_employee_temp_schedule, delete_employee_temp_schedule,
+    get_employee_temp_schedule, _get_shift_date
 )
 from logger import bot_logger as logger
 
@@ -89,8 +90,44 @@ def get_mentioned_operator_ids(message) -> set:
     return mentioned
 
 
+def _classify_offline_scenario(emp_id: int, status_info: dict, now_ts: int) -> str:
+    """细分员工离线场景：
+    away        暂时离开（工作时间内挂起）
+    early_off   提前下班（已打卡下班，但当前仍在排班时间内）
+    rest_temp   临时休息（管理员设置的临时休息）
+    rest_weekly 固定休息日（每周休息日）
+    off_hours   非工作时间段
+    """
+    status = status_info['status']
+    if status == 'away':
+        return 'away'
+
+    # 手动打卡下班且当前仍在排班时间内 -> 提前下班
+    if status == 'offline' and is_scheduled_work_time(emp_id, now_ts):
+        return 'early_off'
+
+    # 其余情况按排班细分：临时休息 > 每周休息日 > 非工作时间段
+    shift_date = _get_shift_date(emp_id, now_ts)
+    if get_employee_temp_schedule(emp_id, shift_date) == 'rest':
+        return 'rest_temp'
+    rest_weekday = datetime.strptime(shift_date, '%Y-%m-%d').weekday()
+    if rest_weekday in get_employee_weekly_rest(emp_id):
+        return 'rest_weekly'
+    return 'off_hours'
+
+
+def _any_operator_online() -> bool:
+    """是否有任何员工在线（排除超级管理员）"""
+    for uid in list_operators():
+        if uid == OWNER_ID:
+            continue
+        if is_effectively_online(uid):
+            return True
+    return False
+
+
 async def reply_offline_mentioned_employees(message):
-    """客户 @ 了不在工作时间内的员工时，自动回复提示"""
+    """客户 @ 了不在线的员工时，按场景自动回复提示"""
     mentioned_ids = get_mentioned_operator_ids(message)
     if not mentioned_ids:
         return
@@ -100,7 +137,7 @@ async def reply_offline_mentioned_employees(message):
     offline_entries = []
 
     for emp_id in mentioned_ids:
-        status_info = get_effective_online_status(emp_id)
+        status_info = get_effective_online_status(emp_id, now_ts)
         if status_info['online']:
             continue  # 在线（含打卡在线/排班在岗），不提醒
         cache_key = (message.chat_id, emp_id)
@@ -110,17 +147,31 @@ async def reply_offline_mentioned_employees(message):
 
         op_info = operators.get(emp_id) or {}
         name = op_info.get('first_name') or f"员工{emp_id}"
-        work_time = get_employee_work_time(emp_id)
-        offline_entries.append((name, status_info['status'], work_time))
+        scenario = _classify_offline_scenario(emp_id, status_info, now_ts)
+        logger.info(f"[离线提醒] 群{message.chat_id} 员工{emp_id}({name}) 状态={status_info['status']} 场景={scenario}")
+        offline_entries.append((name, scenario, emp_id))
 
     if not offline_entries:
         return
 
+    # 休息类场景需要知道是否有其他同事在线，以给出不同引导
+    need_others_check = any(s in ('rest_weekly', 'rest_temp') for _, s, _ in offline_entries)
+    others_online = _any_operator_online() if need_others_check else False
+
     lines = []
-    for name, status, work_time in offline_entries:
-        if status == 'away':
-            lines.append(f"{name} 暂时离开，稍后回来会立即回复您，您可以先留言说明需求。")
-        else:
+    for name, scenario, emp_id in offline_entries:
+        if scenario == 'away':
+            lines.append(f"{name} 暂时离开中，稍后回来会立即回复您，您可以先留言说明需求。")
+        elif scenario == 'early_off':
+            lines.append(f"{name} 今天已提前下班，请您留言说明需求，明天工作时间会尽快回复您。")
+        elif scenario in ('rest_weekly', 'rest_temp'):
+            rest_label = "休息" if scenario == 'rest_weekly' else "临时休息"
+            if others_online:
+                lines.append(f"{name} 今天{rest_label}不在线，您可以联系群内其他在线客服，或留言说明需求，{name} 上班后会尽快回复您。")
+            else:
+                lines.append(f"{name} 今天{rest_label}不在线，请您留言说明需求，上班后我们会尽快回复您。")
+        else:  # off_hours：非工作时间段
+            work_time = get_employee_work_time(emp_id)
             time_hint = f"（工作时间 {work_time['work_start']}-{work_time['work_end']}）" if work_time else ""
             lines.append(f"{name}{time_hint} 现在暂时不在线，会在工作时间尽快回复您，您可以先留言说明需求。")
 
@@ -134,12 +185,18 @@ async def reply_offline_mentioned_employees(message):
 ALL_OFFLINE_REPLY_COOLDOWN = 600  # 同一群组 10 分钟内不重复提醒
 all_offline_reply_cache = {}  # {chat_id: last_reply_ts}
 
-ALL_OFFLINE_AFTER_HOURS_TEXT = (
-    "您好，当前为非工作时间，客服人员暂时不在线。"
-    "请您留言说明具体需求，我们会在工作时间尽快回复您，感谢您的理解。"
-)
 ALL_AWAY_TEXT = (
     "您好，客服人员当前暂时离开，稍后回来会尽快回复您，请先留言说明需求，谢谢。"
+)
+ALL_EARLY_OFF_TEXT = (
+    "您好，客服今天已提前结束工作，请您留言说明具体需求，我们会在明天工作时间尽快回复您。"
+)
+ALL_REST_TEXT = (
+    "您好，今天是休息日，客服不在线。请您留言说明具体需求，上班后我们会尽快回复您。"
+)
+ALL_OFFLINE_AFTER_HOURS_TEXT = (
+    "您好，当前为非工作时间{time_hint}，客服暂时不在线。"
+    "请您留言说明具体需求，我们会在工作时间尽快回复您，感谢您的理解。"
 )
 
 
@@ -152,7 +209,7 @@ def _has_any_mention(message) -> bool:
 
 
 async def reply_when_all_staff_offline(message):
-    """客户未 @ 任何员工，但所有员工当前都不在线时，提示非工作时间/暂时离开"""
+    """客户未 @ 任何员工，但所有员工当前都不在线时，按场景提示"""
     if _has_any_mention(message):
         return  # @ 了任何人都不触发（@员工走针对性提醒，@机器人/外人不打扰）
 
@@ -165,10 +222,13 @@ async def reply_when_all_staff_offline(message):
 
     any_online = False
     any_away_in_shift = False
+    any_early_off = False
+    all_rest = True
     candidate_count = 0
+    work_time_set = set()
 
     for emp_id in operators:
-        status_info = get_effective_online_status(emp_id)
+        status_info = get_effective_online_status(emp_id, now_ts)
         # 只纳入"设置了排班"或"今日手动打卡过"的员工，避免未排班者被误判为全天在岗
         has_schedule = get_employee_work_time(emp_id) is not None
         has_manual = status_info['source'] == 'manual'
@@ -179,8 +239,18 @@ async def reply_when_all_staff_offline(message):
         if status_info['online']:
             any_online = True
             break
-        if status_info['status'] == 'away' and is_scheduled_work_time(emp_id):
+
+        scenario = _classify_offline_scenario(emp_id, status_info, now_ts)
+        if scenario == 'away' and is_scheduled_work_time(emp_id, now_ts):
             any_away_in_shift = True
+        elif scenario == 'early_off':
+            any_early_off = True
+        if scenario not in ('rest_weekly', 'rest_temp'):
+            all_rest = False
+
+        work_time = get_employee_work_time(emp_id)
+        if work_time:
+            work_time_set.add((work_time['work_start'], work_time['work_end']))
 
     # 没有可判定的员工，或仍有员工在线 -> 不提示
     if candidate_count == 0 or any_online:
@@ -188,8 +258,24 @@ async def reply_when_all_staff_offline(message):
 
     all_offline_reply_cache[message.chat_id] = now_ts
 
-    text = ALL_AWAY_TEXT if any_away_in_shift else ALL_OFFLINE_AFTER_HOURS_TEXT
-    logger.info(f"[全员离线提醒] 群{message.chat_id} 触发文案类型={'暂时离开' if any_away_in_shift else '非工作时间'}")
+    # 场景优先级：暂时离开 > 提前下班 > 全员休息日 > 非工作时间
+    if any_away_in_shift:
+        scenario_key, text = '暂时离开', ALL_AWAY_TEXT
+    elif any_early_off:
+        scenario_key, text = '提前下班', ALL_EARLY_OFF_TEXT
+    elif all_rest:
+        scenario_key, text = '休息日', ALL_REST_TEXT
+    else:
+        scenario_key = '非工作时间'
+        # 全员排班一致时附上对外服务时间，不一致时省略
+        if len(work_time_set) == 1:
+            ws, we = next(iter(work_time_set))
+            time_hint = f"（工作时间 {ws}-{we}）"
+        else:
+            time_hint = ""
+        text = ALL_OFFLINE_AFTER_HOURS_TEXT.format(time_hint=time_hint)
+
+    logger.info(f"[全员离线提醒] 群{message.chat_id} 触发文案类型={scenario_key}")
 
     try:
         await message.reply_text(text)
