@@ -69,6 +69,8 @@ from handlers.profile import (
     profile_edit_performance_start, profile_edit_loss_start,
     profile_delete_performance_start, profile_delete_loss_start,
     profile_cancel,
+    # 考勤打卡
+    profile_attendance, profile_attendance_action,
 )
 from handlers.employee import register_employee_handlers, check_task_reminders, check_overdue_tasks
 
@@ -1191,11 +1193,15 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ===== ✅ 让个人中心处理器处理个人中心相关的回调 =====
-    if data.startswith("profile_"):
+    if data == "profile" or data.startswith("profile_"):
         return
 
     # ===== ✅ 让响应速度处理器处理响应速度相关的回调 =====
     if data.startswith("response_"):
+        return
+
+    # ===== ✅ 让管理员考勤看板处理考勤看板相关的回调 =====
+    if data.startswith("attendance_") or data.startswith("att_"):
         return
 
     await query.answer()
@@ -1813,6 +1819,9 @@ def main():
             CallbackQueryHandler(profile_performance_menu, pattern="^profile_performance_menu$"),
             CallbackQueryHandler(profile_performance_record_start, pattern="^profile_performance_record$"),
             CallbackQueryHandler(profile_performance_view_start, pattern="^profile_performance_view$"),
+            # 考勤打卡
+            CallbackQueryHandler(profile_attendance, pattern="^profile_attendance$"),
+            CallbackQueryHandler(profile_attendance_action, pattern="^profile_att_"),
         ],
         states={
             SET_SIGNATURE: [
@@ -1926,6 +1935,9 @@ def main():
     register_response_speed_handlers(app)
 
     register_employee_handlers(app)
+
+    from handlers.attendance_admin import register_attendance_admin_handlers
+    register_attendance_admin_handlers(app)
 
     # 三层私聊处理器
     app.add_handler(MessageHandler(
