@@ -9,7 +9,9 @@ from telegram.ext import ContextTypes, ConversationHandler
 from handlers.menu import get_main_menu
 from auth import is_authorized, OWNER_ID, safe_escape_markdown
 from db import get_monitored_addresses, get_user_preferences, set_user_preference, \
-    get_employee_response_stats, get_employee_work_time, get_response_rating_for_seconds
+    get_employee_response_stats, get_employee_work_time, get_response_rating_for_seconds, \
+    get_effective_online_status, add_attendance_event, \
+    get_employee_today_events, get_today_online_duration
 
 # 状态定义
 PROFILE_MAIN = 1
@@ -103,6 +105,10 @@ async def _build_profile_menu(user_id: int, prefs: dict = None, display_name: st
     if is_authorized(user_id):
         keyboard.append([InlineKeyboardButton("⚡ 员工响应速度", callback_data="response_speed_menu")])
 
+    # ========== 考勤打卡（员工可见，超级管理员不需要打卡） ==========
+    if is_authorized(user_id) and user_id != OWNER_ID:
+        keyboard.append([InlineKeyboardButton("🕐 考勤打卡", callback_data="profile_attendance")])
+
     # ========== 员工管理（超级管理员）/ 我的任务（员工） ==========
     if user_id == OWNER_ID:
         keyboard.append([InlineKeyboardButton("👤 员工管理", callback_data="employee_menu")])
@@ -130,6 +136,11 @@ async def _build_profile_menu(user_id: int, prefs: dict = None, display_name: st
         work_time = get_employee_work_time(user_id)
         if work_time:
             response_info += f"⏰ 工作时间：{work_time['work_start']}-{work_time['work_end']}\n"
+
+        # 当前考勤状态（超级管理员不显示）
+        if user_id != OWNER_ID:
+            att_info = get_effective_online_status(user_id)
+            response_info += f"🕐 当前状态：{ATTENDANCE_STATUS_TEXT.get(att_info['status'], att_info['status'])}\n"
 
     text = (f"👤 个人中心\n\n"
             f"{user_info_line}"
@@ -164,7 +175,7 @@ async def handle_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await msg.reply_text(text, reply_markup=markup, parse_mode="Markdown")
 
-    return PROFILE_MAIN
+    return ConversationHandler.END
 
 
 # ---------- 通知开关 ----------
@@ -3177,7 +3188,9 @@ from telegram.ext import ContextTypes, ConversationHandler
 from handlers.menu import get_main_menu
 from auth import is_authorized, OWNER_ID, safe_escape_markdown
 from db import get_monitored_addresses, get_user_preferences, set_user_preference, \
-    get_employee_response_stats, get_employee_work_time, get_response_rating_for_seconds
+    get_employee_response_stats, get_employee_work_time, get_response_rating_for_seconds, \
+    get_effective_online_status, add_attendance_event, \
+    get_employee_today_events, get_today_online_duration
 
 # 状态定义
 PROFILE_MAIN = 1
@@ -3271,6 +3284,10 @@ async def _build_profile_menu(user_id: int, prefs: dict = None, display_name: st
     if is_authorized(user_id):
         keyboard.append([InlineKeyboardButton("⚡ 员工响应速度", callback_data="response_speed_menu")])
 
+    # ========== 考勤打卡（员工可见，超级管理员不需要打卡） ==========
+    if is_authorized(user_id) and user_id != OWNER_ID:
+        keyboard.append([InlineKeyboardButton("🕐 考勤打卡", callback_data="profile_attendance")])
+
     # ========== 员工管理（超级管理员）/ 我的任务（员工） ==========
     if user_id == OWNER_ID:
         keyboard.append([InlineKeyboardButton("👤 员工管理", callback_data="employee_menu")])
@@ -3298,6 +3315,11 @@ async def _build_profile_menu(user_id: int, prefs: dict = None, display_name: st
         work_time = get_employee_work_time(user_id)
         if work_time:
             response_info += f"⏰ 工作时间：{work_time['work_start']}-{work_time['work_end']}\n"
+
+        # 当前考勤状态（超级管理员不显示）
+        if user_id != OWNER_ID:
+            att_info = get_effective_online_status(user_id)
+            response_info += f"🕐 当前状态：{ATTENDANCE_STATUS_TEXT.get(att_info['status'], att_info['status'])}\n"
 
     text = (f"👤 个人中心\n\n"
             f"{user_info_line}"
@@ -3332,7 +3354,7 @@ async def handle_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await msg.reply_text(text, reply_markup=markup, parse_mode="Markdown")
 
-    return PROFILE_MAIN
+    return ConversationHandler.END
 
 
 # ---------- 通知开关 ----------
@@ -6334,3 +6356,105 @@ async def profile_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from handlers.menu import get_main_menu
     await update.message.reply_text("请选择功能：", reply_markup=get_main_menu(user_id))
     return ConversationHandler.END
+
+
+# ==================== 考勤打卡 ====================
+
+ATTENDANCE_STATUS_TEXT = {
+    'online': '🟢 在线（已打卡）',
+    'away': '🟡 暂时离开',
+    'offline': '⚫ 已下班',
+    'scheduled_on': '🔵 在岗（按排班，未打卡）',
+    'scheduled_off': '⚪ 休息（按排班）',
+}
+
+ATTENDANCE_ACTION_LABELS = {
+    'check_in': '上班打卡',
+    'away': '暂时离开',
+    'resume': '恢复服务',
+    'check_out': '下班打卡',
+}
+
+
+def _format_ts(ts: int) -> str:
+    return datetime.fromtimestamp(ts, timezone(timedelta(hours=8))).strftime('%H:%M')
+
+
+def _format_duration(seconds: int) -> str:
+    if seconds < 3600:
+        return f"{seconds // 60}分钟"
+    return f"{seconds // 3600}小时{(seconds % 3600) // 60}分钟"
+
+
+async def _render_attendance_page(query):
+    """渲染考勤打卡页面（不调用 query.answer，避免重复应答）"""
+    user_id = query.from_user.id
+
+    now_ts = int(datetime.now(timezone(timedelta(hours=8))).timestamp())
+    status_info = get_effective_online_status(user_id, now_ts)
+    status_text = ATTENDANCE_STATUS_TEXT.get(status_info['status'], status_info['status'])
+
+    work_time = get_employee_work_time(user_id)
+    time_text = f"{work_time['work_start']}-{work_time['work_end']}" if work_time else "未设置"
+
+    events = get_employee_today_events(user_id, now_ts)
+    duration = get_today_online_duration(user_id, now_ts)
+
+    text = "🕐 **考勤打卡**\n\n"
+    text += f"当前状态：{status_text}\n"
+    text += f"排班时间：{time_text}\n"
+    text += f"今日在线时长：{_format_duration(duration)}\n"
+
+    if events:
+        text += "\n今日打卡记录：\n"
+        for ev in events:
+            label = ATTENDANCE_ACTION_LABELS.get(ev['action'], ev['action'])
+            text += f"  {_format_ts(ev['event_time'])} {label}\n"
+
+    # 根据当前状态显示可用操作
+    cur = status_info['status']
+    keyboard = []
+    if cur == 'online':
+        keyboard.append([InlineKeyboardButton("🟡 暂时离开", callback_data='profile_att_away')])
+        keyboard.append([InlineKeyboardButton("⚫ 下班打卡", callback_data='profile_att_check_out')])
+    elif cur == 'away':
+        keyboard.append([InlineKeyboardButton("🟢 恢复服务", callback_data='profile_att_resume')])
+        keyboard.append([InlineKeyboardButton("⚫ 下班打卡", callback_data='profile_att_check_out')])
+    elif cur == 'offline':
+        keyboard.append([InlineKeyboardButton("🟢 重新上班打卡", callback_data='profile_att_check_in')])
+    else:
+        # scheduled_on / scheduled_off：未打卡
+        keyboard.append([InlineKeyboardButton("🟢 上班打卡", callback_data='profile_att_check_in')])
+
+    keyboard.append([InlineKeyboardButton("⬅️ 返回个人中心", callback_data='profile')])
+
+    await query.message.edit_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+
+
+async def profile_attendance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """考勤打卡页面"""
+    query = update.callback_query
+    await query.answer()
+    await _render_attendance_page(query)
+
+
+async def profile_attendance_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理打卡操作"""
+    query = update.callback_query
+    user_id = query.from_user.id
+
+    action = query.data[len('profile_att_'):]
+    if action not in ATTENDANCE_ACTION_LABELS:
+        await query.answer("❌ 未知操作")
+        return
+
+    if add_attendance_event(user_id, action):
+        await query.answer(f"✅ {ATTENDANCE_ACTION_LABELS[action]}成功")
+    else:
+        await query.answer("❌ 操作失败，请重试")
+
+    await _render_attendance_page(query)
