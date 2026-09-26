@@ -5,6 +5,7 @@ import re
 import time
 from datetime import datetime, timezone, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import BadRequest
 from telegram.ext import ContextTypes, ConversationHandler, MessageHandler, CallbackQueryHandler, CommandHandler, CallbackContext, filters
 from auth import list_operators, safe_escape_markdown, OWNER_ID
 from db import (
@@ -12,7 +13,10 @@ from db import (
     set_employee_work_time, get_employee_work_time, is_in_work_time,
     get_response_rating_config, update_response_rating_config, cleanup_old_response_records,
     get_months_with_response_records, get_response_rating_for_seconds,
-    init_response_tables
+    init_response_tables,
+    get_effective_online_status, is_effectively_online, is_scheduled_work_time,
+    get_employee_weekly_rest, set_employee_weekly_rest,
+    get_employee_temp_schedules, set_employee_temp_schedule, delete_employee_temp_schedule
 )
 from logger import bot_logger as logger
 
@@ -23,6 +27,12 @@ RESPONSE_WORK_TIME_MENU = 4
 RESPONSE_WORK_TIME_SET = 5
 RESPONSE_RATING_CONFIG = 6
 RESPONSE_RATING_EDIT = 7
+RESPONSE_EMP_SCHEDULE = 8
+RESPONSE_WEEKLY_REST = 9
+RESPONSE_TEMP_SCHEDULE = 10
+RESPONSE_TEMP_SCHEDULE_ADD = 11
+
+WEEKDAY_NAMES = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
 
 pending_customer_messages = {}
 
@@ -87,14 +97,12 @@ async def reply_offline_mentioned_employees(message):
 
     operators = list_operators()
     now_ts = int(time.time())
-    offline_names = []
+    offline_entries = []
 
     for emp_id in mentioned_ids:
-        work_time = get_employee_work_time(emp_id)
-        if not work_time:
-            continue  # 未设置工作时间，视为全天在线
-        if is_in_work_time(emp_id):
-            continue  # 在工作时间内，不提醒
+        status_info = get_effective_online_status(emp_id)
+        if status_info['online']:
+            continue  # 在线（含打卡在线/排班在岗），不提醒
         cache_key = (message.chat_id, emp_id)
         if now_ts - offline_reply_cache.get(cache_key, 0) < OFFLINE_REPLY_COOLDOWN:
             continue  # 冷却期内不重复提醒
@@ -102,18 +110,91 @@ async def reply_offline_mentioned_employees(message):
 
         op_info = operators.get(emp_id) or {}
         name = op_info.get('first_name') or f"员工{emp_id}"
-        offline_names.append(f"{name}（工作时间 {work_time['work_start']}-{work_time['work_end']}）")
+        work_time = get_employee_work_time(emp_id)
+        offline_entries.append((name, status_info['status'], work_time))
 
-    if not offline_names:
+    if not offline_entries:
         return
 
-    names_text = "、".join(offline_names)
+    lines = []
+    for name, status, work_time in offline_entries:
+        if status == 'away':
+            lines.append(f"{name} 暂时离开，稍后回来会立即回复您，您可以先留言说明需求。")
+        else:
+            time_hint = f"（工作时间 {work_time['work_start']}-{work_time['work_end']}）" if work_time else ""
+            lines.append(f"{name}{time_hint} 现在暂时不在线，会在工作时间尽快回复您，您可以先留言说明需求。")
+
     try:
-        await message.reply_text(
-            f"{names_text} 现在暂时不在线，会在工作时间尽快回复您，您可以先留言说明需求。"
-        )
+        await message.reply_text("\n".join(lines))
     except Exception as e:
         logger.warning(f"发送员工离线提醒失败: {e}")
+
+
+# ========== 全员离线时的通用提示 ==========
+ALL_OFFLINE_REPLY_COOLDOWN = 600  # 同一群组 10 分钟内不重复提醒
+all_offline_reply_cache = {}  # {chat_id: last_reply_ts}
+
+ALL_OFFLINE_AFTER_HOURS_TEXT = (
+    "您好，当前为非工作时间，客服人员暂时不在线。"
+    "请您留言说明具体需求，我们会在工作时间尽快回复您，感谢您的理解。"
+)
+ALL_AWAY_TEXT = (
+    "您好，客服人员当前暂时离开，稍后回来会尽快回复您，请先留言说明需求，谢谢。"
+)
+
+
+def _has_any_mention(message) -> bool:
+    """消息中是否 @ 了任何用户（含机器人/外部人员）"""
+    for entities in (message.entities, message.caption_entities):
+        if entities and any(e.type in ('mention', 'text_mention') for e in entities):
+            return True
+    return False
+
+
+async def reply_when_all_staff_offline(message):
+    """客户未 @ 任何员工，但所有员工当前都不在线时，提示非工作时间/暂时离开"""
+    if _has_any_mention(message):
+        return  # @ 了任何人都不触发（@员工走针对性提醒，@机器人/外人不打扰）
+
+    now_ts = int(time.time())
+    if now_ts - all_offline_reply_cache.get(message.chat_id, 0) < ALL_OFFLINE_REPLY_COOLDOWN:
+        return  # 冷却期内不重复提醒
+
+    # 排除超级管理员（超管不参与考勤）
+    operators = {uid: info for uid, info in list_operators().items() if uid != OWNER_ID}
+
+    any_online = False
+    any_away_in_shift = False
+    candidate_count = 0
+
+    for emp_id in operators:
+        status_info = get_effective_online_status(emp_id)
+        # 只纳入"设置了排班"或"今日手动打卡过"的员工，避免未排班者被误判为全天在岗
+        has_schedule = get_employee_work_time(emp_id) is not None
+        has_manual = status_info['source'] == 'manual'
+        if not has_schedule and not has_manual:
+            continue
+        candidate_count += 1
+
+        if status_info['online']:
+            any_online = True
+            break
+        if status_info['status'] == 'away' and is_scheduled_work_time(emp_id):
+            any_away_in_shift = True
+
+    # 没有可判定的员工，或仍有员工在线 -> 不提示
+    if candidate_count == 0 or any_online:
+        return
+
+    all_offline_reply_cache[message.chat_id] = now_ts
+
+    text = ALL_AWAY_TEXT if any_away_in_shift else ALL_OFFLINE_AFTER_HOURS_TEXT
+    logger.info(f"[全员离线提醒] 群{message.chat_id} 触发文案类型={'暂时离开' if any_away_in_shift else '非工作时间'}")
+
+    try:
+        await message.reply_text(text)
+    except Exception as e:
+        logger.warning(f"发送全员离线提醒失败: {e}")
 
 
 def is_closing_message(text: str) -> bool:
@@ -195,8 +276,8 @@ async def monitor_group_messages(update: Update, context: ContextTypes.DEFAULT_T
                 customer_msg_time = customer_info['message_time']
                 response_seconds = message_time - customer_msg_time
 
-                is_customer_in_work = is_in_work_time(user_id, customer_msg_time)
-                is_responder_in_work = is_in_work_time(user_id, message_time)
+                is_customer_in_work = is_effectively_online(user_id, customer_msg_time)
+                is_responder_in_work = is_effectively_online(user_id, message_time)
 
                 if is_customer_in_work and is_responder_in_work and response_seconds <= MAX_RESPONSE_SECONDS:
                     add_response_record(
@@ -222,6 +303,9 @@ async def monitor_group_messages(update: Update, context: ContextTypes.DEFAULT_T
         # 过滤机器人触发指令：触发机器人回复的消息不计入响应统计
         if is_bot_trigger_message(message.text):
             return
+
+        # 客户未 @ 任何人，但所有员工都不在线时，提示非工作时间/暂时离开
+        await reply_when_all_staff_offline(message)
 
         customer_msg_time = message_time
         is_in_work = is_in_work_time(user_id, customer_msg_time)
@@ -311,7 +395,7 @@ async def response_speed_menu(update: Update, context: CallbackContext):
         keyboard.append([InlineKeyboardButton("📅 选择月份", callback_data='response_month_select')])
 
     if is_admin:
-        keyboard.append([InlineKeyboardButton("⏰ 设置员工工作时间", callback_data='response_work_time_menu')])
+        keyboard.append([InlineKeyboardButton("⏰ 员工排班管理", callback_data='response_work_time_menu')])
         keyboard.append([InlineKeyboardButton("⚙️ 设置响应评级", callback_data='response_rating_config')])
 
     keyboard.append([InlineKeyboardButton("⬅️ 返回", callback_data='profile')])
@@ -406,7 +490,7 @@ async def response_view_month(update: Update, context: CallbackContext):
 
 
 async def response_work_time_menu(update: Update, context: CallbackContext):
-    """设置员工工作时间菜单"""
+    """设置员工排班菜单（工作时间/休息日/临时调整）"""
     query = update.callback_query
     await query.answer()
 
@@ -422,18 +506,276 @@ async def response_work_time_menu(update: Update, context: CallbackContext):
             time_text = "⏰ 未设置"
         keyboard.append([InlineKeyboardButton(
             f"{name} {time_text}",
-            callback_data=f'response_set_work_time_{emp_id}'
+            callback_data=f'response_emp_schedule_{emp_id}'
         )])
 
     keyboard.append([InlineKeyboardButton("⬅️ 返回", callback_data='response_speed_menu')])
 
     await query.edit_message_text(
-        "⏰ **设置员工工作时间**\n\n"
-        "点击员工名称设置工作时间：",
+        "⏰ **员工排班管理**\n\n"
+        "点击员工管理其排班（工作时间/休息日/临时调整）：",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
     )
     return RESPONSE_WORK_TIME_MENU
+
+
+def _build_emp_schedule_text(emp_id: int) -> str:
+    """构建员工排班详情文本"""
+    operators = list_operators()
+    op_info = operators.get(emp_id)
+    name = op_info.get('first_name', f"员工{emp_id}") if op_info else f"员工{emp_id}"
+
+    work_time = get_employee_work_time(emp_id)
+    time_text = f"{work_time['work_start']}-{work_time['work_end']}" if work_time else "未设置"
+
+    weekly_rest = get_employee_weekly_rest(emp_id)
+    rest_text = "、".join(WEEKDAY_NAMES[d] for d in weekly_rest) if weekly_rest else "无"
+
+    temp_list = get_employee_temp_schedules(emp_id, limit=10)
+    if temp_list:
+        temp_text = "\n".join(
+            f"  {t['date']} {'休息' if t['type'] == 'rest' else '补班'}" for t in temp_list
+        )
+    else:
+        temp_text = "  无"
+
+    text = f"📋 **{safe_escape_markdown(name)} 的排班**\n\n"
+    text += f"⏰ 工作时间：{time_text}\n"
+    text += f"📅 每周休息日：{rest_text}\n"
+    text += f"🗓 临时调整（近期）：\n{temp_text}\n"
+    return text
+
+
+async def response_emp_schedule(update: Update, context: CallbackContext):
+    """员工排班详情菜单"""
+    query = update.callback_query
+    await query.answer()
+
+    emp_id = int(query.data.split('_')[-1])
+    context.user_data['response_schedule_emp_id'] = emp_id
+
+    text = _build_emp_schedule_text(emp_id)
+
+    keyboard = [
+        [InlineKeyboardButton("⏰ 设置工作时间", callback_data=f'response_set_work_time_{emp_id}')],
+        [InlineKeyboardButton("📅 设置每周休息日", callback_data=f'response_weekly_rest_{emp_id}')],
+        [InlineKeyboardButton("🗓 临时休息/补班", callback_data=f'response_temp_schedule_{emp_id}')],
+        [InlineKeyboardButton("⬅️ 返回", callback_data='response_work_time_menu')],
+    ]
+
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+    return RESPONSE_EMP_SCHEDULE
+
+
+async def _render_weekly_rest(query, emp_id: int):
+    """渲染每周休息日设置界面（不调用 query.answer）"""
+    weekly_rest = get_employee_weekly_rest(emp_id)
+
+    keyboard = []
+    row = []
+    for d in range(7):
+        mark = "✅" if d in weekly_rest else "⬜"
+        row.append(InlineKeyboardButton(
+            f"{mark}{WEEKDAY_NAMES[d]}",
+            callback_data=f'response_toggle_rest_{emp_id}_{d}'
+        ))
+        if len(row) == 4:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+
+    keyboard.append([InlineKeyboardButton("🗑 清除全部休息日", callback_data=f'response_clear_rest_{emp_id}')])
+    keyboard.append([InlineKeyboardButton("⬅️ 返回", callback_data=f'response_emp_schedule_{emp_id}')])
+
+    try:
+        await query.edit_message_text(
+            "📅 **设置每周休息日**\n\n"
+            "点击切换休息/上班（✅=休息）：",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
+    except BadRequest:
+        pass  # 界面内容未变化（如清空已是空的休息日）
+
+
+async def response_weekly_rest(update: Update, context: CallbackContext):
+    """设置每周休息日菜单（点击切换）"""
+    query = update.callback_query
+    await query.answer()
+
+    emp_id = int(query.data.split('_')[-1])
+    context.user_data['response_schedule_emp_id'] = emp_id
+
+    await _render_weekly_rest(query, emp_id)
+    return RESPONSE_WEEKLY_REST
+
+
+async def response_toggle_rest(update: Update, context: CallbackContext):
+    """切换某天是否为休息日"""
+    query = update.callback_query
+    await query.answer()
+
+    parts = query.data.split('_')
+    emp_id = int(parts[-2])
+    day = int(parts[-1])
+
+    weekly_rest = get_employee_weekly_rest(emp_id)
+    if day in weekly_rest:
+        weekly_rest.remove(day)
+    else:
+        weekly_rest.append(day)
+    set_employee_weekly_rest(emp_id, sorted(weekly_rest))
+
+    await _render_weekly_rest(query, emp_id)
+    return RESPONSE_WEEKLY_REST
+
+
+async def response_clear_rest(update: Update, context: CallbackContext):
+    """清除全部每周休息日"""
+    query = update.callback_query
+    await query.answer()
+
+    emp_id = int(query.data.split('_')[-1])
+    set_employee_weekly_rest(emp_id, [])
+
+    await _render_weekly_rest(query, emp_id)
+    return RESPONSE_WEEKLY_REST
+
+
+async def _render_temp_schedule(query, emp_id: int):
+    """渲染临时休息/补班管理界面（不调用 query.answer）"""
+    temp_list = get_employee_temp_schedules(emp_id, limit=30)
+
+    text = "🗓 **临时休息/补班管理**\n\n"
+    if temp_list:
+        for t in temp_list:
+            type_text = "休息" if t['type'] == 'rest' else "补班"
+            text += f"  {t['date']} {type_text}\n"
+    else:
+        text += "暂无临时调整\n"
+    text += "\n点击下方按钮添加，或点击已有记录删除："
+
+    keyboard = []
+    for t in temp_list:
+        type_text = "休息" if t['type'] == 'rest' else "补班"
+        keyboard.append([InlineKeyboardButton(
+            f"❌ {t['date']} {type_text}",
+            callback_data=f'response_del_temp_{emp_id}_{t["date"]}'
+        )])
+
+    keyboard.append([
+        InlineKeyboardButton("➕ 添加休息", callback_data=f'response_add_temp_rest_{emp_id}'),
+        InlineKeyboardButton("➕ 添加补班", callback_data=f'response_add_temp_makeup_{emp_id}'),
+    ])
+    keyboard.append([InlineKeyboardButton("⬅️ 返回", callback_data=f'response_emp_schedule_{emp_id}')])
+
+    try:
+        await query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
+    except BadRequest:
+        pass
+
+
+async def response_temp_schedule(update: Update, context: CallbackContext):
+    """临时休息/补班管理"""
+    query = update.callback_query
+    await query.answer()
+
+    emp_id = int(query.data.split('_')[-1])
+    context.user_data['response_schedule_emp_id'] = emp_id
+
+    await _render_temp_schedule(query, emp_id)
+    return RESPONSE_TEMP_SCHEDULE
+
+
+async def response_add_temp_start(update: Update, context: CallbackContext):
+    """开始添加临时休息/补班"""
+    query = update.callback_query
+    await query.answer()
+
+    parts = query.data.split('_')
+    # response_add_temp_rest_{emp_id} 或 response_add_temp_makeup_{emp_id}
+    schedule_type = parts[-2]
+    emp_id = int(parts[-1])
+
+    context.user_data['response_schedule_emp_id'] = emp_id
+    context.user_data['response_temp_type'] = schedule_type
+    context.user_data['profile_input_state'] = True
+
+    type_text = "休息" if schedule_type == 'rest' else "补班"
+    await query.edit_message_text(
+        f"🗓 **添加临时{type_text}**\n\n"
+        f"请输入日期（格式：YYYY-MM-DD 或 MM-DD）\n"
+        f"例如：2026-10-01 或 10-01\n\n"
+        f"❌ 发送 /cancel 取消",
+        parse_mode='Markdown'
+    )
+    return RESPONSE_TEMP_SCHEDULE_ADD
+
+
+async def response_save_temp_schedule(update: Update, context: CallbackContext):
+    """保存临时休息/补班"""
+    text = update.message.text.strip()
+    emp_id = context.user_data.get('response_schedule_emp_id')
+    schedule_type = context.user_data.get('response_temp_type', 'rest')
+
+    if text == '/cancel':
+        context.user_data.pop('profile_input_state', None)
+        await update.message.reply_text("✅ 已取消")
+        return ConversationHandler.END
+
+    now = datetime.now(timezone(timedelta(hours=8)))
+    date_str = text
+    try:
+        if re.match(r'^\d{4}-\d{2}-\d{2}$', text):
+            datetime.strptime(text, '%Y-%m-%d')
+        elif re.match(r'^\d{1,2}-\d{1,2}$', text):
+            m, d = text.split('-')
+            date_str = f"{now.year}-{int(m):02d}-{int(d):02d}"
+            datetime.strptime(date_str, '%Y-%m-%d')
+        else:
+            raise ValueError("格式错误")
+    except ValueError:
+        await update.message.reply_text(
+            "❌ 日期格式不正确，请重新输入（格式：YYYY-MM-DD 或 MM-DD）\n"
+            "例如：2026-10-01 或 10-01"
+        )
+        return RESPONSE_TEMP_SCHEDULE_ADD
+
+    if set_employee_temp_schedule(emp_id, date_str, schedule_type):
+        type_text = "休息" if schedule_type == 'rest' else "补班"
+        await update.message.reply_text(f"✅ 已设置 {date_str} 为{type_text}")
+    else:
+        await update.message.reply_text("❌ 设置失败")
+
+    context.user_data['response_message_processed'] = True
+    context.user_data.pop('profile_input_state', None)
+    return ConversationHandler.END
+
+
+async def response_del_temp_schedule(update: Update, context: CallbackContext):
+    """删除临时休息/补班"""
+    query = update.callback_query
+    await query.answer()
+
+    # response_del_temp_{emp_id}_{date}
+    data = query.data[len('response_del_temp_'):]
+    emp_id_str, date_str = data.split('_', 1)
+    emp_id = int(emp_id_str)
+
+    delete_employee_temp_schedule(emp_id, date_str)
+
+    await _render_temp_schedule(query, emp_id)
+    return RESPONSE_TEMP_SCHEDULE
 
 
 async def response_set_work_time(update: Update, context: CallbackContext):
@@ -643,7 +985,26 @@ def register_response_speed_handlers(application):
                 CallbackQueryHandler(response_view_month, pattern='^response_view_month_'),
             ],
             RESPONSE_WORK_TIME_MENU: [
+                CallbackQueryHandler(response_emp_schedule, pattern='^response_emp_schedule_'),
+            ],
+            RESPONSE_EMP_SCHEDULE: [
                 CallbackQueryHandler(response_set_work_time, pattern='^response_set_work_time_'),
+                CallbackQueryHandler(response_weekly_rest, pattern='^response_weekly_rest_'),
+                CallbackQueryHandler(response_temp_schedule, pattern='^response_temp_schedule_'),
+                CallbackQueryHandler(response_work_time_menu, pattern='^response_work_time_menu$'),
+            ],
+            RESPONSE_WEEKLY_REST: [
+                CallbackQueryHandler(response_toggle_rest, pattern='^response_toggle_rest_'),
+                CallbackQueryHandler(response_clear_rest, pattern='^response_clear_rest_'),
+                CallbackQueryHandler(response_emp_schedule, pattern='^response_emp_schedule_'),
+            ],
+            RESPONSE_TEMP_SCHEDULE: [
+                CallbackQueryHandler(response_add_temp_start, pattern='^response_add_temp_'),
+                CallbackQueryHandler(response_del_temp_schedule, pattern='^response_del_temp_'),
+                CallbackQueryHandler(response_emp_schedule, pattern='^response_emp_schedule_'),
+            ],
+            RESPONSE_TEMP_SCHEDULE_ADD: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, response_save_temp_schedule),
             ],
             RESPONSE_WORK_TIME_SET: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, response_save_work_time),
