@@ -3200,6 +3200,37 @@ def init_response_tables():
             )
         """)
 
+        # ========== 考勤排班相关表 ==========
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS attendance_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                employee_id INTEGER NOT NULL,
+                action TEXT NOT NULL,
+                event_time INTEGER NOT NULL,
+                event_date TEXT NOT NULL,
+                created_at INTEGER DEFAULT 0
+            )
+        """)
+
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS employee_weekly_rest (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                employee_id INTEGER NOT NULL,
+                day_of_week INTEGER NOT NULL,
+                UNIQUE(employee_id, day_of_week)
+            )
+        """)
+
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS employee_temp_schedule (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                employee_id INTEGER NOT NULL,
+                schedule_date TEXT NOT NULL,
+                schedule_type TEXT NOT NULL,
+                UNIQUE(employee_id, schedule_date)
+            )
+        """)
+
         c.execute("SELECT COUNT(*) FROM response_rating_config")
         if c.fetchone()[0] == 0:
             default_config = [
@@ -6691,6 +6722,37 @@ def init_response_tables():
             )
         """)
 
+        # ========== 考勤排班相关表 ==========
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS attendance_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                employee_id INTEGER NOT NULL,
+                action TEXT NOT NULL,
+                event_time INTEGER NOT NULL,
+                event_date TEXT NOT NULL,
+                created_at INTEGER DEFAULT 0
+            )
+        """)
+
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS employee_weekly_rest (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                employee_id INTEGER NOT NULL,
+                day_of_week INTEGER NOT NULL,
+                UNIQUE(employee_id, day_of_week)
+            )
+        """)
+
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS employee_temp_schedule (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                employee_id INTEGER NOT NULL,
+                schedule_date TEXT NOT NULL,
+                schedule_type TEXT NOT NULL,
+                UNIQUE(employee_id, schedule_date)
+            )
+        """)
+
         c.execute("SELECT COUNT(*) FROM response_rating_config")
         if c.fetchone()[0] == 0:
             default_config = [
@@ -6980,3 +7042,431 @@ def get_response_rating_for_seconds(seconds: float) -> Dict:
         if item['min_seconds'] <= seconds < item['max_seconds']:
             return item
     return config[-1] if config else {'level_name': '未知', 'emoji': '❓'}
+
+
+# ============================================================
+# ========== 考勤管理（打卡 + 排班） ==========
+# ============================================================
+
+ATTENDANCE_ACTION_NAMES = {
+    'check_in': '上班打卡',
+    'away': '暂时离开',
+    'resume': '恢复服务',
+    'check_out': '下班打卡',
+}
+
+
+def _get_shift_date(employee_id: int, check_time: int) -> str:
+    """计算考勤归属日期（跨天班次的凌晨时段归属于前一天的班次）"""
+    dt = datetime.fromtimestamp(check_time, timezone(timedelta(hours=8)))
+    work_time = get_employee_work_time(employee_id)
+    if work_time:
+        ws = work_time['work_start']
+        we = work_time['work_end']
+        start_minutes = int(ws.split(':')[0]) * 60 + int(ws.split(':')[1])
+        end_minutes = int(we.split(':')[0]) * 60 + int(we.split(':')[1])
+        if start_minutes > end_minutes:  # 跨天班次
+            cur = dt.hour * 60 + dt.minute
+            if cur <= end_minutes:
+                dt = dt - timedelta(days=1)
+    return dt.strftime('%Y-%m-%d')
+
+
+def _is_time_in_work_segment(employee_id: int, check_time: int) -> bool:
+    """仅按工作时间段判断（不含休息日等），逻辑同 is_in_work_time"""
+    return is_in_work_time(employee_id, check_time)
+
+
+# ---------- 考勤事件流水 ----------
+
+def add_attendance_event(employee_id: int, action: str, event_time: int = None) -> bool:
+    """记录考勤事件：check_in / away / resume / check_out"""
+    if action not in ATTENDANCE_ACTION_NAMES:
+        return False
+    if event_time is None:
+        event_time = int(time.time())
+    event_date = _get_shift_date(employee_id, event_time)
+
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("""
+            INSERT INTO attendance_events (employee_id, action, event_time, event_date, created_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (employee_id, action, event_time, event_date, int(time.time())))
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"记录考勤事件失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def get_employee_status_at(employee_id: int, check_time: int = None):
+    """回放考勤事件，判断员工在指定时刻的手动状态。
+    返回 'online' / 'away' / 'offline' / None（无打卡记录）
+    """
+    if check_time is None:
+        check_time = int(time.time())
+    shift_date = _get_shift_date(employee_id, check_time)
+
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("""
+            SELECT action FROM attendance_events
+            WHERE employee_id = ? AND event_date = ? AND event_time <= ?
+            ORDER BY event_time ASC, id ASC
+        """, (employee_id, shift_date, check_time))
+        rows = c.fetchall()
+        if not rows:
+            return None
+        last_action = rows[-1][0]
+        if last_action in ('check_in', 'resume'):
+            return 'online'
+        elif last_action == 'away':
+            return 'away'
+        else:
+            return 'offline'
+    except Exception as e:
+        logger.error(f"查询员工状态失败: {e}")
+        return None
+    finally:
+        conn.close()
+
+
+def get_employee_today_events(employee_id: int, check_time: int = None) -> List[Dict]:
+    """获取员工今日（考勤日）的打卡事件列表"""
+    if check_time is None:
+        check_time = int(time.time())
+    shift_date = _get_shift_date(employee_id, check_time)
+
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("""
+            SELECT action, event_time FROM attendance_events
+            WHERE employee_id = ? AND event_date = ?
+            ORDER BY event_time ASC, id ASC
+        """, (employee_id, shift_date))
+        return [{'action': row[0], 'event_time': row[1]} for row in c.fetchall()]
+    except Exception as e:
+        logger.error(f"获取今日考勤事件失败: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+def get_today_online_duration(employee_id: int, check_time: int = None) -> int:
+    """计算员工今日累计在线时长（秒），挂起时间不计入"""
+    if check_time is None:
+        check_time = int(time.time())
+    events = get_employee_today_events(employee_id, check_time)
+    if not events:
+        return 0
+
+    total = 0
+    online_since = None
+    for ev in events:
+        if ev['action'] in ('check_in', 'resume'):
+            online_since = ev['event_time']
+        elif ev['action'] in ('away', 'check_out'):
+            if online_since is not None:
+                total += ev['event_time'] - online_since
+                online_since = None
+    if online_since is not None:
+        total += check_time - online_since
+    return max(0, total)
+
+
+# ---------- 每周固定休息日 ----------
+
+def set_employee_weekly_rest(employee_id: int, days: List[int]) -> bool:
+    """设置员工每周固定休息日，days 为 0-6 的列表（0=周一）"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("DELETE FROM employee_weekly_rest WHERE employee_id = ?", (employee_id,))
+        for d in days:
+            c.execute("""
+                INSERT OR IGNORE INTO employee_weekly_rest (employee_id, day_of_week)
+                VALUES (?, ?)
+            """, (employee_id, d))
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"设置每周休息日失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def get_employee_weekly_rest(employee_id: int) -> List[int]:
+    """获取员工每周固定休息日列表"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("""
+            SELECT day_of_week FROM employee_weekly_rest
+            WHERE employee_id = ? ORDER BY day_of_week ASC
+        """, (employee_id,))
+        return [row[0] for row in c.fetchall()]
+    except Exception as e:
+        logger.error(f"获取每周休息日失败: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+# ---------- 临时休息 / 补班 ----------
+
+def set_employee_temp_schedule(employee_id: int, schedule_date: str, schedule_type: str) -> bool:
+    """设置临时排班：schedule_date 格式 YYYY-MM-DD，schedule_type 为 rest / makeup"""
+    if schedule_type not in ('rest', 'makeup'):
+        return False
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("""
+            INSERT OR REPLACE INTO employee_temp_schedule (employee_id, schedule_date, schedule_type)
+            VALUES (?, ?, ?)
+        """, (employee_id, schedule_date, schedule_type))
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"设置临时排班失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def delete_employee_temp_schedule(employee_id: int, schedule_date: str) -> bool:
+    """删除临时排班"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("""
+            DELETE FROM employee_temp_schedule
+            WHERE employee_id = ? AND schedule_date = ?
+        """, (employee_id, schedule_date))
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"删除临时排班失败: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def get_employee_temp_schedule(employee_id: int, schedule_date: str):
+    """获取某日临时排班类型，返回 'rest' / 'makeup' / None"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("""
+            SELECT schedule_type FROM employee_temp_schedule
+            WHERE employee_id = ? AND schedule_date = ?
+        """, (employee_id, schedule_date))
+        row = c.fetchone()
+        return row[0] if row else None
+    except Exception as e:
+        logger.error(f"获取临时排班失败: {e}")
+        return None
+    finally:
+        conn.close()
+
+
+def get_employee_temp_schedules(employee_id: int, from_date: str = None, limit: int = 30) -> List[Dict]:
+    """获取员工临时排班列表（默认从今天开始）"""
+    if from_date is None:
+        from_date = datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d')
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("""
+            SELECT schedule_date, schedule_type FROM employee_temp_schedule
+            WHERE employee_id = ? AND schedule_date >= ?
+            ORDER BY schedule_date ASC LIMIT ?
+        """, (employee_id, from_date, limit))
+        return [{'date': row[0], 'type': row[1]} for row in c.fetchall()]
+    except Exception as e:
+        logger.error(f"获取临时排班列表失败: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+# ---------- 统一在线判定 ----------
+
+def is_scheduled_work_time(employee_id: int, check_time: int = None) -> bool:
+    """按排班判断员工在指定时刻是否应在岗（工作时间段 + 每周休息日 + 临时休息/补班）"""
+    if check_time is None:
+        check_time = int(time.time())
+
+    work_time = get_employee_work_time(employee_id)
+    if not work_time:
+        return True  # 未设置排班，视为应在岗
+
+    shift_date = _get_shift_date(employee_id, check_time)
+
+    # 1. 临时排班优先
+    temp_type = get_employee_temp_schedule(employee_id, shift_date)
+    if temp_type == 'rest':
+        return False
+    if temp_type == 'makeup':
+        return _is_time_in_work_segment(employee_id, check_time)
+
+    # 2. 每周固定休息日
+    weekday = datetime.strptime(shift_date, '%Y-%m-%d').weekday()
+    if weekday in get_employee_weekly_rest(employee_id):
+        return False
+
+    # 3. 工作时间段
+    return _is_time_in_work_segment(employee_id, check_time)
+
+
+def get_effective_online_status(employee_id: int, check_time: int = None) -> Dict:
+    """统一在线判定：手动打卡状态 > 排班兜底。
+    返回 {'online': bool, 'status': str, 'source': str}
+    status: online / away / offline / scheduled_on / scheduled_off
+    source: manual / schedule
+    """
+    if check_time is None:
+        check_time = int(time.time())
+
+    manual = get_employee_status_at(employee_id, check_time)
+    if manual == 'online':
+        return {'online': True, 'status': 'online', 'source': 'manual'}
+    if manual == 'away':
+        return {'online': False, 'status': 'away', 'source': 'manual'}
+    if manual == 'offline':
+        return {'online': False, 'status': 'offline', 'source': 'manual'}
+
+    if is_scheduled_work_time(employee_id, check_time):
+        return {'online': True, 'status': 'scheduled_on', 'source': 'schedule'}
+    return {'online': False, 'status': 'scheduled_off', 'source': 'schedule'}
+
+
+def is_effectively_online(employee_id: int, check_time: int = None) -> bool:
+    """统一在线判定（布尔版）：手动打卡状态 > 排班兜底"""
+    return get_effective_online_status(employee_id, check_time)['online']
+
+
+# ========== 管理员考勤看板查询 ==========
+
+def get_all_operators_today_status() -> List[Dict]:
+    """获取所有操作员今日实时状态（用于管理员看板，排除超级管理员）"""
+    from auth import list_operators, OWNER_ID
+    operators = {uid: info for uid, info in list_operators().items() if uid != OWNER_ID}
+    now_ts = int(time.time())
+    result = []
+
+    for emp_id, op_info in operators.items():
+        status_info = get_effective_online_status(emp_id, now_ts)
+        events = get_employee_today_events(emp_id, now_ts)
+        check_in_time = None
+        check_out_time = None
+        for ev in events:
+            if ev['action'] == 'check_in' and check_in_time is None:
+                check_in_time = ev['event_time']
+            if ev['action'] == 'check_out':
+                check_out_time = ev['event_time']
+        duration = get_today_online_duration(emp_id, now_ts)
+
+        result.append({
+            'employee_id': emp_id,
+            'name': op_info.get('first_name') or f"员工{emp_id}",
+            'status': status_info['status'],
+            'source': status_info['source'],
+            'check_in_time': check_in_time,
+            'check_out_time': check_out_time,
+            'online_duration': duration,
+        })
+
+    return result
+
+
+def get_employee_monthly_attendance(employee_id: int, year: int, month: int) -> List[Dict]:
+    """获取员工某月每日考勤汇总（按考勤日聚合）"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    try:
+        c.execute("""
+            SELECT event_date, action, event_time FROM attendance_events
+            WHERE employee_id = ? AND event_date LIKE ?
+            ORDER BY event_date ASC, event_time ASC, id ASC
+        """, (employee_id, f"{year:04d}-{month:02d}%"))
+        rows = c.fetchall()
+
+        # 按 event_date 聚合
+        days = {}
+        for row in rows:
+            d = row[0]
+            days.setdefault(d, []).append({'action': row[1], 'event_time': row[2]})
+
+        result = []
+        for d, events in days.items():
+            check_in = None
+            check_out = None
+            online = 0
+            online_since = None
+            for ev in events:
+                if ev['action'] == 'check_in' or ev['action'] == 'resume':
+                    if check_in is None:
+                        check_in = ev['event_time']
+                    online_since = ev['event_time']
+                elif ev['action'] == 'away' or ev['action'] == 'check_out':
+                    if online_since is not None:
+                        online += ev['event_time'] - online_since
+                        online_since = None
+                    if ev['action'] == 'check_out':
+                        check_out = ev['event_time']
+            if online_since is not None:
+                online += int(time.time()) - online_since
+
+            # 判断当天排班状态
+            weekday = datetime.strptime(d, '%Y-%m-%d').weekday()
+            rest_days = get_employee_weekly_rest(employee_id)
+            temp = get_employee_temp_schedule(employee_id, d)
+
+            if temp == 'rest':
+                schedule = 'rest'
+            elif temp == 'makeup':
+                schedule = 'work'
+            elif weekday in rest_days:
+                schedule = 'rest'
+            else:
+                schedule = 'work'
+
+            # 状态判定：先用关键字段（是否有打卡），再用排班细分
+            if check_in is None:
+                if schedule == 'rest':
+                    day_status = 'rest'
+                else:
+                    day_status = 'no_record'  # 应上班但无打卡
+            else:
+                day_status = 'normal'
+                # 迟到判定：打卡时间晚于排班上班时间
+                work_time = get_employee_work_time(employee_id)
+                if work_time and schedule == 'work':
+                    ws_h, ws_m = int(work_time['work_start'].split(':')[0]), int(work_time['work_start'].split(':')[1])
+                    check_in_dt = datetime.fromtimestamp(check_in, timezone(timedelta(hours=8)))
+                    if check_in_dt.hour * 60 + check_in_dt.minute > ws_h * 60 + ws_m:
+                        day_status = 'late'
+
+            result.append({
+                'date': d,
+                'check_in': check_in,
+                'check_out': check_out,
+                'online_duration': online,
+                'status': day_status,
+                'schedule': schedule,
+            })
+
+        return sorted(result, key=lambda x: x['date'])
+    except Exception as e:
+        logger.error(f"获取月度考勤失败: {e}")
+        return []
+    finally:
+        conn.close()
