@@ -168,6 +168,7 @@ async def employee_menu(update: Update, context: CallbackContext):
         [InlineKeyboardButton("🏆 激励奖开关", callback_data='employee_incentive_settings')],
         [InlineKeyboardButton("🏢 公司费用设置", callback_data='employee_company_fee')],
         [InlineKeyboardButton("📊 统计报表", callback_data='employee_statistics')],
+        [InlineKeyboardButton("📋 考勤看板", callback_data='attendance_dashboard')],
         [InlineKeyboardButton("⬅️ 返回", callback_data='profile')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
