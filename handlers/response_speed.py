@@ -44,6 +44,16 @@ CLOSING_WORDS = {
 }
 CLOSING_EMOJIS = {'👍', '👌', '🙏', '😊', '✅', '😄', '😁', '🆗', '💯'}
 
+# ========== 客服无效回应词典：客服仅发送这些消息时不算作有效响应（不结束本次响应计时） ==========
+INVALID_OPERATOR_REPLY_WORDS = {'1'}
+
+
+def is_invalid_operator_reply(text: str) -> bool:
+    """判断客服回复是否为无效回应（如敷衍的"1"），无效回应不计入响应速度，客户消息继续等待真正回复"""
+    if not text:
+        return False
+    return text.strip().lower() in INVALID_OPERATOR_REPLY_WORDS
+
 # ========== 机器人触发指令模式：触发机器人回复的消息不计入响应统计 ==========
 BOT_TRIGGER_PATTERNS = [
     r'^[+-]\d',                                                           # 记账：+100 或 -100
@@ -348,6 +358,11 @@ async def monitor_group_messages(update: Update, context: ContextTypes.DEFAULT_T
     operators = list_operators()
 
     if user_id in operators:
+        # 客服发送敷衍消息（如"1"）不算有效回应：直接忽略，不标记已响应、不清空待响应，
+        # 客户消息继续保留，等客服发送真正回复时再计时
+        if is_invalid_operator_reply(message.text):
+            return
+
         # 操作员分支：任何消息类型（文本/表情/Sticker/图片/文件）都算响应
         if chat_id in pending_customer_messages and pending_customer_messages[chat_id]:
             sorted_msg_ids = sorted(pending_customer_messages[chat_id].keys())
