@@ -69,7 +69,7 @@ from handlers.profile import (
     profile_edit_performance_start, profile_edit_loss_start,
     profile_delete_performance_start, profile_delete_loss_start,
     profile_cancel,
-    # 考勤打卡
+    # 在线状态
     profile_attendance, profile_attendance_action,
 )
 from handlers.employee import register_employee_handlers, check_task_reminders, check_overdue_tasks
@@ -1819,7 +1819,7 @@ def main():
             CallbackQueryHandler(profile_performance_menu, pattern="^profile_performance_menu$"),
             CallbackQueryHandler(profile_performance_record_start, pattern="^profile_performance_record$"),
             CallbackQueryHandler(profile_performance_view_start, pattern="^profile_performance_view$"),
-            # 考勤打卡
+            # 在线状态
             CallbackQueryHandler(profile_attendance, pattern="^profile_attendance$"),
             CallbackQueryHandler(profile_attendance_action, pattern="^profile_att_"),
         ],
