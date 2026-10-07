@@ -112,7 +112,7 @@ def _classify_offline_scenario(emp_id: int, status_info: dict, now_ts: int) -> s
     if status == 'away':
         return 'away'
 
-    # 手动打卡下班且当前仍在排班时间内 -> 提前下线
+    # 手动打卡下线且当前仍在排班时间内 -> 提前下线
     if status == 'offline' and is_scheduled_work_time(emp_id, now_ts):
         return 'early_off'
 
