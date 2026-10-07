@@ -1200,7 +1200,7 @@ async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("response_"):
         return
 
-    # ===== ✅ 让管理员考勤看板处理考勤看板相关的回调 =====
+    # ===== ✅ 让管理员在线状态看板处理在线状态看板相关的回调 =====
     if data.startswith("attendance_") or data.startswith("att_"):
         return
 
