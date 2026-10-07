@@ -18,7 +18,7 @@ CST = timezone(timedelta(hours=8))
 STATUS_DISPLAY = {
     'online': '🟢 在线',
     'away': '🟡 离开',
-    'offline': '⚫ 已下班',
+    'offline': '⚫ 已下线',
     'scheduled_on': '🔵 在岗(未打卡)',
     'scheduled_off': '⚪ 休息',
 }
@@ -47,7 +47,7 @@ def _fmt_duration(seconds):
 
 
 async def attendance_dashboard(update: Update, context: CallbackContext):
-    """管理员考勤看板 - 全员今日实时状态"""
+    """管理员在线状态看板 - 全员今日实时状态"""
     query = update.callback_query
     if query.from_user.id != OWNER_ID:
         await query.answer("❌ 无权限", show_alert=True)
@@ -56,7 +56,7 @@ async def attendance_dashboard(update: Update, context: CallbackContext):
 
     records = get_all_operators_today_status()
 
-    text = "📋 **考勤看板（今日实时）**\n\n"
+    text = "📋 **在线状态看板（今日实时）**\n\n"
     if not records:
         text += "暂无操作员\n"
     else:
@@ -66,14 +66,14 @@ async def attendance_dashboard(update: Update, context: CallbackContext):
             dur = _fmt_duration(r['online_duration'])
             name = safe_escape_markdown(r['name'])
             text += f"{status_text} {name}\n"
-            text += f"  上班打卡：{ci}  在线时长：{dur}\n\n"
+            text += f"  上线打卡：{ci}  在线时长：{dur}\n\n"
 
     now = datetime.now(CST)
     text += f"更新时间：{now.strftime('%H:%M:%S')}"
 
     keyboard = []
     if records:
-        keyboard.append([InlineKeyboardButton("📊 月度考勤明细", callback_data='att_month_select')])
+        keyboard.append([InlineKeyboardButton("📊 月度在线状态明细", callback_data='att_month_select')])
     keyboard.append([InlineKeyboardButton("🔄 刷新", callback_data='attendance_dashboard')])
     keyboard.append([InlineKeyboardButton("⬅️ 返回员工管理", callback_data='employee_menu')])
 
@@ -85,7 +85,7 @@ async def attendance_dashboard(update: Update, context: CallbackContext):
 
 
 async def attendance_month_select(update: Update, context: CallbackContext):
-    """选择员工查看月度考勤"""
+    """选择员工查看月度在线状态"""
     query = update.callback_query
     if query.from_user.id != OWNER_ID:
         await query.answer("❌ 无权限", show_alert=True)
@@ -103,7 +103,7 @@ async def attendance_month_select(update: Update, context: CallbackContext):
     keyboard.append([InlineKeyboardButton("⬅️ 返回", callback_data='attendance_dashboard')])
 
     await query.edit_message_text(
-        "📊 **月度考勤明细**\n\n选择要查看的员工：",
+        "📊 **月度在线状态明细**\n\n选择要查看的员工：",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
     )
@@ -142,14 +142,14 @@ async def attendance_emp_months(update: Update, context: CallbackContext):
     keyboard.append([InlineKeyboardButton("⬅️ 返回", callback_data='att_month_select')])
 
     await query.edit_message_text(
-        f"📅 **{safe_escape_markdown(name)} 的考勤**\n\n选择月份：",
+        f"📅 **{safe_escape_markdown(name)} 的在线状态**\n\n选择月份：",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
     )
 
 
 async def attendance_month_detail(update: Update, context: CallbackContext):
-    """查看员工某月考勤明细"""
+    """查看员工某月在线状态明细"""
     query = update.callback_query
     if query.from_user.id != OWNER_ID:
         await query.answer("❌ 无权限", show_alert=True)
@@ -166,7 +166,7 @@ async def attendance_month_detail(update: Update, context: CallbackContext):
 
     records = get_employee_monthly_attendance(emp_id, year, month)
 
-    text = f"📊 **{safe_escape_markdown(name)} {year}年{month}月考勤**\n\n"
+    text = f"📊 **{safe_escape_markdown(name)} {year}年{month}月在线状态**\n\n"
 
     if not records:
         text += "本月无打卡记录\n"
@@ -211,7 +211,7 @@ async def attendance_month_detail(update: Update, context: CallbackContext):
 
 
 def register_attendance_admin_handlers(application):
-    """注册管理员考勤看板处理器（独立 group，避免被 button_router 同组抢占）"""
+    """注册管理员在线状态看板处理器（独立 group，避免被 button_router 同组抢占）"""
     from telegram.ext import CallbackQueryHandler
 
     application.add_handler(
