@@ -103,7 +103,7 @@ def get_mentioned_operator_ids(message) -> set:
 def _classify_offline_scenario(emp_id: int, status_info: dict, now_ts: int) -> str:
     """细分员工离线场景：
     away        暂时离开（工作时间内挂起）
-    early_off   提前下班（已打卡下班，但当前仍在排班时间内）
+    early_off   提前下线（已打卡下线，但当前仍在排班时间内）
     rest_temp   临时休息（管理员设置的临时休息）
     rest_weekly 固定休息日（每周休息日）
     off_hours   非工作时间段
@@ -112,7 +112,7 @@ def _classify_offline_scenario(emp_id: int, status_info: dict, now_ts: int) -> s
     if status == 'away':
         return 'away'
 
-    # 手动打卡下班且当前仍在排班时间内 -> 提前下班
+    # 手动打卡下班且当前仍在排班时间内 -> 提前下线
     if status == 'offline' and is_scheduled_work_time(emp_id, now_ts):
         return 'early_off'
 
@@ -173,13 +173,13 @@ async def reply_offline_mentioned_employees(message):
         if scenario == 'away':
             lines.append(f"{name} 暂时离开中，稍后回来会立即回复您，您可以先留言说明需求。")
         elif scenario == 'early_off':
-            lines.append(f"{name} 今天已提前下班，请您留言说明需求，明天工作时间会尽快回复您。")
+            lines.append(f"{name} 今天已提前下线，请您留言说明需求，明天工作时间会尽快回复您。")
         elif scenario in ('rest_weekly', 'rest_temp'):
             rest_label = "休息" if scenario == 'rest_weekly' else "临时休息"
             if others_online:
-                lines.append(f"{name} 今天{rest_label}不在线，您可以联系群内其他在线客服，或留言说明需求，{name} 上班后会尽快回复您。")
+                lines.append(f"{name} 今天{rest_label}不在线，您可以联系群内其他在线客服，或留言说明需求，{name} 上线后会尽快回复您。")
             else:
-                lines.append(f"{name} 今天{rest_label}不在线，请您留言说明需求，上班后我们会尽快回复您。")
+                lines.append(f"{name} 今天{rest_label}不在线，请您留言说明需求，上线后我们会尽快回复您。")
         else:  # off_hours：非工作时间段
             work_time = get_employee_work_time(emp_id)
             time_hint = f"（工作时间 {work_time['work_start']}-{work_time['work_end']}）" if work_time else ""
@@ -202,7 +202,7 @@ ALL_EARLY_OFF_TEXT = (
     "您好，客服今天已提前结束工作，请您留言说明具体需求，我们会在明天工作时间尽快回复您。"
 )
 ALL_REST_TEXT = (
-    "您好，今天是休息日，客服不在线。请您留言说明具体需求，上班后我们会尽快回复您。"
+    "您好，今天是休息日，客服不在线。请您留言说明具体需求，上线后我们会尽快回复您。"
 )
 ALL_OFFLINE_AFTER_HOURS_TEXT = (
     "您好，当前为非工作时间{time_hint}，客服暂时不在线。"
@@ -268,11 +268,11 @@ async def reply_when_all_staff_offline(message):
 
     all_offline_reply_cache[message.chat_id] = now_ts
 
-    # 场景优先级：暂时离开 > 提前下班 > 全员休息日 > 非工作时间
+    # 场景优先级：暂时离开 > 提前下线 > 全员休息日 > 非工作时间
     if any_away_in_shift:
         scenario_key, text = '暂时离开', ALL_AWAY_TEXT
     elif any_early_off:
-        scenario_key, text = '提前下班', ALL_EARLY_OFF_TEXT
+        scenario_key, text = '提前下线', ALL_EARLY_OFF_TEXT
     elif all_rest:
         scenario_key, text = '休息日', ALL_REST_TEXT
     else:
@@ -697,7 +697,7 @@ async def _render_weekly_rest(query, emp_id: int):
     try:
         await query.edit_message_text(
             "📅 **设置每周休息日**\n\n"
-            "点击切换休息/上班（✅=休息）：",
+            "点击切换休息/上线（✅=休息）：",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode='Markdown'
         )
