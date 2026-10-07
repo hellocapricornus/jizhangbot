@@ -7450,10 +7450,10 @@ def get_employee_monthly_attendance(employee_id: int, year: int, month: int) -> 
                 if schedule == 'rest':
                     day_status = 'rest'
                 else:
-                    day_status = 'no_record'  # 应上班但无打卡
+                    day_status = 'no_record'  # 应上线但无打卡
             else:
                 day_status = 'normal'
-                # 迟到判定：打卡时间晚于排班上班时间
+                # 迟到判定：打卡时间晚于排班上线时间
                 work_time = get_employee_work_time(employee_id)
                 if work_time and schedule == 'work':
                     ws_h, ws_m = int(work_time['work_start'].split(':')[0]), int(work_time['work_start'].split(':')[1])
