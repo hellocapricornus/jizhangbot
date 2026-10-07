@@ -137,7 +137,7 @@ async def _build_profile_menu(user_id: int, prefs: dict = None, display_name: st
         if work_time:
             response_info += f"⏰ 工作时间：{work_time['work_start']}-{work_time['work_end']}\n"
 
-        # 当前考勤状态（超级管理员不显示）
+        # 当前在线状态（超级管理员不显示）
         if user_id != OWNER_ID:
             att_info = get_effective_online_status(user_id)
             response_info += f"🕐 当前状态：{ATTENDANCE_STATUS_TEXT.get(att_info['status'], att_info['status'])}\n"
