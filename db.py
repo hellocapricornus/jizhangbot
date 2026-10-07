@@ -3203,7 +3203,7 @@ def init_response_tables():
             )
         """)
 
-        # ========== 考勤排班相关表 ==========
+        # ========== 在线状态排班相关表 ==========
         c.execute("""
             CREATE TABLE IF NOT EXISTS attendance_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -6728,7 +6728,7 @@ def init_response_tables():
             )
         """)
 
-        # ========== 考勤排班相关表 ==========
+        # ========== 在线状态排班相关表 ==========
         c.execute("""
             CREATE TABLE IF NOT EXISTS attendance_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -7063,7 +7063,7 @@ ATTENDANCE_ACTION_NAMES = {
 
 
 def _get_shift_date(employee_id: int, check_time: int) -> str:
-    """计算考勤归属日期（跨天班次的凌晨时段归属于前一天的班次）"""
+    """计算在线状态归属日期（跨天班次的凌晨时段归属于前一天的班次）"""
     dt = datetime.fromtimestamp(check_time, timezone(timedelta(hours=8)))
     work_time = get_employee_work_time(employee_id)
     if work_time:
@@ -7083,10 +7083,10 @@ def _is_time_in_work_segment(employee_id: int, check_time: int) -> bool:
     return is_in_work_time(employee_id, check_time)
 
 
-# ---------- 考勤事件流水 ----------
+# ---------- 在线状态事件流水 ----------
 
 def add_attendance_event(employee_id: int, action: str, event_time: int = None) -> bool:
-    """记录考勤事件：check_in / away / resume / check_out"""
+    """记录在线状态事件：check_in / away / resume / check_out"""
     if action not in ATTENDANCE_ACTION_NAMES:
         return False
     if event_time is None:
@@ -7103,14 +7103,14 @@ def add_attendance_event(employee_id: int, action: str, event_time: int = None) 
         conn.commit()
         return True
     except Exception as e:
-        logger.error(f"记录考勤事件失败: {e}")
+        logger.error(f"记录在线状态事件失败: {e}")
         return False
     finally:
         conn.close()
 
 
 def get_employee_status_at(employee_id: int, check_time: int = None):
-    """回放考勤事件，判断员工在指定时刻的手动状态。
+    """回放在线状态事件，判断员工在指定时刻的手动状态。
     返回 'online' / 'away' / 'offline' / None（无打卡记录）
     """
     if check_time is None:
@@ -7143,7 +7143,7 @@ def get_employee_status_at(employee_id: int, check_time: int = None):
 
 
 def get_employee_today_events(employee_id: int, check_time: int = None) -> List[Dict]:
-    """获取员工今日（考勤日）的打卡事件列表"""
+    """获取员工今日（在线状态）的打卡事件列表"""
     if check_time is None:
         check_time = int(time.time())
     shift_date = _get_shift_date(employee_id, check_time)
@@ -7158,7 +7158,7 @@ def get_employee_today_events(employee_id: int, check_time: int = None) -> List[
         """, (employee_id, shift_date))
         return [{'action': row[0], 'event_time': row[1]} for row in c.fetchall()]
     except Exception as e:
-        logger.error(f"获取今日考勤事件失败: {e}")
+        logger.error(f"获取今日在线状态事件失败: {e}")
         return []
     finally:
         conn.close()
@@ -7359,7 +7359,7 @@ def is_effectively_online(employee_id: int, check_time: int = None) -> bool:
     return get_effective_online_status(employee_id, check_time)['online']
 
 
-# ========== 管理员考勤看板查询 ==========
+# ========== 管理员在线状态看板查询 ==========
 
 def get_all_operators_today_status() -> List[Dict]:
     """获取所有操作员今日实时状态（用于管理员看板，排除超级管理员）"""
@@ -7394,7 +7394,7 @@ def get_all_operators_today_status() -> List[Dict]:
 
 
 def get_employee_monthly_attendance(employee_id: int, year: int, month: int) -> List[Dict]:
-    """获取员工某月每日考勤汇总（按考勤日聚合）"""
+    """获取员工某月每日在线状态汇总（按在线状态日聚合）"""
     conn = get_db_connection()
     c = conn.cursor()
     try:
@@ -7472,7 +7472,7 @@ def get_employee_monthly_attendance(employee_id: int, year: int, month: int) -> 
 
         return sorted(result, key=lambda x: x['date'])
     except Exception as e:
-        logger.error(f"获取月度考勤失败: {e}")
+        logger.error(f"获取月度在线状态失败: {e}")
         return []
     finally:
         conn.close()
