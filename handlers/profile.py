@@ -105,9 +105,9 @@ async def _build_profile_menu(user_id: int, prefs: dict = None, display_name: st
     if is_authorized(user_id):
         keyboard.append([InlineKeyboardButton("⚡ 员工响应速度", callback_data="response_speed_menu")])
 
-    # ========== 考勤打卡（员工可见，超级管理员不需要打卡） ==========
+    # ========== 在线状态（员工可见，超级管理员不需要打卡） ==========
     if is_authorized(user_id) and user_id != OWNER_ID:
-        keyboard.append([InlineKeyboardButton("🕐 考勤打卡", callback_data="profile_attendance")])
+        keyboard.append([InlineKeyboardButton("🕐 在线状态", callback_data="profile_attendance")])
 
     # ========== 员工管理（超级管理员）/ 我的任务（员工） ==========
     if user_id == OWNER_ID:
@@ -3284,9 +3284,9 @@ async def _build_profile_menu(user_id: int, prefs: dict = None, display_name: st
     if is_authorized(user_id):
         keyboard.append([InlineKeyboardButton("⚡ 员工响应速度", callback_data="response_speed_menu")])
 
-    # ========== 考勤打卡（员工可见，超级管理员不需要打卡） ==========
+    # ========== 在线状态（员工可见，超级管理员不需要打卡） ==========
     if is_authorized(user_id) and user_id != OWNER_ID:
-        keyboard.append([InlineKeyboardButton("🕐 考勤打卡", callback_data="profile_attendance")])
+        keyboard.append([InlineKeyboardButton("🕐 在线状态", callback_data="profile_attendance")])
 
     # ========== 员工管理（超级管理员）/ 我的任务（员工） ==========
     if user_id == OWNER_ID:
@@ -6358,21 +6358,21 @@ async def profile_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-# ==================== 考勤打卡 ====================
+# ==================== 在线状态 ====================
 
 ATTENDANCE_STATUS_TEXT = {
     'online': '🟢 在线（已打卡）',
     'away': '🟡 暂时离开',
-    'offline': '⚫ 已下班',
+    'offline': '⚫ 已下线',
     'scheduled_on': '🔵 在岗（按排班，未打卡）',
     'scheduled_off': '⚪ 休息（按排班）',
 }
 
 ATTENDANCE_ACTION_LABELS = {
-    'check_in': '上班打卡',
+    'check_in': '上线打卡',
     'away': '暂时离开',
     'resume': '恢复服务',
-    'check_out': '下班打卡',
+    'check_out': '下线打卡',
 }
 
 
@@ -6387,7 +6387,7 @@ def _format_duration(seconds: int) -> str:
 
 
 async def _render_attendance_page(query):
-    """渲染考勤打卡页面（不调用 query.answer，避免重复应答）"""
+    """渲染在线状态页面（不调用 query.answer，避免重复应答）"""
     user_id = query.from_user.id
 
     now_ts = int(datetime.now(timezone(timedelta(hours=8))).timestamp())
@@ -6400,7 +6400,7 @@ async def _render_attendance_page(query):
     events = get_employee_today_events(user_id, now_ts)
     duration = get_today_online_duration(user_id, now_ts)
 
-    text = "🕐 **考勤打卡**\n\n"
+    text = "🕐 **在线状态**\n\n"
     text += f"当前状态：{status_text}\n"
     text += f"排班时间：{time_text}\n"
     text += f"今日在线时长：{_format_duration(duration)}\n"
@@ -6416,15 +6416,15 @@ async def _render_attendance_page(query):
     keyboard = []
     if cur == 'online':
         keyboard.append([InlineKeyboardButton("🟡 暂时离开", callback_data='profile_att_away')])
-        keyboard.append([InlineKeyboardButton("⚫ 下班打卡", callback_data='profile_att_check_out')])
+        keyboard.append([InlineKeyboardButton("⚫ 下线打卡", callback_data='profile_att_check_out')])
     elif cur == 'away':
         keyboard.append([InlineKeyboardButton("🟢 恢复服务", callback_data='profile_att_resume')])
-        keyboard.append([InlineKeyboardButton("⚫ 下班打卡", callback_data='profile_att_check_out')])
+        keyboard.append([InlineKeyboardButton("⚫ 下线打卡", callback_data='profile_att_check_out')])
     elif cur == 'offline':
-        keyboard.append([InlineKeyboardButton("🟢 重新上班打卡", callback_data='profile_att_check_in')])
+        keyboard.append([InlineKeyboardButton("🟢 重新上线打卡", callback_data='profile_att_check_in')])
     else:
         # scheduled_on / scheduled_off：未打卡
-        keyboard.append([InlineKeyboardButton("🟢 上班打卡", callback_data='profile_att_check_in')])
+        keyboard.append([InlineKeyboardButton("🟢 上线打卡", callback_data='profile_att_check_in')])
 
     keyboard.append([InlineKeyboardButton("⬅️ 返回个人中心", callback_data='profile')])
 
@@ -6436,14 +6436,14 @@ async def _render_attendance_page(query):
 
 
 async def profile_attendance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """考勤打卡页面"""
+    """在线状态页面"""
     query = update.callback_query
     await query.answer()
     await _render_attendance_page(query)
 
 
 async def profile_attendance_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理打卡操作"""
+    """处理在线操作"""
     query = update.callback_query
     user_id = query.from_user.id
 
