@@ -227,7 +227,7 @@ async def reply_when_all_staff_offline(message):
     if now_ts - all_offline_reply_cache.get(message.chat_id, 0) < ALL_OFFLINE_REPLY_COOLDOWN:
         return  # 冷却期内不重复提醒
 
-    # 排除超级管理员（超管不参与考勤）
+    # 排除超级管理员（超管不参与在线状态）
     operators = {uid: info for uid, info in list_operators().items() if uid != OWNER_ID}
 
     any_online = False
