@@ -191,7 +191,7 @@ async def attendance_month_detail(update: Update, context: CallbackContext):
             elif r['status'] == 'rest':
                 rest_count += 1
 
-            lines.append(f"{date_md}  {status_text}  上班{ci}  下班{co}  在线{dur}")
+            lines.append(f"{date_md}  {status_text}  上线{ci}  下线{co}  在线{dur}")
 
         text += "\n".join(lines)
         text += f"\n\n━━━━━━━━━━━━━━━\n"
