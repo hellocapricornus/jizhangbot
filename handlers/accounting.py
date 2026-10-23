@@ -1539,11 +1539,26 @@ class AccountingManager:
             return None
 
     def get_all_category_configs(self, group_id: str) -> dict:
-        """获取该群代付配置，返回 {'daifu': {...}} 或空 dict"""
+        """获取该群所有分组配置（含代付与自定义分组），返回 {config_type: {...}}"""
         result = {}
-        cfg = self.get_category_config(group_id, 'daifu')
-        if cfg:
-            result['daifu'] = cfg
+        try:
+            with self._get_conn() as conn:
+                c = conn.cursor()
+                c.execute(
+                    "SELECT config_type, fee_rate, exchange_rate, per_transaction_fee "
+                    "FROM accounting_category_config WHERE group_id = ? "
+                    "ORDER BY updated_at DESC",
+                    (group_id,)
+                )
+                for row in c.fetchall():
+                    result[row[0]] = {
+                        'fee_rate': row[1],
+                        'exchange_rate': row[2],
+                        'per_transaction_fee': row[3],
+                        'has_config': True
+                    }
+        except Exception as e:
+            logger.error(f"获取分组配置列表失败: {e}")
         return result
 
     def delete_category_config(self, group_id: str, config_type: str) -> bool:
@@ -3743,6 +3758,198 @@ async def safe_reply_text(message, text: str, parse_mode: str = None, max_retrie
     logger.error(f"safe_reply 所有重试均失败 | 最后错误: {last_error}")
     return None
 
+
+# ==================== 自定义分组配置 ====================
+
+# 自定义分组名称不可使用的保留前缀（避免与现有命令冲突）
+_RESERVED_CONFIG_NAME_PREFIXES = ('@', '手续费', '汇率', '单笔费用', '日切', '代付', '代收')
+
+
+def parse_custom_category_setting(text: str):
+    """
+    解析「设置<分组名> 手续费x 汇率y 单笔费用z」
+    返回 (name, fee_rate, exchange_rate, per_transaction_fee)，不匹配返回 None
+    """
+    if not text.startswith('设置'):
+        return None
+
+    rest = text[2:].strip()
+    parts = rest.split(None, 1)
+    if len(parts) != 2:
+        return None
+
+    name, param_text = parts[0].strip(), parts[1]
+    if not name or '+' in name or name.startswith(_RESERVED_CONFIG_NAME_PREFIXES):
+        return None
+
+    fee_match = re.search(r'手续费\s*(-?\d+(?:\.\d+)?)', param_text)
+    rate_match = re.search(r'汇率\s*(\d+(?:\.\d+)?)', param_text)
+    per_match = re.search(r'单笔费用\s*(\d+(?:\.\d+)?)', param_text)
+
+    if not (fee_match or rate_match or per_match):
+        return None
+
+    return (
+        name,
+        float(fee_match.group(1)) if fee_match else None,
+        float(rate_match.group(1)) if rate_match else None,
+        float(per_match.group(1)) if per_match else None,
+    )
+
+
+async def handle_custom_category_settings(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
+    """设置自定义分组配置，如：设置换汇杀 手续费12 汇率2670"""
+    message = update.message
+    chat = update.effective_chat
+
+    if chat.type not in ['group', 'supergroup']:
+        await message.reply_text("❌ 此功能仅在群组中可用")
+        return
+
+    if not _is_authorized_in_group(update, full_access=True):
+        await message.reply_text("❌ 此操作需要管理员权限")
+        return
+
+    parsed = parse_custom_category_setting(text)
+    if not parsed:
+        return
+
+    name, fee_val, rate_val, per_val = parsed
+    group_id = str(chat.id)
+
+    if not accounting_manager.set_category_config(
+        group_id, name,
+        fee_rate=fee_val, exchange_rate=rate_val, per_transaction_fee=per_val
+    ):
+        await message.reply_text("❌ 设置失败，请稍后重试")
+        return
+
+    cfg = accounting_manager.get_category_config(group_id, name)
+    reply = f"✅ {name}配置已更新\n\n"
+    reply += f"💰 手续费：{cfg['fee_rate']}%\n"
+    reply += f"💱 汇率：{cfg['exchange_rate']}\n"
+    reply += f"📝 单笔费用：{cfg['per_transaction_fee']} 元\n\n"
+    reply += f"💡 记账时输入 `{name}+金额` 即可使用此配置，并自动归入「{name}」分组"
+    await message.reply_text(reply, parse_mode="Markdown")
+
+
+async def handle_category_income(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                                 type_name: str, cfg: dict, text: str,
+                                 default_category: str = ""):
+    """
+    使用指定分组配置处理「<分组名>+金额」记账
+    代付与自定义分组共用同一套解析逻辑
+    """
+    message = update.message
+    group_id = str(update.effective_chat.id)
+
+    # 获取当前会话默认配置，用于回退未设置的字段
+    session = accounting_manager.get_or_create_session(group_id)
+    default_rate = session['exchange_rate'] or 1.0
+    default_per_fee = session.get('per_transaction_fee', 0)
+
+    # 去掉分组名前缀，变成 "+金额..." 复用现有解析
+    new_text = text[len(type_name):]
+
+    try:
+        content = new_text[1:].strip() if new_text.startswith('+') else new_text.strip()
+        # 汇率为 None/0 时回退到会话默认值，防止除零
+        temp_rate = cfg['exchange_rate'] if cfg['exchange_rate'] else default_rate
+        temp_fee = cfg['fee_rate']
+        temp_per_fee = cfg['per_transaction_fee'] if cfg['per_transaction_fee'] is not None else default_per_fee
+        category = ""
+        amount_str = content
+
+        if '#' in content:
+            hash_index = content.index('#')
+            before_hash = content[:hash_index]
+            after_hash = content[hash_index + 1:]
+            per_fee_match = re.match(r'^(\d+(?:\.\d+)?)', after_hash)
+            if per_fee_match:
+                temp_per_fee = float(per_fee_match.group(1))
+                remaining = after_hash[per_fee_match.end():].strip()
+                if remaining:
+                    category = remaining
+            else:
+                await message.reply_text("❌ 单笔费用格式错误：#数字 或 #数字 备注")
+                return
+            content = before_hash.strip()
+            if not content:
+                await message.reply_text("❌ # 前面需要输入金额")
+                return
+            amount_str = content
+
+        if '*' in content:
+            star_parts = content.split('*', 1)
+            amount_str = star_parts[0].strip()
+            rest = star_parts[1].strip()
+            if '/' in rest:
+                fee_part, rate_part = rest.split('/', 1)
+                temp_fee_str = fee_part.replace('%', '').strip()
+                try:
+                    temp_fee = float(temp_fee_str)
+                except ValueError:
+                    pass
+                rate_part_clean = rate_part.split(' ', 1)[0].strip()
+                try:
+                    temp_rate = float(rate_part_clean)
+                except ValueError:
+                    pass
+                if ' ' in rate_part and not category:
+                    category = rate_part.split(' ', 1)[1].strip()
+            else:
+                fee_part = rest.split(' ', 1)[0].strip()
+                temp_fee_str = fee_part.replace('%', '').strip()
+                try:
+                    temp_fee = float(temp_fee_str)
+                except ValueError:
+                    pass
+                if ' ' in rest and not category:
+                    category = rest.split(' ', 1)[1].strip()
+        elif '/' in content:
+            parts = content.split('/', 1)
+            amount_str = parts[0].strip()
+            rest = parts[1].strip()
+            if ' ' in rest:
+                rate_part, cat = rest.split(' ', 1)
+                try:
+                    temp_rate = float(rate_part)
+                    if not category:
+                        category = cat
+                except ValueError:
+                    if not category:
+                        category = rest
+                    temp_rate = cfg['exchange_rate'] or default_rate
+            else:
+                try:
+                    temp_rate = float(rest)
+                except ValueError:
+                    if not category:
+                        category = rest
+                    temp_rate = cfg['exchange_rate'] or default_rate
+        else:
+            if ' ' in amount_str and not category:
+                parts = amount_str.split(' ', 1)
+                amount_str = parts[0]
+                category = parts[1]
+
+        if amount_str:
+            amount = float(amount_str)
+            # 未指定备注时，自动归入该配置对应的分组
+            if not category:
+                category = default_category
+            await handle_add_income(update, context, amount, is_correction=False,
+                                    category=category, temp_rate=temp_rate,
+                                    temp_fee=temp_fee, temp_per_fee=temp_per_fee)
+        else:
+            await message.reply_text(f"❌ 格式错误：{type_name}+金额 或 {type_name}+金额 备注")
+    except ValueError:
+        await message.reply_text("❌ 金额格式错误，请输入数字")
+    except Exception as e:
+        logger.error(f"解析{type_name}记账失败: {e}")
+        await message.reply_text("❌ 格式错误")
+
+
 async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理群组消息中的记账指令"""
     chat = update.effective_chat
@@ -3888,6 +4095,11 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
     if not is_authorized(message.from_user.id, require_full_access=False):
         return
 
+    # ========== 5.5 自定义分组配置（如：设置换汇杀 手续费12 汇率2670） ==========
+    if parse_custom_category_setting(text):
+        await handle_custom_category_settings(update, context, text)
+        return
+
     # ========== 6. 用户个性化配置（需要完整权限） ==========
     if is_authorized(message.from_user.id, require_full_access=True):
         if '设置' in text and ('手续费' in text or '汇率' in text or '单笔费用' in text) and ('@' in text or message.reply_to_message):
@@ -3902,6 +4114,18 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
     if text == '查看配置' or text == '查看设置':
         await handle_view_config(update, context)
         return
+
+    # ========== 7.5 自定义分组记账（如：换汇杀+100000） ==========
+    if '+' in text and not text.startswith('+'):
+        custom_name = text.split('+', 1)[0].strip()
+        if custom_name and ' ' not in custom_name:
+            custom_cfg = accounting_manager.get_category_config(str(chat.id), custom_name)
+            if custom_cfg:
+                await handle_category_income(
+                    update, context, custom_name, custom_cfg, text,
+                    default_category=custom_name
+                )
+                return
 
     # ========== 8. 组合设置检测（必须在单独设置之前） ==========
     settings_with_prefix = sum([
@@ -4038,6 +4262,25 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
         accounting_manager.delete_category_config(group_id, 'daifu')
         await message.reply_text("✅ 代付配置已删除")
         return
+    elif text.startswith('删除') and text.endswith('配置'):
+        # 删除自定义分组配置，如：删除换汇杀配置
+        if not _is_authorized_in_group(update, full_access=True):
+            await message.reply_text("❌ 此操作需要管理员权限")
+            return
+        name = text[2:-2].strip()
+        if not name or name.startswith('@'):
+            await message.reply_text(
+                "❌ 格式错误\n用法：`删除分组名配置`（如：删除换汇杀配置）",
+                parse_mode="Markdown"
+            )
+            return
+        group_id = str(chat.id)
+        if not accounting_manager.get_category_config(group_id, name):
+            await message.reply_text(f"❌ 未找到「{name}」配置")
+            return
+        accounting_manager.delete_category_config(group_id, name)
+        await message.reply_text(f"✅ {name}配置已删除")
+        return
 
     # ========== 10. 账单命令 ==========
     elif text == '结束账单':
@@ -4077,11 +4320,10 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
             await message.reply_text("❌ 此操作需要记账权限")
             return
         group_id = str(chat.id)
-        config_type = 'daifu'
         type_name = '代付'
 
         # 读取代付配置
-        cfg = accounting_manager.get_category_config(group_id, config_type)
+        cfg = accounting_manager.get_category_config(group_id, 'daifu')
         if not cfg:
             await message.reply_text(
                 f"❌ 尚未设置{type_name}配置\n"
@@ -4090,108 +4332,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
             )
             return
 
-        # 获取当前会话默认配置，用于回退未设置的字段
-        session = accounting_manager.get_or_create_session(group_id)
-        default_rate = session['exchange_rate'] or 1.0
-        default_per_fee = session.get('per_transaction_fee', 0)
-
-        # 去掉"代付"前缀，变成 "+金额..." 复用现有解析
-        new_text = text[2:]
-        # 重新走 +金额 的解析逻辑，但把配置值作为默认 temp 参数
-        # 汇率为 None/0 时回退到会话默认值，防止除零
-        try:
-            content = new_text[1:].strip()
-            temp_rate = cfg['exchange_rate'] if cfg['exchange_rate'] else default_rate
-            temp_fee = cfg['fee_rate']
-            temp_per_fee = cfg['per_transaction_fee'] if cfg['per_transaction_fee'] is not None else default_per_fee
-            category = ""
-            amount_str = content
-
-            if '#' in content:
-                hash_index = content.index('#')
-                before_hash = content[:hash_index]
-                after_hash = content[hash_index + 1:]
-                per_fee_match = re.match(r'^(\d+(?:\.\d+)?)', after_hash)
-                if per_fee_match:
-                    temp_per_fee = float(per_fee_match.group(1))
-                    remaining = after_hash[per_fee_match.end():].strip()
-                    if remaining:
-                        category = remaining
-                else:
-                    await message.reply_text("❌ 单笔费用格式错误：#数字 或 #数字 备注")
-                    return
-                content = before_hash.strip()
-                if not content:
-                    await message.reply_text("❌ # 前面需要输入金额")
-                    return
-                amount_str = content
-
-            if '*' in content:
-                star_parts = content.split('*', 1)
-                amount_str = star_parts[0].strip()
-                rest = star_parts[1].strip()
-                if '/' in rest:
-                    fee_part, rate_part = rest.split('/', 1)
-                    temp_fee_str = fee_part.replace('%', '').strip()
-                    try:
-                        temp_fee = float(temp_fee_str)
-                    except ValueError:
-                        pass
-                    rate_part_clean = rate_part.split(' ', 1)[0].strip()
-                    try:
-                        temp_rate = float(rate_part_clean)
-                    except ValueError:
-                        pass
-                    if ' ' in rate_part and not category:
-                        category = rate_part.split(' ', 1)[1].strip()
-                else:
-                    fee_part = rest.split(' ', 1)[0].strip()
-                    temp_fee_str = fee_part.replace('%', '').strip()
-                    try:
-                        temp_fee = float(temp_fee_str)
-                    except ValueError:
-                        pass
-                    if ' ' in rest and not category:
-                        category = rest.split(' ', 1)[1].strip()
-            elif '/' in content:
-                parts = content.split('/', 1)
-                amount_str = parts[0].strip()
-                rest = parts[1].strip()
-                if ' ' in rest:
-                    rate_part, cat = rest.split(' ', 1)
-                    try:
-                        temp_rate = float(rate_part)
-                        if not category:
-                            category = cat
-                    except ValueError:
-                        if not category:
-                            category = rest
-                        temp_rate = cfg['exchange_rate']
-                else:
-                    try:
-                        temp_rate = float(rest)
-                    except ValueError:
-                        if not category:
-                            category = rest
-                        temp_rate = cfg['exchange_rate']
-            else:
-                if ' ' in amount_str and not category:
-                    parts = amount_str.split(' ', 1)
-                    amount_str = parts[0]
-                    category = parts[1]
-
-            if amount_str:
-                amount = float(amount_str)
-                await handle_add_income(update, context, amount, is_correction=False,
-                                       category=category, temp_rate=temp_rate,
-                                       temp_fee=temp_fee, temp_per_fee=temp_per_fee)
-            else:
-                await message.reply_text(f"❌ 格式错误：{type_name}+金额 或 {type_name}+金额 备注")
-        except ValueError:
-            await message.reply_text("❌ 金额格式错误，请输入数字")
-        except Exception as e:
-            logger.error(f"解析{type_name}记账失败: {e}")
-            await message.reply_text("❌ 格式错误")
+        await handle_category_income(update, context, type_name, cfg, text)
         return
 
     # ========== 11. 入款 +金额 ==========
@@ -6744,13 +6885,25 @@ async def handle_view_config(update: Update, context: ContextTypes.DEFAULT_TYPE)
     reply += f"💱 汇率：{session['exchange_rate']}\n"
     reply += f"📝 单笔费用：{session.get('per_transaction_fee', 0)} 元\n"
 
+    category_configs = accounting_manager.get_all_category_configs(group_id)
+
     # 代付配置（有设置才显示）
-    daifu_cfg = accounting_manager.get_category_config(group_id, 'daifu')
+    daifu_cfg = category_configs.get('daifu')
     if daifu_cfg:
         reply += f"\n📤 **代付配置**\n"
         reply += f"💰 手续费：{daifu_cfg['fee_rate']}%\n"
         reply += f"💱 汇率：{daifu_cfg['exchange_rate']}\n"
         reply += f"📝 单笔费用：{daifu_cfg['per_transaction_fee']} 元\n"
+
+    # 自定义分组配置（有设置才显示）
+    custom_configs = {k: v for k, v in category_configs.items() if k != 'daifu'}
+    if custom_configs:
+        reply += f"\n📁 **自定义分组配置**（{len(custom_configs)}个）\n"
+        for name, cfg in custom_configs.items():
+            reply += f"\n📌 {name}\n"
+            reply += f"   手续费：{cfg['fee_rate']}%\n"
+            reply += f"   汇率：{cfg['exchange_rate']}\n"
+            reply += f"   单笔费用：{cfg['per_transaction_fee']} 元\n"
 
     # 日切配置
     cutoff_config = accounting_manager.get_daily_cutoff_config(group_id)
