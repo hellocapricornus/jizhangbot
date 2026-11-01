@@ -1723,7 +1723,7 @@ def get_performance_summary(year: int, month: int) -> dict:
         'channel_fee': 0, 'channel_fee_emp': 0, 'channel_fee_emp_name': '',
         'tech_fee': 0, 'tech_fee_emp': 0, 'tech_fee_emp_name': '',
         'response_award': 0, 'response_award_emp': 0, 'response_award_emp_name': '',
-        'response_award_rank': 0, 'avg_response_count': 0,
+        'response_award_rank': 0, 'response_award_count': 0, 'avg_response_count': 0,
         'response_award_cap': 0, 'response_award_capped': False,
         'response_award_ref_ids': [], 'response_award_ref_names': '',
         'response_award_ref_unqualified_names': '',
@@ -1819,10 +1819,12 @@ def get_performance_summary(year: int, month: int) -> dict:
                 if unqualified_ref_names:
                     company_fees['response_award_ref_unqualified_names'] = '、'.join(unqualified_ref_names)
 
-                # 方案B：只奖符合条件的员工中平均响应速度最快的一人
-                # （ranked 已按平均响应秒数升序，第一个合格者即最快一人）
+                # 方案：条件全部达标者中，取当月有效回复次数最多的一人
+                # （回复次数相同则平均响应更快者优先）
                 winner = 0
                 winner_beaten = 0
+                winner_count = -1
+                winner_avg = float('inf')
                 for emp_id, s in ranked:
                     if emp_id in ref_ids:
                         continue  # 参考人本人不参与评奖
@@ -1838,8 +1840,12 @@ def get_performance_summary(year: int, month: int) -> dict:
                     )
                     if beaten <= 0:
                         continue
-                    winner, winner_beaten = emp_id, beaten
-                    break  # 只取响应最快的一人，其余员工不再发奖
+                    # 达标者中取回复次数最多者；同次数时响应更快者优先
+                    if s['total_count'] > winner_count or (
+                        s['total_count'] == winner_count and emp_resp < winner_avg
+                    ):
+                        winner, winner_beaten = emp_id, beaten
+                        winner_count, winner_avg = s['total_count'], emp_resp
 
                 if winner:
                     factor = winner_beaten / total_ref
@@ -1856,21 +1862,28 @@ def get_performance_summary(year: int, month: int) -> dict:
                     employee_data[winner]['response_award_capped'] = capped
                     employee_data[winner]['response_award_beaten'] = winner_beaten
                     employee_data[winner]['response_award_total_ref'] = total_ref
+                    employee_data[winner]['response_award_count'] = winner_count
+                    company_fees['response_award_count'] = winner_count
                     company_fees['response_award'] = award
                     company_fees['response_award_emp'] = winner
                     company_fees['response_award_emp_name'] = employee_data[winner]['name']
                     company_fees['response_award_cap'] = award_cap
                     company_fees['response_award_capped'] = capped
             elif ranked:
-                # ===== 旧逻辑（未设参考人）：第一名获奖，响应次数低于平均值则顺延 =====
+                # ===== 未设参考人：达标员工中，有效回复次数最多者获奖 =====
                 company_fees['response_award_mode'] = 'rank'
                 avg_count = sum(s['total_count'] for _, s in ranked) / len(ranked)
                 company_fees['avg_response_count'] = round(avg_count, 1)
-                winner, winner_rank = None, 0
-                for rank, (emp_id, s) in enumerate(ranked, start=1):
-                    if s['total_count'] >= avg_count:
-                        winner, winner_rank = emp_id, rank
-                        break
+                winner, winner_count, winner_avg = None, -1, float('inf')
+                for emp_id, s in ranked:
+                    if s['total_count'] < avg_count:
+                        continue
+                    emp_resp = s.get('avg_response_seconds', float('inf')) or float('inf')
+                    # 回复次数最多者优先；同次数时响应更快者优先
+                    if s['total_count'] > winner_count or (
+                        s['total_count'] == winner_count and emp_resp < winner_avg
+                    ):
+                        winner, winner_count, winner_avg = emp_id, s['total_count'], emp_resp
                 if winner:
                     _ensure_fee_employee(winner)
                     award = company_total_profit * response_award_rate
@@ -1881,13 +1894,13 @@ def get_performance_summary(year: int, month: int) -> dict:
                     award = round(award, 2)
                     employee_data[winner]['response_award'] = award
                     employee_data[winner]['response_award_rate'] = response_award_rate
-                    employee_data[winner]['response_award_rank'] = winner_rank
+                    employee_data[winner]['response_award_count'] = winner_count
                     employee_data[winner]['response_award_cap'] = award_cap
                     employee_data[winner]['response_award_capped'] = capped
                     company_fees['response_award'] = award
                     company_fees['response_award_emp'] = winner
                     company_fees['response_award_emp_name'] = employee_data[winner]['name']
-                    company_fees['response_award_rank'] = winner_rank
+                    company_fees['response_award_count'] = winner_count
                     company_fees['response_award_cap'] = award_cap
                     company_fees['response_award_capped'] = capped
 
@@ -5248,7 +5261,7 @@ def get_performance_summary(year: int, month: int) -> dict:
         'channel_fee': 0, 'channel_fee_emp': 0, 'channel_fee_emp_name': '',
         'tech_fee': 0, 'tech_fee_emp': 0, 'tech_fee_emp_name': '',
         'response_award': 0, 'response_award_emp': 0, 'response_award_emp_name': '',
-        'response_award_rank': 0, 'avg_response_count': 0,
+        'response_award_rank': 0, 'response_award_count': 0, 'avg_response_count': 0,
         'response_award_cap': 0, 'response_award_capped': False,
         'response_award_ref_ids': [], 'response_award_ref_names': '',
         'response_award_ref_unqualified_names': '',
@@ -5344,10 +5357,12 @@ def get_performance_summary(year: int, month: int) -> dict:
                 if unqualified_ref_names:
                     company_fees['response_award_ref_unqualified_names'] = '、'.join(unqualified_ref_names)
 
-                # 方案B：只奖符合条件的员工中平均响应速度最快的一人
-                # （ranked 已按平均响应秒数升序，第一个合格者即最快一人）
+                # 方案：条件全部达标者中，取当月有效回复次数最多的一人
+                # （回复次数相同则平均响应更快者优先）
                 winner = 0
                 winner_beaten = 0
+                winner_count = -1
+                winner_avg = float('inf')
                 for emp_id, s in ranked:
                     if emp_id in ref_ids:
                         continue  # 参考人本人不参与评奖
@@ -5363,8 +5378,12 @@ def get_performance_summary(year: int, month: int) -> dict:
                     )
                     if beaten <= 0:
                         continue
-                    winner, winner_beaten = emp_id, beaten
-                    break  # 只取响应最快的一人，其余员工不再发奖
+                    # 达标者中取回复次数最多者；同次数时响应更快者优先
+                    if s['total_count'] > winner_count or (
+                        s['total_count'] == winner_count and emp_resp < winner_avg
+                    ):
+                        winner, winner_beaten = emp_id, beaten
+                        winner_count, winner_avg = s['total_count'], emp_resp
 
                 if winner:
                     factor = winner_beaten / total_ref
@@ -5381,21 +5400,28 @@ def get_performance_summary(year: int, month: int) -> dict:
                     employee_data[winner]['response_award_capped'] = capped
                     employee_data[winner]['response_award_beaten'] = winner_beaten
                     employee_data[winner]['response_award_total_ref'] = total_ref
+                    employee_data[winner]['response_award_count'] = winner_count
+                    company_fees['response_award_count'] = winner_count
                     company_fees['response_award'] = award
                     company_fees['response_award_emp'] = winner
                     company_fees['response_award_emp_name'] = employee_data[winner]['name']
                     company_fees['response_award_cap'] = award_cap
                     company_fees['response_award_capped'] = capped
             elif ranked:
-                # ===== 旧逻辑（未设参考人）：第一名获奖，响应次数低于平均值则顺延 =====
+                # ===== 未设参考人：达标员工中，有效回复次数最多者获奖 =====
                 company_fees['response_award_mode'] = 'rank'
                 avg_count = sum(s['total_count'] for _, s in ranked) / len(ranked)
                 company_fees['avg_response_count'] = round(avg_count, 1)
-                winner, winner_rank = None, 0
-                for rank, (emp_id, s) in enumerate(ranked, start=1):
-                    if s['total_count'] >= avg_count:
-                        winner, winner_rank = emp_id, rank
-                        break
+                winner, winner_count, winner_avg = None, -1, float('inf')
+                for emp_id, s in ranked:
+                    if s['total_count'] < avg_count:
+                        continue
+                    emp_resp = s.get('avg_response_seconds', float('inf')) or float('inf')
+                    # 回复次数最多者优先；同次数时响应更快者优先
+                    if s['total_count'] > winner_count or (
+                        s['total_count'] == winner_count and emp_resp < winner_avg
+                    ):
+                        winner, winner_count, winner_avg = emp_id, s['total_count'], emp_resp
                 if winner:
                     _ensure_fee_employee(winner)
                     award = company_total_profit * response_award_rate
@@ -5406,13 +5432,13 @@ def get_performance_summary(year: int, month: int) -> dict:
                     award = round(award, 2)
                     employee_data[winner]['response_award'] = award
                     employee_data[winner]['response_award_rate'] = response_award_rate
-                    employee_data[winner]['response_award_rank'] = winner_rank
+                    employee_data[winner]['response_award_count'] = winner_count
                     employee_data[winner]['response_award_cap'] = award_cap
                     employee_data[winner]['response_award_capped'] = capped
                     company_fees['response_award'] = award
                     company_fees['response_award_emp'] = winner
                     company_fees['response_award_emp_name'] = employee_data[winner]['name']
-                    company_fees['response_award_rank'] = winner_rank
+                    company_fees['response_award_count'] = winner_count
                     company_fees['response_award_cap'] = award_cap
                     company_fees['response_award_capped'] = capped
 
