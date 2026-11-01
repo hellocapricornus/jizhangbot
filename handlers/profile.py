@@ -865,14 +865,14 @@ async def profile_performance_menu(update: Update, context: ContextTypes.DEFAULT
                 award_cap = data.get('response_award_cap', 0)
                 beaten = data.get('response_award_beaten')
                 total_ref = data.get('response_award_total_ref')
-                award_rank = data.get('response_award_rank', 1)
+                award_count = data.get('response_award_count', 0)
                 cap_note = ""
                 if award_cap > 0:
                     cap_note = "，已达上限" if data.get('response_award_capped') else f"，上限 {award_cap:g}"
                 if beaten is not None and total_ref:
                     details.append(f"响应速度奖：{response_award:.2f} USDT（公司总收益 × {award_rate*100:.1f}%，超过 {beaten}/{total_ref} 参考人{cap_note}）")
                 else:
-                    details.append(f"响应速度奖：{response_award:.2f} USDT（公司总收益 × {award_rate*100:.1f}%，响应速度第{award_rank}名{cap_note}）")
+                    details.append(f"响应速度奖：{response_award:.2f} USDT（公司总收益 × {award_rate*100:.1f}%，回复次数最多（{award_count}次）{cap_note}）")
 
             if loss_bear > 0:
                 details.append(f"承担亏损：{loss_bear:.2f} USDT")
@@ -914,7 +914,7 @@ async def profile_performance_menu(update: Update, context: ContextTypes.DEFAULT
         if ref_names:
             fee_parts.append(f"响应速度奖：{resp_award_rate*100:.1f}%（参考人：{ref_names}{unq_text}{cap_text}）")
         elif winner_name:
-            fee_parts.append(f"响应速度奖：{resp_award_rate*100:.1f}%（{winner_name}，响应第{company_fees.get('response_award_rank', 1)}名{cap_text}）")
+            fee_parts.append(f"响应速度奖：{resp_award_rate*100:.1f}%（{winner_name}，回复次数最多{company_fees.get('response_award_count', 0)}次{cap_text}）")
         else:
             fee_parts.append(f"响应速度奖：{resp_award_rate*100:.1f}%（本月无符合条件员工{cap_text}）")
     if fee_parts:
@@ -1368,14 +1368,14 @@ async def profile_performance_view_show(update: Update, context: ContextTypes.DE
                 award_cap = data.get('response_award_cap', 0)
                 beaten = data.get('response_award_beaten')
                 total_ref = data.get('response_award_total_ref')
-                award_rank = data.get('response_award_rank', 1)
+                award_count = data.get('response_award_count', 0)
                 cap_note = ""
                 if award_cap > 0:
                     cap_note = "，已达上限" if data.get('response_award_capped') else f"，上限 {award_cap:g}"
                 if beaten is not None and total_ref:
                     details.append(f"响应速度奖：{response_award:.2f} USDT（公司总收益 × {award_rate*100:.1f}%，超过 {beaten}/{total_ref} 参考人{cap_note}）")
                 else:
-                    details.append(f"响应速度奖：{response_award:.2f} USDT（公司总收益 × {award_rate*100:.1f}%，响应速度第{award_rank}名{cap_note}）")
+                    details.append(f"响应速度奖：{response_award:.2f} USDT（公司总收益 × {award_rate*100:.1f}%，回复次数最多（{award_count}次）{cap_note}）")
 
             if loss_bear > 0:
                 details.append(f"承担亏损：{loss_bear:.2f} USDT")
@@ -1417,7 +1417,7 @@ async def profile_performance_view_show(update: Update, context: ContextTypes.DE
         if ref_names:
             fee_parts.append(f"响应速度奖：{resp_award_rate*100:.1f}%（参考人：{ref_names}{unq_text}{cap_text}）")
         elif winner_name:
-            fee_parts.append(f"响应速度奖：{resp_award_rate*100:.1f}%（{winner_name}，响应第{company_fees.get('response_award_rank', 1)}名{cap_text}）")
+            fee_parts.append(f"响应速度奖：{resp_award_rate*100:.1f}%（{winner_name}，回复次数最多{company_fees.get('response_award_count', 0)}次{cap_text}）")
         else:
             fee_parts.append(f"响应速度奖：{resp_award_rate*100:.1f}%（本月无符合条件员工{cap_text}）")
     if fee_parts:
@@ -2023,7 +2023,7 @@ async def profile_performance_export_do(update: Update, context: ContextTypes.DE
                 company_fees[k] = company_fees.get(k, 0) + mf.get(k, 0)
             for k in ('channel_fee_emp', 'tech_fee_emp', 'response_award_emp',
                       'channel_fee_emp_name', 'tech_fee_emp_name', 'response_award_emp_name',
-                      'response_award_rank', 'avg_response_count',
+                      'response_award_rank', 'response_award_count', 'avg_response_count',
                       'response_award_cap', 'response_award_capped',
                       'response_award_ref_ids', 'response_award_ref_names',
                       'response_award_ref_unqualified_names', 'response_award_mode'):
@@ -2041,7 +2041,7 @@ async def profile_performance_export_do(update: Update, context: ContextTypes.DE
                         dst[k] = dst.get(k, False) or v
                     elif isinstance(v, (int, float)) and k not in (
                             'completion_rate', 'completion_factor', 'incentive_threshold', 'incentive_rate',
-                            'response_award_rank', 'channel_fee_rate', 'tech_fee_rate',
+                            'response_award_rank', 'response_award_count', 'channel_fee_rate', 'tech_fee_rate',
                             'response_award_rate', 'response_award_cap',
                             'response_award_beaten', 'response_award_total_ref'):
                         dst[k] = dst.get(k, 0) + v
@@ -2268,14 +2268,14 @@ def generate_performance_html(records, total_profit, employee_commission, employ
             award_cap = emp_data.get('response_award_cap', 0)
             beaten = emp_data.get('response_award_beaten')
             total_ref = emp_data.get('response_award_total_ref')
-            award_rank = emp_data.get('response_award_rank', 1)
+            award_count = emp_data.get('response_award_count', 0)
             cap_note = ""
             if award_cap > 0:
                 cap_note = "，已达上限" if emp_data.get('response_award_capped') else f"，上限 {award_cap:g}"
             if beaten is not None and total_ref:
                 details += f"<span class=\"employee-fee\">响应速度奖 {response_award:.2f} USDT（公司总收益 × {award_rate*100:.1f}%，超过 {beaten}/{total_ref} 参考人{cap_note}）</span>"
             else:
-                details += f"<span class=\"employee-fee\">响应速度奖 {response_award:.2f} USDT（公司总收益 × {award_rate*100:.1f}%，响应第{award_rank}名{cap_note}）</span>"
+                details += f"<span class=\"employee-fee\">响应速度奖 {response_award:.2f} USDT（公司总收益 × {award_rate*100:.1f}%，回复次数最多（{award_count}次）{cap_note}）</span>"
 
         if loss_bear > 0:
             details += f"<span class=\"employee-loss\">承担亏损 {loss_bear:.2f} USDT</span>"
@@ -2308,7 +2308,7 @@ def generate_performance_html(records, total_profit, employee_commission, employ
         if ref_names:
             fee_settings_parts.append(f"响应速度奖：{resp_award_rate*100:.1f}%（参考人：{ref_names}{unq_text}{cap_text}）")
         elif winner_name:
-            fee_settings_parts.append(f"响应速度奖：{resp_award_rate*100:.1f}%（{winner_name}，响应第{company_fees.get('response_award_rank', 1)}名{cap_text}）")
+            fee_settings_parts.append(f"响应速度奖：{resp_award_rate*100:.1f}%（{winner_name}，回复次数最多{company_fees.get('response_award_count', 0)}次{cap_text}）")
         else:
             fee_settings_parts.append(f"响应速度奖：{resp_award_rate*100:.1f}%（无符合条件员工{cap_text}）")
     fee_settings_html = f'<div class="settings-item">• 公司费用：{" | ".join(fee_settings_parts)}</div>' if fee_settings_parts else ''
@@ -4044,14 +4044,14 @@ async def profile_performance_menu(update: Update, context: ContextTypes.DEFAULT
                 award_cap = data.get('response_award_cap', 0)
                 beaten = data.get('response_award_beaten')
                 total_ref = data.get('response_award_total_ref')
-                award_rank = data.get('response_award_rank', 1)
+                award_count = data.get('response_award_count', 0)
                 cap_note = ""
                 if award_cap > 0:
                     cap_note = "，已达上限" if data.get('response_award_capped') else f"，上限 {award_cap:g}"
                 if beaten is not None and total_ref:
                     details.append(f"响应速度奖：{response_award:.2f} USDT（公司总收益 × {award_rate*100:.1f}%，超过 {beaten}/{total_ref} 参考人{cap_note}）")
                 else:
-                    details.append(f"响应速度奖：{response_award:.2f} USDT（公司总收益 × {award_rate*100:.1f}%，响应速度第{award_rank}名{cap_note}）")
+                    details.append(f"响应速度奖：{response_award:.2f} USDT（公司总收益 × {award_rate*100:.1f}%，回复次数最多（{award_count}次）{cap_note}）")
 
             if loss_bear > 0:
                 details.append(f"承担亏损：{loss_bear:.2f} USDT")
@@ -4093,7 +4093,7 @@ async def profile_performance_menu(update: Update, context: ContextTypes.DEFAULT
         if ref_names:
             fee_parts.append(f"响应速度奖：{resp_award_rate*100:.1f}%（参考人：{ref_names}{unq_text}{cap_text}）")
         elif winner_name:
-            fee_parts.append(f"响应速度奖：{resp_award_rate*100:.1f}%（{winner_name}，响应第{company_fees.get('response_award_rank', 1)}名{cap_text}）")
+            fee_parts.append(f"响应速度奖：{resp_award_rate*100:.1f}%（{winner_name}，回复次数最多{company_fees.get('response_award_count', 0)}次{cap_text}）")
         else:
             fee_parts.append(f"响应速度奖：{resp_award_rate*100:.1f}%（本月无符合条件员工{cap_text}）")
     if fee_parts:
@@ -4547,14 +4547,14 @@ async def profile_performance_view_show(update: Update, context: ContextTypes.DE
                 award_cap = data.get('response_award_cap', 0)
                 beaten = data.get('response_award_beaten')
                 total_ref = data.get('response_award_total_ref')
-                award_rank = data.get('response_award_rank', 1)
+                award_count = data.get('response_award_count', 0)
                 cap_note = ""
                 if award_cap > 0:
                     cap_note = "，已达上限" if data.get('response_award_capped') else f"，上限 {award_cap:g}"
                 if beaten is not None and total_ref:
                     details.append(f"响应速度奖：{response_award:.2f} USDT（公司总收益 × {award_rate*100:.1f}%，超过 {beaten}/{total_ref} 参考人{cap_note}）")
                 else:
-                    details.append(f"响应速度奖：{response_award:.2f} USDT（公司总收益 × {award_rate*100:.1f}%，响应速度第{award_rank}名{cap_note}）")
+                    details.append(f"响应速度奖：{response_award:.2f} USDT（公司总收益 × {award_rate*100:.1f}%，回复次数最多（{award_count}次）{cap_note}）")
 
             if loss_bear > 0:
                 details.append(f"承担亏损：{loss_bear:.2f} USDT")
@@ -4596,7 +4596,7 @@ async def profile_performance_view_show(update: Update, context: ContextTypes.DE
         if ref_names:
             fee_parts.append(f"响应速度奖：{resp_award_rate*100:.1f}%（参考人：{ref_names}{unq_text}{cap_text}）")
         elif winner_name:
-            fee_parts.append(f"响应速度奖：{resp_award_rate*100:.1f}%（{winner_name}，响应第{company_fees.get('response_award_rank', 1)}名{cap_text}）")
+            fee_parts.append(f"响应速度奖：{resp_award_rate*100:.1f}%（{winner_name}，回复次数最多{company_fees.get('response_award_count', 0)}次{cap_text}）")
         else:
             fee_parts.append(f"响应速度奖：{resp_award_rate*100:.1f}%（本月无符合条件员工{cap_text}）")
     if fee_parts:
@@ -5202,7 +5202,7 @@ async def profile_performance_export_do(update: Update, context: ContextTypes.DE
                 company_fees[k] = company_fees.get(k, 0) + mf.get(k, 0)
             for k in ('channel_fee_emp', 'tech_fee_emp', 'response_award_emp',
                       'channel_fee_emp_name', 'tech_fee_emp_name', 'response_award_emp_name',
-                      'response_award_rank', 'avg_response_count',
+                      'response_award_rank', 'response_award_count', 'avg_response_count',
                       'response_award_cap', 'response_award_capped',
                       'response_award_ref_ids', 'response_award_ref_names',
                       'response_award_ref_unqualified_names', 'response_award_mode'):
@@ -5220,7 +5220,7 @@ async def profile_performance_export_do(update: Update, context: ContextTypes.DE
                         dst[k] = dst.get(k, False) or v
                     elif isinstance(v, (int, float)) and k not in (
                             'completion_rate', 'completion_factor', 'incentive_threshold', 'incentive_rate',
-                            'response_award_rank', 'channel_fee_rate', 'tech_fee_rate',
+                            'response_award_rank', 'response_award_count', 'channel_fee_rate', 'tech_fee_rate',
                             'response_award_rate', 'response_award_cap',
                             'response_award_beaten', 'response_award_total_ref'):
                         dst[k] = dst.get(k, 0) + v
@@ -5447,14 +5447,14 @@ def generate_performance_html(records, total_profit, employee_commission, employ
             award_cap = emp_data.get('response_award_cap', 0)
             beaten = emp_data.get('response_award_beaten')
             total_ref = emp_data.get('response_award_total_ref')
-            award_rank = emp_data.get('response_award_rank', 1)
+            award_count = emp_data.get('response_award_count', 0)
             cap_note = ""
             if award_cap > 0:
                 cap_note = "，已达上限" if emp_data.get('response_award_capped') else f"，上限 {award_cap:g}"
             if beaten is not None and total_ref:
                 details += f"<span class=\"employee-fee\">响应速度奖 {response_award:.2f} USDT（公司总收益 × {award_rate*100:.1f}%，超过 {beaten}/{total_ref} 参考人{cap_note}）</span>"
             else:
-                details += f"<span class=\"employee-fee\">响应速度奖 {response_award:.2f} USDT（公司总收益 × {award_rate*100:.1f}%，响应第{award_rank}名{cap_note}）</span>"
+                details += f"<span class=\"employee-fee\">响应速度奖 {response_award:.2f} USDT（公司总收益 × {award_rate*100:.1f}%，回复次数最多（{award_count}次）{cap_note}）</span>"
 
         if loss_bear > 0:
             details += f"<span class=\"employee-loss\">承担亏损 {loss_bear:.2f} USDT</span>"
@@ -5487,7 +5487,7 @@ def generate_performance_html(records, total_profit, employee_commission, employ
         if ref_names:
             fee_settings_parts.append(f"响应速度奖：{resp_award_rate*100:.1f}%（参考人：{ref_names}{unq_text}{cap_text}）")
         elif winner_name:
-            fee_settings_parts.append(f"响应速度奖：{resp_award_rate*100:.1f}%（{winner_name}，响应第{company_fees.get('response_award_rank', 1)}名{cap_text}）")
+            fee_settings_parts.append(f"响应速度奖：{resp_award_rate*100:.1f}%（{winner_name}，回复次数最多{company_fees.get('response_award_count', 0)}次{cap_text}）")
         else:
             fee_settings_parts.append(f"响应速度奖：{resp_award_rate*100:.1f}%（无符合条件员工{cap_text}）")
     fee_settings_html = f'<div class="settings-item">• 公司费用：{" | ".join(fee_settings_parts)}</div>' if fee_settings_parts else ''
