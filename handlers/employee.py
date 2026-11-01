@@ -986,7 +986,7 @@ def _render_company_fee_menu(settings):
         f"技术费：{tech_text}\n"
         f"响应速度奖：{resp_text}\n\n"
         "费用金额 = 公司总收益 × 比例\n"
-        "响应速度奖：设置参考人后，参评员工响应次数达到全体平均值，再按击败参考人数比例获奖（击败全部=全额，击败半数=50%；参考人自己次数未达标视为自动被超过）；未设参考人则发给当月响应第一名"
+        "响应速度奖：参评员工响应次数需达到全体平均值；设参考人时还需至少击败 1 名参考人，并按击败参考人数比例获奖（击败全部=全额，击败半数=50%；参考人自己次数未达标视为自动被超过）。条件全部达标后，奖励发给当月有效回复次数最多的一人（次数相同则响应更快者优先）；未设参考人时同样按此规则发放"
     )
 
     keyboard = [
@@ -1037,7 +1037,7 @@ async def fee_config_menu(update: Update, context: CallbackContext):
                 if rid.isdigit():
                     op_info = operators.get(int(rid), {})
                     ref_names.append(op_info.get('first_name', op_info.get('username', f"员工{rid}")))
-        ref_text = '、'.join(ref_names) if ref_names else "未设置（使用第一名逻辑）"
+        ref_text = '、'.join(ref_names) if ref_names else "未设置（使用回复次数最多逻辑）"
 
         keyboard = [
             [InlineKeyboardButton("设置比例", callback_data='employee_feecfg_response_rate')],
@@ -1142,7 +1142,7 @@ async def _render_ref_select(update: Update, context: CallbackContext):
     for sid in sorted(selected):
         op_info = operators.get(sid, {})
         sel_names.append(op_info.get('first_name', f"员工{sid}"))
-    sel_text = '、'.join(sel_names) if sel_names else "无（将使用第一名逻辑）"
+    sel_text = '、'.join(sel_names) if sel_names else "无（将使用回复次数最多逻辑）"
 
     keyboard.append([InlineKeyboardButton("清空全部", callback_data='employee_fee_ref_clear')])
     keyboard.append([InlineKeyboardButton("✅ 完成", callback_data='employee_fee_ref_done'),
@@ -1199,7 +1199,7 @@ async def fee_ref_done(update: Update, context: CallbackContext):
             names = [operators.get(i, {}).get('first_name', f"员工{i}") for i in sorted(selected)]
             await query.message.reply_text(f"✅ 响应速度奖参考人已设置：{'、'.join(names)}")
         else:
-            await query.message.reply_text("✅ 已清空响应速度奖参考人（将使用第一名逻辑）")
+            await query.message.reply_text("✅ 已清空响应速度奖参考人（将使用回复次数最多逻辑）")
         # 返回公司费用设置菜单
         return await company_fee_menu(update, context)
 
